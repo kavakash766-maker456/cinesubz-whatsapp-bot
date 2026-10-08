@@ -292,6 +292,7 @@ async function downloadFile(url, destPath, onProgress) {
 }
 
 // --------------------------------------------------------------------------
+// --------------------------------------------------------------------------
 // 6. Queue Processing Loop (Handles Single Movie OR Full TV Series Season)
 // --------------------------------------------------------------------------
 async function processQueue() {
@@ -319,6 +320,17 @@ async function processQueue() {
   logger.info(
     `[Queue Engine] Processing task for ${pushName}: ${movieUrl} | Type=${isSeriesSeason ? `Series S${seasonNumber}` : "Movie"} | Remaining in queue: ${requestQueue.length}`
   );
+
+  // Helper function to broadcast message to all active groups
+  const broadcastToGroups = async (payload) => {
+    for (const jid of TARGET_GROUP_JIDS) {
+      try {
+        await waSocket.sendMessage(jid, payload);
+      } catch (err) {
+        logger.error({ err, jid }, `Failed sending to group ${jid}`);
+      }
+    }
+  };
 
   try {
     // ----------------------------------------------------------------------
@@ -374,17 +386,6 @@ async function processQueue() {
 ⚡ *Subtitle:* Sinhala Subtitles Included
 ━━━━━━━━━━━━━━━━━━━━
 📥 _Episode 1 සිට ${totalEpisodes} දක්වා පිළිවෙළින් බාගත වී Group එකට Upload වනු ඇත!_`;
-
-      // Function to broadcast message to all active groups
-      const broadcastToGroups = async (payload) => {
-        for (const jid of TARGET_GROUP_JIDS) {
-          try {
-            await waSocket.sendMessage(jid, payload);
-          } catch (err) {
-            logger.error({ err, jid }, `Failed sending to group ${jid}`);
-          }
-        }
-      };
 
       if (posterUrl) {
         await broadcastToGroups({
