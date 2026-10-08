@@ -1,0 +1,32 @@
+{
+  "users": {
+    "user_admin_01": {
+      "id": "user_admin_01",
+      "name": "Akash (Owner)",
+      "email": "akash@filmfeed.app",
+      "phone": "0760372547",
+      "deviceId": "dev_admin_master",
+      "coins": 9999,
+      "isVip": true,
+      "createdAt": "2026-10-08T19:02:16.893Z",
+      "lastLoginAt": "2026-10-08T19:02:16.893Z"
+    },
+    "usr_zm0oc7ug": {
+      "id": "usr_zm0oc7ug",
+      "name": "akash kav",
+      "email": "kavakash766@gmail.com",
+      "image": "https://lh3.googleusercontent.com/a/ACg8ocKLmbZo92n01kRsHlR7SKkdMT2HKT0udTX-Zdco8nsGehrE2g=s96-c",
+      "phone": "",
+      "deviceId": "dev_x9vbzfnwwq_muzwkgjj",
+      "coins": 50,
+      "isVip": false,
+      "createdAt": "2026-10-08T19:02:17.148Z",
+      "lastLoginAt": "2026-10-08T19:02:17.149Z"
+    }
+  },
+  "deviceMap": {
+    "dev_admin_master": "user_admin_01",
+    "dev_x9vbzfnwwq_muzwkgjj": "usr_zm0oc7ug"
+  },
+  "requests": []
+}
