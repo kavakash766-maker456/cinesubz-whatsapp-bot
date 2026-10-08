@@ -15,7 +15,11 @@ const axios = require("axios");
 
 const PORT = process.env.PORT || 7860;
 const BOT_PHONE = process.env.BOT_PHONE || "94760372547";
-const TARGET_GROUP_JID = process.env.TARGET_GROUP_JID || "120363419930344447@g.us";
+const TARGET_GROUP_JIDS = (process.env.TARGET_GROUP_JIDS || "120363419930344447@g.us,120363428509877949@g.us")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const TARGET_GROUP_JID = TARGET_GROUP_JIDS[0];
 const AUTH_DIR = process.env.AUTH_DIR || path.join(__dirname, "../auth_info");
 const TEMP_DIR = path.join(__dirname, "../temp");
 const STATS_FILE = path.join(AUTH_DIR, "user_stats.json");
@@ -371,14 +375,25 @@ async function processQueue() {
 ━━━━━━━━━━━━━━━━━━━━
 📥 _Episode 1 සිට ${totalEpisodes} දක්වා පිළිවෙළින් බාගත වී Group එකට Upload වනු ඇත!_`;
 
+      // Function to broadcast message to all active groups
+      const broadcastToGroups = async (payload) => {
+        for (const jid of TARGET_GROUP_JIDS) {
+          try {
+            await waSocket.sendMessage(jid, payload);
+          } catch (err) {
+            logger.error({ err, jid }, `Failed sending to group ${jid}`);
+          }
+        }
+      };
+
       if (posterUrl) {
-        await waSocket.sendMessage(TARGET_GROUP_JID, {
+        await broadcastToGroups({
           image: { url: posterUrl },
           caption: seasonCaption,
           mentions: mentionsList,
         });
       } else {
-        await waSocket.sendMessage(TARGET_GROUP_JID, {
+        await broadcastToGroups({
           text: seasonCaption,
           mentions: mentionsList,
         });
@@ -414,8 +429,8 @@ async function processQueue() {
 
           await downloadFile(directUrl, tempFilePath);
 
-          // Upload Episode Document to Group
-          await waSocket.sendMessage(TARGET_GROUP_JID, {
+          // Upload Episode Document to All Groups
+          await broadcastToGroups({
             document: fs.readFileSync(tempFilePath),
             mimetype: "video/mp4",
             fileName: `${epTitle} [${resolvedQuality}] [FilmFeed].mp4`,
@@ -517,15 +532,15 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
 
 📥 _චිත්‍රපටය බාගත වෙමින් පවතී... ස්වල්ප වේලාවකින් Document එකක් ලෙස Group එකට Upload වනු ඇත!_`;
 
-      // 1. Send Poster
+      // 1. Send Poster to all groups
       if (posterUrl) {
-        await waSocket.sendMessage(TARGET_GROUP_JID, {
+        await broadcastToGroups({
           image: { url: posterUrl },
           caption: caption,
           mentions: mentionsList,
         });
       } else {
-        await waSocket.sendMessage(TARGET_GROUP_JID, {
+        await broadcastToGroups({
           text: caption,
           mentions: mentionsList,
         });
@@ -544,10 +559,10 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
         }
       });
 
-      logger.info(`Download complete. Uploading document to WhatsApp group ${TARGET_GROUP_JID}...`);
+      logger.info(`Download complete. Uploading document to WhatsApp groups...`);
 
-      // 3. Upload Document
-      await waSocket.sendMessage(TARGET_GROUP_JID, {
+      // 3. Upload Document to all groups
+      await broadcastToGroups({
         document: fs.readFileSync(tempFilePath),
         mimetype: "video/mp4",
         fileName: `${title} [${resolvedQuality}] [FilmFeed].mp4`,
