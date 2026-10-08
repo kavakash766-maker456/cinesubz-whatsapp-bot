@@ -42,7 +42,7 @@ const server = http.createServer((req, res) => {
     res.end(`
       <!DOCTYPE html>
       <html>
-      <head><title>CineHub Bot Status</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+      <head><title>FilmFeed Bot Status</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
       <body style="background:#0a0c14;color:#fff;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;margin:0;">
         <div style="background:#121624;padding:30px;border-radius:20px;border:1px solid #25D366;text-align:center;">
           <h1 style="color:#25D366;margin:0 0 10px 0;">✅ WhatsApp Bot is Connected & Online!</h1>
@@ -57,7 +57,7 @@ const server = http.createServer((req, res) => {
     res.end(`
       <!DOCTYPE html>
       <html>
-      <head><title>Scan QR - CineHub Bot</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+      <head><title>Scan QR - FilmFeed Bot</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
       <body style="background:#0a0c14;color:#fff;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:20px;">
         <div style="background:#121624;padding:30px;border-radius:20px;border:1px solid rgba(255,255,255,0.1);text-align:center;max-width:450px;">
           <h2 style="color:#25D366;margin:0 0 10px 0;">📲 Scan QR Code to Link WhatsApp</h2>
@@ -75,7 +75,7 @@ const server = http.createServer((req, res) => {
     res.end(`
       <!DOCTYPE html>
       <html>
-      <head><title>CineHub Bot</title><meta http-equiv="refresh" content="5"></head>
+      <head><title>FilmFeed Bot</title><meta http-equiv="refresh" content="5"></head>
       <body style="background:#0a0c14;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
         <p style="color:#aaa;">⏳ Initializing WhatsApp Engine, please wait...</p>
       </body>
@@ -189,7 +189,7 @@ async function startBot() {
     printQRInTerminal: false,
     auth: state,
     generateHighQualityLinkPreview: true,
-    browser: ["CineHub Downloader", "Chrome", "1.0.0"],
+    browser: ["FilmFeed Downloader", "Chrome", "1.0.0"],
     keepAliveIntervalMs: 25000, // keep socket connection alive
   });
 
@@ -257,14 +257,14 @@ async function startBot() {
 
       try {
         await sock.sendMessage(replyTarget, {
-          text: `⏳ *[CineHub Auto-Bot]*\n\nචිත්‍රපට ඉල්ලීම ලැබුණා! High-speed ඩවුන්ලෝඩ් ලින්ක් එක සකසමින් පවතී...\n🔗 Token: *${token}*\n📺 Quality: *${quality}*`,
+          text: `⏳ *[FilmFeed Auto-Bot]*\n\nචිත්‍රපට ඉල්ලීම ලැබුණා! High-speed ඩවුන්ලෝඩ් ලින්ක් එක සකසමින් පවතී...\n🔗 Token: *${token}*\n📺 Quality: *${quality}*`,
         });
 
         const movieData = await resolveMovie(movieUrl, quality);
 
         if (!movieData.success || !movieData.direct_url) {
           await sock.sendMessage(replyTarget, {
-            text: `❌ *[CineHub Auto-Bot]* Error: ${movieData.error || "චිත්‍රපට ලින්ක් එක ලබා ගැනීමට නොහැකි විය."}`,
+            text: `❌ *[FilmFeed Auto-Bot]* Error: ${movieData.error || "චිත්‍රපට ලින්ක් එක ලබා ගැනීමට නොහැකි විය."}`,
           });
           continue;
         }
@@ -283,7 +283,7 @@ async function startBot() {
 ⚡ *Subtitle:* Sinhala Subtitles Included
 ━━━━━━━━━━━━━━━━━━━━
 📝 *Storyline / සාරාංශය:*
-${movieData.description ? movieData.description.substring(0, 450) + "..." : "CineHub Direct Release"}
+${movieData.description ? movieData.description.substring(0, 450) + "..." : "FilmFeed Direct Release"}
 
 📥 _Movie Document එක ඩවුන්ලෝඩ් වෙමින් පවතී... ස්වල්ප වේලාවකින් මෙහි upload වනු ඇත!_`;
 
@@ -315,8 +315,8 @@ ${movieData.description ? movieData.description.substring(0, 450) + "..." : "Cin
         await sock.sendMessage(TARGET_GROUP_JID, {
           document: fs.readFileSync(tempFilePath),
           mimetype: "video/mp4",
-          fileName: `${title} [${resolvedQuality}] [CineHub].mp4`,
-          caption: `✅ *${title}* (${resolvedQuality})\n✨ Uploaded by CineHub Auto-Bot`,
+          fileName: `${title} [${resolvedQuality}] [FilmFeed].mp4`,
+          caption: `✅ *${title}* (${resolvedQuality})\n✨ Uploaded by FilmFeed Auto-Bot`,
         });
 
         // 4. Immediately Delete file from Disk
