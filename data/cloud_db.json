@@ -17,16 +17,17 @@
       "email": "kavakash766@gmail.com",
       "image": "https://lh3.googleusercontent.com/a/ACg8ocKLmbZo92n01kRsHlR7SKkdMT2HKT0udTX-Zdco8nsGehrE2g=s96-c",
       "phone": "",
-      "deviceId": "dev_x9vbzfnwwq_muzwkgjj",
+      "deviceId": "dev_2dybax2r01_muzwxobo",
       "coins": 50,
       "isVip": false,
       "createdAt": "2026-10-08T19:02:17.148Z",
-      "lastLoginAt": "2026-10-08T19:02:17.149Z"
+      "lastLoginAt": "2026-10-08T19:12:11.710Z"
     }
   },
   "deviceMap": {
     "dev_admin_master": "user_admin_01",
-    "dev_x9vbzfnwwq_muzwkgjj": "usr_zm0oc7ug"
+    "dev_x9vbzfnwwq_muzwkgjj": "usr_zm0oc7ug",
+    "dev_2dybax2r01_muzwxobo": "usr_zm0oc7ug"
   },
   "requests": []
 }
