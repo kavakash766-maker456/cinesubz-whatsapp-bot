@@ -102,13 +102,13 @@ const server = http.createServer((req, res) => {
       <!DOCTYPE html>
       <html>
       <head><title>FilmFeed Bot Status</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
-      <body style="background:#0a0c14;color:#fff;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;margin:0;">
-        <div style="background:#121624;padding:30px;border-radius:20px;border:1px solid #25D366;text-align:center;">
-          <h1 style="color:#25D366;margin:0 0 10px 0;">✅ FilmFeed Bot is Connected & Online!</h1>
+      <body style="background:#000000;color:#fff;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;margin:0;">
+        <div style="background:#111;padding:30px;border-radius:20px;border:1px solid #333;text-align:center;">
+          <h1 style="color:#fff;margin:0 0 10px 0;">FILMFEED 4K BOT ONLINE</h1>
           <p style="color:#aaa;">Bot Number: <b>${BOT_PHONE}</b></p>
           <p style="color:#aaa;">Target Group: <b>${TARGET_GROUP_JID}</b></p>
           <p style="color:#aaa;">Queue Items: <b>${requestQueue.length}</b></p>
-          <div style="margin-top:20px;padding:10px 20px;background:#25D366;color:#000;border-radius:10px;font-weight:bold;">Status: 24/7 FIFO Queue Active</div>
+          <div style="margin-top:20px;padding:10px 20px;background:#fff;color:#000;border-radius:10px;font-weight:bold;">Status: TV Series Batch & Movie Engine Active</div>
         </div>
       </body>
       </html>
@@ -118,9 +118,9 @@ const server = http.createServer((req, res) => {
       <!DOCTYPE html>
       <html>
       <head><title>Scan QR - FilmFeed Bot</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
-      <body style="background:#0a0c14;color:#fff;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:20px;">
-        <div style="background:#121624;padding:30px;border-radius:20px;border:1px solid rgba(255,255,255,0.1);text-align:center;max-width:450px;">
-          <h2 style="color:#25D366;margin:0 0 10px 0;">📲 Scan QR Code to Link WhatsApp</h2>
+      <body style="background:#000000;color:#fff;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:20px;">
+        <div style="background:#111;padding:30px;border-radius:20px;border:1px solid #333;text-align:center;max-width:450px;">
+          <h2 style="color:#fff;margin:0 0 10px 0;">📲 Scan QR Code to Link WhatsApp</h2>
           <p style="color:#bbb;font-size:14px;">Open WhatsApp on <b>${BOT_PHONE}</b> &gt; Linked Devices &gt; Link a Device and scan the QR code below:</p>
           <div style="margin:20px 0;background:#fff;padding:15px;border-radius:12px;display:inline-block;">
             <img src="https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(latestQR)}" alt="WhatsApp QR Code" style="display:block;" />
@@ -136,7 +136,7 @@ const server = http.createServer((req, res) => {
       <!DOCTYPE html>
       <html>
       <head><title>FilmFeed Bot</title><meta http-equiv="refresh" content="5"></head>
-      <body style="background:#0a0c14;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+      <body style="background:#000000;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
         <p style="color:#aaa;">⏳ Initializing WhatsApp Engine, please wait...</p>
       </body>
       </html>
@@ -170,7 +170,7 @@ function setupKeepAlivePing() {
 setupKeepAlivePing();
 
 // --------------------------------------------------------------------------
-// 3. Movie Resolver
+// 3. Movie & Series Resolver Helpers
 // --------------------------------------------------------------------------
 async function resolveMovie(movieUrl, quality) {
   return new Promise((resolve, reject) => {
@@ -197,8 +197,30 @@ async function resolveMovie(movieUrl, quality) {
   });
 }
 
+async function resolveSeriesEpisodes(seriesUrl) {
+  return new Promise((resolve, reject) => {
+    const resolverScript = path.join(__dirname, "../resolver.py");
+    const args = [seriesUrl, "--episodes"];
+
+    const pythonCmd = process.platform === "win32" ? "python" : "python3";
+    execFile(pythonCmd, [resolverScript, ...args], { maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) {
+        logger.error({ err, stderr }, "Series episodes resolver error");
+        return reject(err);
+      }
+      try {
+        const data = JSON.parse(stdout);
+        resolve(data);
+      } catch (parseErr) {
+        logger.error({ stdout, stderr }, "Failed to parse series episodes JSON");
+        reject(parseErr);
+      }
+    });
+  });
+}
+
 // --------------------------------------------------------------------------
-// 4. Inspect File Size via Ranged Request before Downloading
+// 4. File Size Inspection via Ranged Request
 // --------------------------------------------------------------------------
 async function checkFileSize(url) {
   try {
@@ -230,7 +252,7 @@ async function checkFileSize(url) {
 }
 
 // --------------------------------------------------------------------------
-// 5. File Downloader with streaming
+// 5. File Downloader
 // --------------------------------------------------------------------------
 async function downloadFile(url, destPath, onProgress) {
   const writer = fs.createWriteStream(destPath);
@@ -266,7 +288,7 @@ async function downloadFile(url, destPath, onProgress) {
 }
 
 // --------------------------------------------------------------------------
-// 6. Queue Processing Loop (One Movie at a Time)
+// 6. Queue Processing Loop (Handles Single Movie OR Full TV Series Season)
 // --------------------------------------------------------------------------
 async function processQueue() {
   if (isProcessingQueue || requestQueue.length === 0 || !waSocket) return;
@@ -275,50 +297,192 @@ async function processQueue() {
   const currentTask = requestQueue.shift();
   currentProcessingItem = currentTask;
 
-  const { movieUrl, quality, token, replyTarget, requesterJid, pushName, mentionTag, mentionsList, userStats } = currentTask;
+  const {
+    isSeriesSeason,
+    seasonNumber,
+    movieUrl,
+    quality,
+    token,
+    replyTarget,
+    requesterJid,
+    pushName,
+    mentionTag,
+    mentionsList,
+    userStats,
+  } = currentTask;
   const { count, badge } = userStats;
 
-  logger.info(`[Queue Engine] Starting task for ${pushName}: ${movieUrl} (${quality}) | Remaining in queue: ${requestQueue.length}`);
+  logger.info(
+    `[Queue Engine] Processing task for ${pushName}: ${movieUrl} | Type=${isSeriesSeason ? `Series S${seasonNumber}` : "Movie"} | Remaining in queue: ${requestQueue.length}`
+  );
 
   try {
-    // Notify requester that their processing has officially started
-    await waSocket.sendMessage(replyTarget, {
-      text: `🚀 *[FilmFeed Auto-Bot]*\n\n*${pushName}*, ඔබගේ වාරය පැමිණියා! චිත්‍රපටය බාගත කිරීම දැන් ආරම්භ වේ...\n\n📺 Quality: *${quality}*\n🔑 Token: *${token}*`,
-      mentions: mentionsList,
-    });
-
-    // Resolve Movie details
-    const movieData = await resolveMovie(movieUrl, quality);
-
-    if (!movieData.success || !movieData.direct_url) {
+    // ----------------------------------------------------------------------
+    // MODE A: TV SERIES SEASON BATCH (Processes All Episodes Sequentially)
+    // ----------------------------------------------------------------------
+    if (isSeriesSeason) {
       await waSocket.sendMessage(replyTarget, {
-        text: `❌ *[FilmFeed Auto-Bot]* Error: ${movieData.error || "චිත්‍රපට ලින්ක් එක ලබා ගැනීමට නොහැකි විය."}`,
+        text: `🚀 *[FilmFeed TV Series Engine]*\n\n*${pushName}*, ඔබ ඉල්ලූ Season ${seasonNumber} පැක් එක සැකසීම ආරම්භ විය!\nසියලුම Episodes එකින් එක Download වී Group එකට Upload වනු ඇත.`,
+        mentions: mentionsList,
       });
-      isProcessingQueue = false;
-      currentProcessingItem = null;
-      processQueue();
-      return;
-    }
 
-    const title = movieData.title || "Movie";
-    const posterUrl = movieData.poster || movieData.backdrop;
-    const directUrl = movieData.direct_url;
-    const resolvedQuality = movieData.quality || quality;
+      const seriesData = await resolveSeriesEpisodes(movieUrl);
+      let episodes = seriesData.episodes || [];
 
-    // 2GB Size Check BEFORE download
-    logger.info(`Checking file size for ${title}...`);
-    const verifiedSize = await checkFileSize(directUrl);
-    const actualBytes =
-      verifiedSize ||
-      (movieData.size_text && movieData.size_text.includes("GB")
-        ? parseFloat(movieData.size_text) * 1024 * 1024 * 1024
-        : 0);
+      // Filter by requested season if season number given
+      if (seasonNumber) {
+        const seasonEps = episodes.filter((ep) => ep.season === seasonNumber);
+        if (seasonEps.length > 0) episodes = seasonEps;
+      }
 
-    if (actualBytes > MAX_FILE_SIZE_BYTES) {
-      const sizeInGB = (actualBytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
-      logger.warn(`Movie ${title} size (${sizeInGB}) exceeds 2GB limit! Skipping download.`);
+      if (episodes.length === 0) {
+        // Fallback: try single resolve
+        const singleData = await resolveMovie(movieUrl, quality);
+        if (singleData.success) {
+          episodes = [{ season: seasonNumber || 1, episode: 1, title: singleData.title, url: movieUrl }];
+        }
+      }
 
-      const sizeAlertMsg = 
+      if (episodes.length === 0) {
+        await waSocket.sendMessage(replyTarget, {
+          text: `❌ *[FilmFeed TV Series]* Season ${seasonNumber} සඳහා Episodes සොයාගත නොහැකි විය.`,
+        });
+        isProcessingQueue = false;
+        currentProcessingItem = null;
+        processQueue();
+        return;
+      }
+
+      const showTitle = seriesData.title || "TV Series";
+      const posterUrl = seriesData.poster || seriesData.backdrop;
+      const totalEpisodes = episodes.length;
+
+      // Send Season Overview Poster to WhatsApp Group
+      const seasonCaption = 
+`🎬 *${showTitle} (Season ${seasonNumber})*
+━━━━━━━━━━━━━━━━━━━━
+📦 *Pack Type:* Complete Season Batch
+🔢 *Total Episodes:* ${totalEpisodes} Episodes
+👤 *Requested By:* ${mentionTag} (${pushName})
+🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
+🌟 *Quality:* ${quality}
+🔑 *Token:* ${token || "VIP_SEASON"}
+⚡ *Subtitle:* Sinhala Subtitles Included
+━━━━━━━━━━━━━━━━━━━━
+📥 _Episode 1 සිට ${totalEpisodes} දක්වා පිළිවෙළින් බාගත වී Group එකට Upload වනු ඇත!_`;
+
+      if (posterUrl) {
+        await waSocket.sendMessage(TARGET_GROUP_JID, {
+          image: { url: posterUrl },
+          caption: seasonCaption,
+          mentions: mentionsList,
+        });
+      } else {
+        await waSocket.sendMessage(TARGET_GROUP_JID, {
+          text: seasonCaption,
+          mentions: mentionsList,
+        });
+      }
+
+      // Download and Upload each episode 1 by 1
+      let uploadedCount = 0;
+      for (let i = 0; i < episodes.length; i++) {
+        const ep = episodes[i];
+        const epIndex = i + 1;
+        logger.info(`Resolving and downloading episode ${epIndex}/${totalEpisodes}: ${ep.title} (${ep.url})`);
+
+        try {
+          const epData = await resolveMovie(ep.url, quality);
+          if (!epData.success || !epData.direct_url) {
+            logger.warn(`Skipping episode ${epIndex} (${ep.title}): ${epData.error || "No direct link"}`);
+            continue;
+          }
+
+          const epTitle = epData.title || ep.title || `Episode ${epIndex}`;
+          const directUrl = epData.direct_url;
+          const resolvedQuality = epData.quality || quality;
+
+          // Check 2GB Limit
+          const verifiedSize = await checkFileSize(directUrl);
+          if (verifiedSize && verifiedSize > MAX_FILE_SIZE_BYTES) {
+            logger.warn(`Episode ${epTitle} exceeds 2GB limit! Skipping.`);
+            continue;
+          }
+
+          const safeName = epTitle.replace(/[^a-zA-Z0-9_-]/g, "_") + `_${resolvedQuality}.mp4`;
+          const tempFilePath = path.join(TEMP_DIR, `${Date.now()}_${safeName}`);
+
+          await downloadFile(directUrl, tempFilePath);
+
+          // Upload Episode Document to Group
+          await waSocket.sendMessage(TARGET_GROUP_JID, {
+            document: fs.readFileSync(tempFilePath),
+            mimetype: "video/mp4",
+            fileName: `${epTitle} [${resolvedQuality}] [FilmFeed].mp4`,
+            caption: `✅ *${epTitle}* (${resolvedQuality})\n👤 Requested By: ${mentionTag}\n📦 Season ${seasonNumber} Pack [${epIndex}/${totalEpisodes} Episodes]\n✨ Uploaded by FilmFeed Auto-Bot`,
+            mentions: mentionsList,
+          });
+
+          uploadedCount++;
+
+          // Delete temp file immediately
+          if (fs.existsSync(tempFilePath)) {
+            fs.unlinkSync(tempFilePath);
+          }
+
+          // Small cooldown between episodes
+          await new Promise((r) => setTimeout(r, 2000));
+        } catch (epErr) {
+          logger.error({ epErr }, `Error downloading episode ${epIndex}`);
+        }
+      }
+
+      // Final Season Completion Notification
+      await waSocket.sendMessage(replyTarget, {
+        text: `🎉 *[FilmFeed TV Series]* සම්පූර්ණයි!\n*${pushName}*, ඔබ ඉල්ලූ *${showTitle}* (Season ${seasonNumber}) හි Episodes ${uploadedCount}/${totalEpisodes} සාර්ථකව WhatsApp Group එකට Upload කරන ලදී. 🍿 Enjoy!`,
+        mentions: mentionsList,
+      });
+
+    } else {
+      // ----------------------------------------------------------------------
+      // MODE B: SINGLE MOVIE PROCESSING
+      // ----------------------------------------------------------------------
+      await waSocket.sendMessage(replyTarget, {
+        text: `🚀 *[FilmFeed Auto-Bot]*\n\n*${pushName}*, ඔබගේ වාරය පැමිණියා! චිත්‍රපටය බාගත කිරීම දැන් ආරම්භ වේ...\n\n📺 Quality: *${quality}*\n🔑 Token: *${token}*`,
+        mentions: mentionsList,
+      });
+
+      const movieData = await resolveMovie(movieUrl, quality);
+
+      if (!movieData.success || !movieData.direct_url) {
+        await waSocket.sendMessage(replyTarget, {
+          text: `❌ *[FilmFeed Auto-Bot]* Error: ${movieData.error || "චිත්‍රපට ලින්ක් එක ලබා ගැනීමට නොහැකි විය."}`,
+        });
+        isProcessingQueue = false;
+        currentProcessingItem = null;
+        processQueue();
+        return;
+      }
+
+      const title = movieData.title || "Movie";
+      const posterUrl = movieData.poster || movieData.backdrop;
+      const directUrl = movieData.direct_url;
+      const resolvedQuality = movieData.quality || quality;
+
+      // 2GB Size Check BEFORE download
+      logger.info(`Checking file size for ${title}...`);
+      const verifiedSize = await checkFileSize(directUrl);
+      const actualBytes =
+        verifiedSize ||
+        (movieData.size_text && movieData.size_text.includes("GB")
+          ? parseFloat(movieData.size_text) * 1024 * 1024 * 1024
+          : 0);
+
+      if (actualBytes > MAX_FILE_SIZE_BYTES) {
+        const sizeInGB = (actualBytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+        logger.warn(`Movie ${title} size (${sizeInGB}) exceeds 2GB limit! Skipping download.`);
+
+        const sizeAlertMsg = 
 `⚠️ *[FilmFeed Auto-Bot] ගොනු විශාලත්ව සීමාව (2GB Limit)*
 
 ආයුබෝවන් *${pushName}*,
@@ -328,18 +492,18 @@ async function processQueue() {
 WhatsApp මඟින් Document එකක් ලෙස එකවර යැවිය හැක්කේ උපරිම *2.00 GB* දක්වා ගොනු පමණි.
 
 💡 *විසඳුම:*
-කරුණාකර පහත වෙබ් අඩවියට ගොස් *720p* හෝ *480p* Quality එක (2GB ට අඩු) තෝරා නැවත Request කරන්න:
+කරුණාකර වෙබ් අඩවියෙන් *720p* හෝ *480p* Quality එක (2GB ට අඩු) තෝරා නැවත Request කරන්න:
 👉 https://web-umber-six-e1un7z6257.vercel.app`;
 
-      await waSocket.sendMessage(replyTarget, { text: sizeAlertMsg });
-      isProcessingQueue = false;
-      currentProcessingItem = null;
-      processQueue();
-      return;
-    }
+        await waSocket.sendMessage(replyTarget, { text: sizeAlertMsg });
+        isProcessingQueue = false;
+        currentProcessingItem = null;
+        processQueue();
+        return;
+      }
 
-    // Advanced Poster Caption with Mention and Analytics
-    const caption = 
+      // Poster Caption
+      const caption = 
 `🎬 *${title}*
 ━━━━━━━━━━━━━━━━━━━━
 👤 *Requested By:* ${mentionTag} (${pushName})
@@ -353,65 +517,64 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
 
 📥 _චිත්‍රපටය බාගත වෙමින් පවතී... ස්වල්ප වේලාවකින් Document එකක් ලෙස Group එකට Upload වනු ඇත!_`;
 
-    // 1. Send Poster to WhatsApp Group
-    if (posterUrl) {
-      await waSocket.sendMessage(TARGET_GROUP_JID, {
-        image: { url: posterUrl },
-        caption: caption,
-        mentions: mentionsList,
-      });
-    } else {
-      await waSocket.sendMessage(TARGET_GROUP_JID, {
-        text: caption,
-        mentions: mentionsList,
-      });
-    }
-
-    // 2. Download Movie File
-    const safeName = title.replace(/[^a-zA-Z0-9_-]/g, "_") + `_${resolvedQuality}.mp4`;
-    const tempFilePath = path.join(TEMP_DIR, `${Date.now()}_${safeName}`);
-
-    logger.info(`Downloading video from ${directUrl} to ${tempFilePath}`);
-
-    await downloadFile(directUrl, tempFilePath, (downloaded, total) => {
-      const percent = Math.round((downloaded / total) * 100);
-      if (percent % 25 === 0) {
-        logger.info(`Download progress for ${title}: ${percent}% (${Math.round(downloaded / 1024 / 1024)}MB)`);
+      // 1. Send Poster
+      if (posterUrl) {
+        await waSocket.sendMessage(TARGET_GROUP_JID, {
+          image: { url: posterUrl },
+          caption: caption,
+          mentions: mentionsList,
+        });
+      } else {
+        await waSocket.sendMessage(TARGET_GROUP_JID, {
+          text: caption,
+          mentions: mentionsList,
+        });
       }
-    });
 
-    logger.info(`Download complete. Uploading document to WhatsApp group ${TARGET_GROUP_JID}...`);
+      // 2. Download Movie File
+      const safeName = title.replace(/[^a-zA-Z0-9_-]/g, "_") + `_${resolvedQuality}.mp4`;
+      const tempFilePath = path.join(TEMP_DIR, `${Date.now()}_${safeName}`);
 
-    // 3. Upload Movie Document with Mention to Group
-    await waSocket.sendMessage(TARGET_GROUP_JID, {
-      document: fs.readFileSync(tempFilePath),
-      mimetype: "video/mp4",
-      fileName: `${title} [${resolvedQuality}] [FilmFeed].mp4`,
-      caption: `✅ *${title}* (${resolvedQuality})\n👤 Requested By: ${mentionTag} (${count}th movie)\n✨ Uploaded by FilmFeed Auto-Bot`,
-      mentions: mentionsList,
-    });
+      logger.info(`Downloading video from ${directUrl} to ${tempFilePath}`);
 
-    // 4. Instant File Deletion from Disk
-    if (fs.existsSync(tempFilePath)) {
-      fs.unlinkSync(tempFilePath);
-      logger.info(`🗑️ Temporary file deleted from disk: ${tempFilePath}`);
+      await downloadFile(directUrl, tempFilePath, (downloaded, total) => {
+        const percent = Math.round((downloaded / total) * 100);
+        if (percent % 25 === 0) {
+          logger.info(`Download progress for ${title}: ${percent}% (${Math.round(downloaded / 1024 / 1024)}MB)`);
+        }
+      });
+
+      logger.info(`Download complete. Uploading document to WhatsApp group ${TARGET_GROUP_JID}...`);
+
+      // 3. Upload Document
+      await waSocket.sendMessage(TARGET_GROUP_JID, {
+        document: fs.readFileSync(tempFilePath),
+        mimetype: "video/mp4",
+        fileName: `${title} [${resolvedQuality}] [FilmFeed].mp4`,
+        caption: `✅ *${title}* (${resolvedQuality})\n👤 Requested By: ${mentionTag} (${count}th movie)\n✨ Uploaded by FilmFeed Auto-Bot`,
+        mentions: mentionsList,
+      });
+
+      // 4. Delete temp file
+      if (fs.existsSync(tempFilePath)) {
+        fs.unlinkSync(tempFilePath);
+      }
+
+      // 5. Notify Requester
+      await waSocket.sendMessage(replyTarget, {
+        text: `🎉 *[FilmFeed Auto-Bot]* සාර්ථකයි!\n*${pushName}*, ඔබ ඉල්ලූ *${title}* (${resolvedQuality}) චිත්‍රපටය WhatsApp සමූහය වෙත යවන ලදී. 🍿 Enjoy!`,
+        mentions: mentionsList,
+      });
     }
-
-    // 5. Notify Requester
-    await waSocket.sendMessage(replyTarget, {
-      text: `🎉 *[FilmFeed Auto-Bot]* සාර්ථකයි!\n*${pushName}*, ඔබ ඉල්ලූ *${title}* (${resolvedQuality}) චිත්‍රපටය WhatsApp සමූහය වෙත යවන ලදී. 🍿 Enjoy!`,
-      mentions: mentionsList,
-    });
 
   } catch (err) {
-    logger.error({ err }, "Error processing queued movie task");
+    logger.error({ err }, "Error processing queued task");
     await waSocket.sendMessage(replyTarget, {
       text: `⚠️ *[FilmFeed Auto-Bot]* දෝෂයක් සිදු විය: ${err.message}`,
     });
   } finally {
     isProcessingQueue = false;
     currentProcessingItem = null;
-    // Process next queued movie if available
     setTimeout(processQueue, 1500);
   }
 }
@@ -467,7 +630,6 @@ async function startBot() {
       isConnected = true;
       logger.info(`✅ FilmFeed Bot Connected successfully! Active on: ${BOT_PHONE}`);
       logger.info(`🎯 Target Group: ${TARGET_GROUP_JID}`);
-      // Process pending queue if any
       processQueue();
     }
   });
@@ -492,29 +654,51 @@ async function startBot() {
         msg.message.imageMessage?.caption ||
         "";
 
-      if (!text || !text.includes("!req")) continue;
+      if (!text || (!text.includes("!req") && !text.includes("!season"))) continue;
 
       logger.info(`Received command: ${text} from ${pushName} (${remoteJid})`);
 
-      // Command pattern: !req <url> | <quality> | <token>
-      const match = text.match(/!req(?:uest)?\s+([^\s|]+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
-      if (!match) continue;
+      // 1. Check for TV Series Season command:
+      // !req_season <url> | S<num> | <quality> | <token> OR !req <url> | S1 | 720p | token
+      const seasonMatch = text.match(/!(?:req_season|season)\s+([^\s|]+)(?:\s*\|\s*[Ss]?(\d+))?(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i) ||
+                          text.match(/!req(?:uest)?\s+([^\s|]+)\s*\|\s*[Ss](\d+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
 
-      const movieUrl = match[1].trim();
-      const quality = match[2] ? match[2].trim() : "1080p";
-      const token = match[3] ? match[3].trim() : "";
+      let isSeriesSeason = false;
+      let seasonNumber = 1;
+      let movieUrl = "";
+      let quality = "720p";
+      let token = "";
+
+      if (seasonMatch) {
+        isSeriesSeason = true;
+        movieUrl = seasonMatch[1].trim();
+        seasonNumber = seasonMatch[2] ? parseInt(seasonMatch[2].trim(), 10) : 1;
+        quality = seasonMatch[3] ? seasonMatch[3].trim() : "720p";
+        token = seasonMatch[4] ? seasonMatch[4].trim() : "";
+      } else {
+        // Standard Movie command: !req <url> | <quality> | <token>
+        const match = text.match(/!req(?:uest)?\s+([^\s|]+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
+        if (!match) continue;
+
+        movieUrl = match[1].trim();
+        quality = match[2] ? match[2].trim() : "1080p";
+        token = match[3] ? match[3].trim() : "";
+        if (movieUrl.includes("/tvshows/")) {
+          isSeriesSeason = true;
+          seasonNumber = 1;
+        }
+      }
 
       const replyTarget = remoteJid;
-
-      // Track User Stats
       const userStats = incrementUserRequest(senderPhone, pushName);
       const { count, badge } = userStats;
 
-      // Check current queue status
       const isBusy = isProcessingQueue || requestQueue.length > 0;
       const queuePosition = requestQueue.length + (isProcessingQueue ? 1 : 0);
 
       const taskItem = {
+        isSeriesSeason,
+        seasonNumber,
         movieUrl,
         quality,
         token,
@@ -528,22 +712,22 @@ async function startBot() {
       };
 
       if (isBusy) {
-        // Enqueue task
         requestQueue.push(taskItem);
-        logger.info(`Task added to queue at position #${queuePosition} for ${pushName}`);
+        logger.info(`Task added to queue at #${queuePosition} for ${pushName}`);
 
         const queueMessage = 
 `⏳ *[FilmFeed Auto-Bot] පෝලිමේ රඳවා ඇත (Queued)*
 
 ආයුබෝවන් *${pushName}* (${mentionTag}),
-දැනට වෙනත් චිත්‍රපටයක් Download/Upload වෙමින් පවතී.
+දැනට වෙනත් ${isProcessingQueue && currentProcessingItem?.isSeriesSeason ? "TV Series Season එකක්" : "චිත්‍රපටයක්"} බාගත වෙමින් පවතී.
 
 📊 *ඔබගේ පෝලිම් ස්ථානය (Queue Position):* *#${queuePosition}*
-🎯 *User Stats:* ${count} වන ඉල්ලීම [${badge}]
+📦 *ඉල්ලීම:* ${isSeriesSeason ? `TV Series (Season ${seasonNumber})` : "Movie"}
+🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
 📺 *Quality:* ${quality}
 🔑 *Token:* ${token}
 
-_කලින් ඉල්ලීම් අවසන් වූ සැණින් ඔබගේ චිත්‍රපටය බාගත කර Group එකට Upload වනු ඇත! ස්තූතියි!_`;
+_කලින් ඉල්ලීම් අවසන් වූ සැණින් ඔබගේ ඉල්ලීම බාගත කර Group එකට Upload වනු ඇත! ස්තූතියි!_`;
 
         await sock.sendMessage(replyTarget, {
           text: queueMessage,
@@ -551,15 +735,14 @@ _කලින් ඉල්ලීම් අවසන් වූ සැණින්
         });
 
       } else {
-        // Enqueue and start processing immediately
         requestQueue.push(taskItem);
 
         const startMessage = 
 `⏳ *[FilmFeed Auto-Bot] සකසමින් පවතී (Processing Now)*
 
 ආයුබෝවන් *${pushName}* (${mentionTag})!
-ඔබගේ *${count}* වන චිත්‍රපට ඉල්ලීම ලැබුණා (${badge}).
-Direct High-Speed ලින්ක් එක සකසා බාගත කිරීම ආරම්භ විය...
+ඔබගේ *${count}* වන ඉල්ලීම ලැබුණා [${badge}].
+${isSeriesSeason ? `📺 *TV Series (Season ${seasonNumber}) Complete Pack* සකස් කිරීම ආරම්භ විය...` : "🎬 Direct High-Speed ලින්ක් එක සකසා බාගත කිරීම ආරම්භ විය..."}
 
 📺 *Quality:* ${quality}
 🔑 *Token:* ${token}`;

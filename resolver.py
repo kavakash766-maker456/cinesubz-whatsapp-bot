@@ -273,7 +273,7 @@ def http_get_noredirect(url, timeout=TIMEOUT):
 
 
 # --------------------------------------------------------------------------
-# step 1: scrape movie page
+# step 1: scrape movie / episode / series page
 # --------------------------------------------------------------------------
 def scrape_movie(url: str, log=sys.stderr.write):
     body, _, final_url = http_get(url)
@@ -288,16 +288,16 @@ def scrape_movie(url: str, log=sys.stderr.write):
     if splash:
         img = splash.find(tag="img")
         if img:
-            banner["backdrop"] = img.attrs.get("src")
+            banner["backdrop"] = (img.attrs.get("src") or "").strip()
     poster = root.find(cls="poster-img")
     if poster:
-        banner["poster"] = poster.attrs.get("src")
+        banner["poster"] = (poster.attrs.get("src") or "").strip()
     if "poster" not in banner:
         m = re.search(
             r'property=["\']og:image["\']\s+content=["\']([^"\']+)', html
         ) or re.search(r'content=["\']([^"\']+)["\']\s+property=["\']og:image', html)
         if m:
-            banner.setdefault("poster", m.group(1))
+            banner.setdefault("poster", m.group(1).strip())
 
     details = {}
     t = first(cls="details-title")
@@ -331,12 +331,21 @@ def scrape_movie(url: str, log=sys.stderr.write):
         description = re.sub(r"තවත් ලස්සන කතාවකින්.*", "", description).strip()
 
     entries = []
-    for item in root.find_all(cls="movie-download-link-item"):
+    # Movie pages use movie-download-* classes; episode pages use plain
+    # download-* classes (e.g. /episodes/lanterns-1x1/). Accept both.
+    items = root.find_all(cls="movie-download-link-item") or root.find_all(
+        cls="download-link-item"
+    )
+    for item in items:
         a = item.find(tag="a")
         if not a:
             continue
-        type_n = item.find(cls="movie-download-type")
-        meta_n = item.find(cls="movie-download-meta")
+        type_n = item.find(cls="movie-download-type") or item.find(
+            cls="download-type"
+        )
+        meta_n = item.find(cls="movie-download-meta") or item.find(
+            cls="download-meta"
+        )
         meta = meta_n.text() if meta_n else ""
         size_bytes = None
         m = re.search(r"([\d.]+)\s*(GB|MB|TB|KB)", meta, re.I)
@@ -356,6 +365,31 @@ def scrape_movie(url: str, log=sys.stderr.write):
             }
         )
 
+    # TV series pages carry no download links themselves; they list episodes
+    # (<a class="episode-link" href=".../episodes/show-1x2/" data-season data-episode>)
+    episodes = []
+    for a in root.find_all(cls="episode-link"):
+        href = a.attrs.get("href", "")
+        if not href:
+            continue
+        ep_title_n = a.find(cls="ep-title")
+        try:
+            season = int(a.attrs.get("data-season") or 0)
+        except (TypeError, ValueError):
+            season = 0
+        try:
+            ep_num = int(a.attrs.get("data-episode") or 0)
+        except (TypeError, ValueError):
+            ep_num = 0
+        episodes.append(
+            {
+                "season": season,
+                "episode": ep_num,
+                "title": ep_title_n.text() if ep_title_n else "",
+                "url": urllib.parse.urljoin(final_url, href),
+            }
+        )
+
     return {
         "source_url": url,
         "final_url": final_url,
@@ -363,6 +397,7 @@ def scrape_movie(url: str, log=sys.stderr.write):
         "details": details,
         "description": description,
         "downloads": entries,
+        "episodes": episodes,
     }
 
 
@@ -481,9 +516,27 @@ def _resolve_one(drive_url: str):
     return found
 
 
-def resolve_direct_link(movie_url: str, requested_quality: str = None):
+def resolve_direct_link(
+    movie_url: str, requested_quality: str = None, _depth: int = 0
+):
     movie = scrape_movie(movie_url)
     downloads = movie["downloads"]
+    episodes = movie.get("episodes") or []
+
+    # TV series page: no direct links -> follow the first available episode.
+    # (The web app requests episode URLs directly; this is a fallback so a
+    # pasted series URL still works in WhatsApp.)
+    if not downloads and episodes and _depth == 0:
+        first_ep = episodes[0]
+        result = resolve_direct_link(
+            first_ep["url"], requested_quality, _depth=_depth + 1
+        )
+        if result.get("success"):
+            result["series_title"] = movie["details"].get("title")
+            result["series_url"] = movie_url
+            result["episode_count"] = len(episodes)
+        return result
+
     if not downloads:
         return {"error": "No download links found on movie page", "movie": movie}
 
@@ -526,9 +579,17 @@ def resolve_direct_link(movie_url: str, requested_quality: str = None):
 
     direct_url = file_urls[0]
 
+    title = movie["details"].get("title", "Movie")
+    # Nicer episode title: "Lanterns: 1×1" -> "Lanterns S01E01"
+    ep_m = re.search(r"(\d+)[x\u00d7](\d+)", title)
+    if ep_m:
+        show = re.sub(r"\s*[:\-]\s*\d+[x\u00d7]\d+.*$", "", title).strip()
+        if show:
+            title = "%s S%02dE%02d" % (show, int(ep_m.group(1)), int(ep_m.group(2)))
+
     return {
         "success": True,
-        "title": movie["details"].get("title", "Movie"),
+        "title": title,
         "year": movie["details"].get("year"),
         "poster": movie["banner"].get("poster"),
         "backdrop": movie["banner"].get("backdrop"),
@@ -541,9 +602,28 @@ def resolve_direct_link(movie_url: str, requested_quality: str = None):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("url", help="CineSubz movie URL")
+    ap.add_argument("url", help="CineSubz movie / episode / TV series URL")
     ap.add_argument("--quality", default=None, help="Target quality (e.g. 1080p, 720p)")
+    ap.add_argument(
+        "--episodes",
+        action="store_true",
+        help="List all episodes of a TV series page instead of resolving a download",
+    )
     args = ap.parse_args()
+
+    if args.episodes:
+        data = scrape_movie(args.url)
+        out = {
+            "success": bool(data.get("episodes")),
+            "title": data["details"].get("title", "Series"),
+            "poster": data["banner"].get("poster"),
+            "backdrop": data["banner"].get("backdrop"),
+            "episodes": data.get("episodes") or [],
+        }
+        if not out["episodes"]:
+            out["error"] = "No episodes found on this page"
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return
 
     result = resolve_direct_link(args.url, args.quality)
     print(json.dumps(result, ensure_ascii=False, indent=2))
