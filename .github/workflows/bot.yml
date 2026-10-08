@@ -1,0 +1,83 @@
+name: WhatsApp Movie Bot 24/7
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */5 * * *' # Auto-restart every 5 hours to stay within runner limits
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340 # Run for up to ~5.5 hours
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: package.json
+
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install System Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssl ffmpeg
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install cryptography pycryptodome
+
+      - name: Install Node Dependencies
+        run: |
+          npm install
+
+      - name: Restore WhatsApp Session Cache
+        uses: actions/cache/restore@v4
+        id: session-cache
+        with:
+          path: auth_info
+          key: whatsapp-session-${{ github.run_id }}
+          restore-keys: |
+            whatsapp-session-
+
+      - name: Run WhatsApp Movie Bot
+        env:
+          BOT_PHONE: "94760372547"
+          TARGET_GROUP_JID: "120363419930344447@g.us"
+          AUTH_DIR: "auth_info"
+          LOG_LEVEL: "info"
+          GH_TOKEN: ${{ secrets.BOT_GITHUB_TOKEN || github.token }}
+        run: |
+          mkdir -p auth_info temp
+          # Run bot in background and capture logs
+          node src/index.js &
+          BOT_PID=$!
+          echo "Bot started with PID $BOT_PID"
+          
+          # Keep running for ~5 hours (18000s)
+          sleep 18000 || true
+          
+          echo "Re-triggering next workflow run..."
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.BOT_GITHUB_TOKEN || github.token }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/bot.yml/dispatches \
+            -d '{"ref":"main"}' || true
+
+      - name: Save WhatsApp Session Cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: auth_info
+          key: whatsapp-session-${{ github.run_id }}

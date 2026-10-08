@@ -1,0 +1,9 @@
+{
+  "github": {
+    "release": true,
+    "tagName": "v${version}"
+  },
+  "npm": {
+    "tag": "latest-v3"
+  }
+}
