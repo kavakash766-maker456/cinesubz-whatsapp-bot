@@ -3,6 +3,10 @@ name: FilmFeed WhatsApp Bot 24/7
 on:
   push:
     branches: [ main, master ]
+    paths-ignore:
+      - 'data/**'
+      - '**.md'
+      - '.gitignore'
   workflow_dispatch:
   schedule:
     - cron: '0 */5 * * *'
@@ -40,7 +44,7 @@ jobs:
       - name: Install Python Packages
         run: |
           python -m pip install --upgrade pip
-          pip install cryptography pycryptodome
+          pip install cryptography pycryptodome requests beautifulsoup4
 
       - name: Install Node Dependencies
         run: |
@@ -63,7 +67,6 @@ jobs:
           LOG_LEVEL: "info"
         run: |
           mkdir -p auth_info temp
-          # Run directly in foreground with unbuffered output so logs & QR appear instantly
           node src/index.js
 
       - name: Save WhatsApp Session Cache
