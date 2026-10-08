@@ -18,7 +18,10 @@ const BOT_PHONE = process.env.BOT_PHONE || "94760372547";
 const TARGET_GROUP_JID = process.env.TARGET_GROUP_JID || "120363419930344447@g.us";
 const AUTH_DIR = process.env.AUTH_DIR || path.join(__dirname, "../auth_info");
 const TEMP_DIR = path.join(__dirname, "../temp");
+const STATS_FILE = path.join(AUTH_DIR, "user_stats.json");
 const SELF_URL = process.env.SELF_URL || process.env.RENDER_EXTERNAL_URL || process.env.KOYEB_APP_URL || null;
+
+const MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024; // 2.0 GB WhatsApp Document Limit
 
 if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
@@ -27,6 +30,46 @@ const logger = pino({ level: process.env.LOG_LEVEL || "info" });
 
 let latestQR = null;
 let isConnected = false;
+
+// --------------------------------------------------------------------------
+// User Request Stats Tracker
+// --------------------------------------------------------------------------
+function getUserStats() {
+  try {
+    if (fs.existsSync(STATS_FILE)) {
+      return JSON.parse(fs.readFileSync(STATS_FILE, "utf8"));
+    }
+  } catch (e) {
+    logger.error({ e }, "Error reading stats file");
+  }
+  return {};
+}
+
+function incrementUserRequest(userId, userName) {
+  const stats = getUserStats();
+  if (!stats[userId]) {
+    stats[userId] = { count: 0, name: userName, firstSeen: new Date().toISOString() };
+  }
+  stats[userId].count += 1;
+  stats[userId].name = userName || stats[userId].name;
+  stats[userId].lastSeen = new Date().toISOString();
+
+  try {
+    fs.writeFileSync(STATS_FILE, JSON.stringify(stats, null, 2), "utf8");
+  } catch (e) {
+    logger.error({ e }, "Error saving stats file");
+  }
+
+  const count = stats[userId].count;
+  let badge = "🌟 New Member";
+  if (count >= 20) badge = "👑 Film Legend (VIP)";
+  else if (count >= 10) badge = "🥇 Elite Cinephile";
+  else if (count >= 5) badge = "🥈 Pro Movie Buff";
+  else if (count >= 2) badge = "🥉 Regular Member";
+  else badge = "✨ First Request (Welcome!)";
+
+  return { count, badge };
+}
 
 // --------------------------------------------------------------------------
 // 1. HTTP Server for Health Checks & Web QR Display
@@ -45,10 +88,10 @@ const server = http.createServer((req, res) => {
       <head><title>FilmFeed Bot Status</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
       <body style="background:#0a0c14;color:#fff;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;margin:0;">
         <div style="background:#121624;padding:30px;border-radius:20px;border:1px solid #25D366;text-align:center;">
-          <h1 style="color:#25D366;margin:0 0 10px 0;">✅ WhatsApp Bot is Connected & Online!</h1>
+          <h1 style="color:#25D366;margin:0 0 10px 0;">✅ FilmFeed Bot is Connected & Online!</h1>
           <p style="color:#aaa;">Bot Number: <b>${BOT_PHONE}</b></p>
           <p style="color:#aaa;">Target Group: <b>${TARGET_GROUP_JID}</b></p>
-          <div style="margin-top:20px;padding:10px 20px;background:#25D366;color:#000;border-radius:10px;font-weight:bold;">Status: 24/7 Keep-Alive Active</div>
+          <div style="margin-top:20px;padding:10px 20px;background:#25D366;color:#000;border-radius:10px;font-weight:bold;">Status: 24/7 Active with 2GB Safety Check</div>
         </div>
       </body>
       </html>
@@ -89,22 +132,21 @@ server.listen(PORT, "0.0.0.0", () => {
 });
 
 // --------------------------------------------------------------------------
-// 2. Built-in Keep-Alive / Anti-Sleep Ping Engine (Pings every 8 minutes)
+// 2. Keep-Alive Self Ping
 // --------------------------------------------------------------------------
 function setupKeepAlivePing() {
-  const pingIntervalMs = 8 * 60 * 1000; // 8 minutes
+  const pingIntervalMs = 8 * 60 * 1000;
   setInterval(async () => {
     try {
       if (SELF_URL) {
         const pingTarget = SELF_URL.startsWith("http") ? `${SELF_URL}/ping` : `https://${SELF_URL}/ping`;
         await axios.get(pingTarget, { timeout: 15000 });
-        logger.info(`💓 [Keep-Alive Ping] Successfully pinged self URL: ${pingTarget}`);
+        logger.info(`💓 [Keep-Alive Ping] Pinged: ${pingTarget}`);
       } else {
-        // Ping local port to keep event loop active
         await axios.get(`http://127.0.0.1:${PORT}/ping`, { timeout: 5000 });
       }
     } catch (e) {
-      logger.warn(`⚠️ [Keep-Alive Ping] Ping attempt: ${e.message}`);
+      logger.warn(`⚠️ [Keep-Alive Ping] ${e.message}`);
     }
   }, pingIntervalMs);
 }
@@ -139,7 +181,39 @@ async function resolveMovie(movieUrl, quality) {
 }
 
 // --------------------------------------------------------------------------
-// 4. File Downloader
+// 4. Inspect File Size via Ranged Request before Downloading
+// --------------------------------------------------------------------------
+async function checkFileSize(url) {
+  try {
+    const res = await axios({
+      url,
+      method: "GET",
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        Range: "bytes=0-1024",
+      },
+      timeout: 20000,
+    });
+
+    const contentRange = res.headers["content-range"];
+    if (contentRange && contentRange.includes("/")) {
+      const total = parseInt(contentRange.split("/")[1], 10);
+      if (!isNaN(total)) return total;
+    }
+
+    const clen = res.headers["content-length"];
+    if (clen && !isNaN(parseInt(clen, 10))) {
+      return parseInt(clen, 10);
+    }
+  } catch (e) {
+    logger.warn(`Unable to verify Content-Range: ${e.message}`);
+  }
+  return null;
+}
+
+// --------------------------------------------------------------------------
+// 5. File Downloader
 // --------------------------------------------------------------------------
 async function downloadFile(url, destPath, onProgress) {
   const writer = fs.createWriteStream(destPath);
@@ -151,7 +225,7 @@ async function downloadFile(url, destPath, onProgress) {
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     },
-    timeout: 180000,
+    timeout: 300000,
   });
 
   const totalLength = parseInt(response.headers["content-length"] || "0", 10);
@@ -175,7 +249,7 @@ async function downloadFile(url, destPath, onProgress) {
 }
 
 // --------------------------------------------------------------------------
-// 5. WhatsApp Bot Initialization & Event Handler
+// 6. WhatsApp Bot Engine
 // --------------------------------------------------------------------------
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
@@ -190,7 +264,7 @@ async function startBot() {
     auth: state,
     generateHighQualityLinkPreview: true,
     browser: ["FilmFeed Downloader", "Chrome", "1.0.0"],
-    keepAliveIntervalMs: 25000, // keep socket connection alive
+    keepAliveIntervalMs: 25000,
   });
 
   sock.ev.on("creds.update", saveCreds);
@@ -221,7 +295,7 @@ async function startBot() {
     } else if (connection === "open") {
       latestQR = null;
       isConnected = true;
-      logger.info(`✅ WhatsApp Bot Connected successfully! Active on: ${BOT_PHONE}`);
+      logger.info(`✅ FilmFeed Bot Connected successfully! Active on: ${BOT_PHONE}`);
       logger.info(`🎯 Target Group: ${TARGET_GROUP_JID}`);
     }
   });
@@ -233,6 +307,9 @@ async function startBot() {
       if (!msg.message) continue;
 
       const remoteJid = msg.key.remoteJid;
+      const senderPhone = (msg.key.participant || remoteJid || "").split("@")[0];
+      const pushName = msg.pushName || senderPhone || "Movie Fan";
+
       const text =
         msg.message.conversation ||
         msg.message.extendedTextMessage?.text ||
@@ -241,7 +318,7 @@ async function startBot() {
 
       if (!text || !text.includes("!req")) continue;
 
-      logger.info(`Received command: ${text} from ${remoteJid}`);
+      logger.info(`Received command: ${text} from ${pushName} (${remoteJid})`);
 
       // Command pattern: !req <url> | <quality> | <token>
       const match = text.match(/!req(?:uest)?\s+([^\s|]+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
@@ -251,15 +328,19 @@ async function startBot() {
       const quality = match[2] ? match[2].trim() : "1080p";
       const token = match[3] ? match[3].trim() : "";
 
-      logger.info(`Processing request: URL=${movieUrl}, Quality=${quality}, Token=${token}`);
+      logger.info(`Processing: URL=${movieUrl}, Quality=${quality}, Requester=${pushName}`);
 
       const replyTarget = remoteJid;
 
       try {
+        // Track User Request Statistics
+        const { count, badge } = incrementUserRequest(senderPhone, pushName);
+
         await sock.sendMessage(replyTarget, {
-          text: `⏳ *[FilmFeed Auto-Bot]*\n\nචිත්‍රපට ඉල්ලීම ලැබුණා! High-speed ඩවුන්ලෝඩ් ලින්ක් එක සකසමින් පවතී...\n🔗 Token: *${token}*\n📺 Quality: *${quality}*`,
+          text: `⏳ *[FilmFeed Auto-Bot]*\n\nආයුබෝවන් *${pushName}*!\nඔබගේ *${count}* වන චිත්‍රපට ඉල්ලීම ලැබුණා (${badge}).\nDirect High-Speed ලින්ක් එක සකසමින් පවතී...\n\n📺 Quality: *${quality}*\n🔑 Token: *${token}*`,
         });
 
+        // Resolve Direct Link & Movie Info
         const movieData = await resolveMovie(movieUrl, quality);
 
         if (!movieData.success || !movieData.direct_url) {
@@ -274,19 +355,52 @@ async function startBot() {
         const directUrl = movieData.direct_url;
         const resolvedQuality = movieData.quality || quality;
 
-        // 1. Send Poster + Synopsis to Group
+        // ------------------------------------------------------------------
+        // 2GB Size Check BEFORE downloading
+        // ------------------------------------------------------------------
+        logger.info(`Checking file size for ${title}...`);
+        const verifiedSize = await checkFileSize(directUrl);
+        const actualBytes = verifiedSize || (movieData.size_text && movieData.size_text.includes("GB") ? parseFloat(movieData.size_text) * 1024 * 1024 * 1024 : 0);
+
+        if (actualBytes > MAX_FILE_SIZE_BYTES) {
+          const sizeInGB = (actualBytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+          logger.warn(`Movie ${title} size (${sizeInGB}) exceeds 2GB limit! Skipping download.`);
+
+          const sizeAlertMsg = 
+`⚠️ *[FilmFeed Auto-Bot] ගොනු විශාලත්ව සීමාව (2GB Limit)*
+
+ආයුබෝවන් *${pushName}*,
+ඔබ ඉල්ලූ *${title}* (${resolvedQuality}) චිත්‍රපටයේ ගොනු ප්‍රමාණය: *${sizeInGB}* කි.
+
+📌 *WhatsApp නීති රීති අනුව:*
+WhatsApp මඟින් Document එකක් ලෙස එකවර යැවිය හැක්කේ උපරිම *2.00 GB* දක්වා ගොනු පමණි.
+
+💡 *විසඳුම:*
+කරුණාකර පහත වෙබ් අඩවියට ගොස් *720p* හෝ *480p* Quality එක (2GB ට අඩු) තෝරා නැවත Request කරන්න:
+👉 https://web-umber-six-e1un7z6257.vercel.app`;
+
+          await sock.sendMessage(replyTarget, { text: sizeAlertMsg });
+          continue;
+        }
+
+        // ------------------------------------------------------------------
+        // Advanced Poster Caption with Requester Analytics
+        // ------------------------------------------------------------------
         const caption = 
 `🎬 *${title}*
 ━━━━━━━━━━━━━━━━━━━━
+👤 *Requested By:* ${pushName}
+🎯 *User Stats:* ${count} වන ඉල්ලීම [${badge}]
 🌟 *Quality:* ${resolvedQuality} ${movieData.size_text ? `(${movieData.size_text})` : ""}
 🔑 *Token:* ${token || "DIRECT"}
 ⚡ *Subtitle:* Sinhala Subtitles Included
 ━━━━━━━━━━━━━━━━━━━━
 📝 *Storyline / සාරාංශය:*
-${movieData.description ? movieData.description.substring(0, 450) + "..." : "FilmFeed Direct Release"}
+${movieData.description ? movieData.description.substring(0, 420) + "..." : "FilmFeed Direct Release"}
 
-📥 _Movie Document එක ඩවුන්ලෝඩ් වෙමින් පවතී... ස්වල්ප වේලාවකින් මෙහි upload වනු ඇත!_`;
+📥 _චිත්‍රපටය බාගත වෙමින් පවතී... ස්වල්ප වේලාවකින් Document එකක් ලෙස Group එකට Upload වනු ඇත!_`;
 
+        // Send Poster to Group
         if (posterUrl) {
           await sock.sendMessage(TARGET_GROUP_JID, {
             image: { url: posterUrl },
@@ -296,7 +410,7 @@ ${movieData.description ? movieData.description.substring(0, 450) + "..." : "Fil
           await sock.sendMessage(TARGET_GROUP_JID, { text: caption });
         }
 
-        // 2. Download Movie to Temp Disk
+        // Download Movie
         const safeName = title.replace(/[^a-zA-Z0-9_-]/g, "_") + `_${resolvedQuality}.mp4`;
         const tempFilePath = path.join(TEMP_DIR, `${Date.now()}_${safeName}`);
 
@@ -309,31 +423,31 @@ ${movieData.description ? movieData.description.substring(0, 450) + "..." : "Fil
           }
         });
 
-        logger.info(`Download finished. Uploading document to WhatsApp group ${TARGET_GROUP_JID}...`);
+        logger.info(`Download complete. Uploading document to WhatsApp group ${TARGET_GROUP_JID}...`);
 
-        // 3. Upload Movie File as Document to WhatsApp Group
+        // Upload Movie Document to WhatsApp Group
         await sock.sendMessage(TARGET_GROUP_JID, {
           document: fs.readFileSync(tempFilePath),
           mimetype: "video/mp4",
           fileName: `${title} [${resolvedQuality}] [FilmFeed].mp4`,
-          caption: `✅ *${title}* (${resolvedQuality})\n✨ Uploaded by FilmFeed Auto-Bot`,
+          caption: `✅ *${title}* (${resolvedQuality})\n👤 Requested By: ${pushName} (${count}th movie)\n✨ Uploaded by FilmFeed Auto-Bot`,
         });
 
-        // 4. Immediately Delete file from Disk
+        // Instant Disk Cleanup
         if (fs.existsSync(tempFilePath)) {
           fs.unlinkSync(tempFilePath);
           logger.info(`🗑️ Temporary file deleted from disk: ${tempFilePath}`);
         }
 
-        // 5. Send Success Confirmation
+        // User Confirmation
         await sock.sendMessage(replyTarget, {
-          text: `🎉 *[CineHub Auto-Bot]* සාර්ථකයි!\n*${title}* (${resolvedQuality}) චිත්‍රපටය WhatsApp සමූහය වෙත යවන ලදී. 🍿 Enjoy!`,
+          text: `🎉 *[FilmFeed Auto-Bot]* සාර්ථකයි!\n*${pushName}*, ඔබ ඉල්ලූ *${title}* (${resolvedQuality}) චිත්‍රපටය WhatsApp සමූහය වෙත යවන ලදී. 🍿 Enjoy!`,
         });
 
       } catch (err) {
         logger.error({ err }, "Error handling movie request");
         await sock.sendMessage(replyTarget, {
-          text: `⚠️ *[CineHub Auto-Bot]* දෝෂයක් සිදු විය: ${err.message}`,
+          text: `⚠️ *[FilmFeed Auto-Bot]* දෝෂයක් සිදු විය: ${err.message}`,
         });
       }
     }
