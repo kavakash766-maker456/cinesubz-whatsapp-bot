@@ -384,13 +384,17 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
         }
 
         // ------------------------------------------------------------------
-        // Advanced Poster Caption with Requester Analytics
+        // Advanced Poster Caption with WhatsApp @Mention Tag
         // ------------------------------------------------------------------
+        const requesterJid = msg.key.participant || (remoteJid.endsWith("@s.whatsapp.net") ? remoteJid : null);
+        const mentionTag = requesterJid ? `@${requesterJid.split("@")[0]}` : pushName;
+        const mentionsList = requesterJid ? [requesterJid] : [];
+
         const caption = 
 `🎬 *${title}*
 ━━━━━━━━━━━━━━━━━━━━
-👤 *Requested By:* ${pushName}
-🎯 *User Stats:* ${count} වන ඉල්ලීම [${badge}]
+👤 *Requested By:* ${mentionTag} (${pushName})
+🎯 *User Stats:* ඔබගේ ${count} වන චිත්‍රපට ඉල්ලීම [${badge}]
 🌟 *Quality:* ${resolvedQuality} ${movieData.size_text ? `(${movieData.size_text})` : ""}
 🔑 *Token:* ${token || "DIRECT"}
 ⚡ *Subtitle:* Sinhala Subtitles Included
@@ -400,14 +404,18 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
 
 📥 _චිත්‍රපටය බාගත වෙමින් පවතී... ස්වල්ප වේලාවකින් Document එකක් ලෙස Group එකට Upload වනු ඇත!_`;
 
-        // Send Poster to Group
+        // Send Poster with Mention to Group
         if (posterUrl) {
           await sock.sendMessage(TARGET_GROUP_JID, {
             image: { url: posterUrl },
             caption: caption,
+            mentions: mentionsList,
           });
         } else {
-          await sock.sendMessage(TARGET_GROUP_JID, { text: caption });
+          await sock.sendMessage(TARGET_GROUP_JID, {
+            text: caption,
+            mentions: mentionsList,
+          });
         }
 
         // Download Movie
@@ -425,12 +433,13 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
 
         logger.info(`Download complete. Uploading document to WhatsApp group ${TARGET_GROUP_JID}...`);
 
-        // Upload Movie Document to WhatsApp Group
+        // Upload Movie Document with Mention to WhatsApp Group
         await sock.sendMessage(TARGET_GROUP_JID, {
           document: fs.readFileSync(tempFilePath),
           mimetype: "video/mp4",
           fileName: `${title} [${resolvedQuality}] [FilmFeed].mp4`,
-          caption: `✅ *${title}* (${resolvedQuality})\n👤 Requested By: ${pushName} (${count}th movie)\n✨ Uploaded by FilmFeed Auto-Bot`,
+          caption: `✅ *${title}* (${resolvedQuality})\n👤 Requested By: ${mentionTag} (${count}th movie)\n✨ Uploaded by FilmFeed Auto-Bot`,
+          mentions: mentionsList,
         });
 
         // Instant Disk Cleanup
