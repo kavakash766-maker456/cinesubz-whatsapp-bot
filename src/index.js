@@ -30,6 +30,14 @@ const logger = pino({ level: process.env.LOG_LEVEL || "info" });
 
 let latestQR = null;
 let isConnected = false;
+let waSocket = null;
+
+// --------------------------------------------------------------------------
+// Request Queue System (FIFO)
+// --------------------------------------------------------------------------
+const requestQueue = [];
+let isProcessingQueue = false;
+let currentProcessingItem = null;
 
 // --------------------------------------------------------------------------
 // User Request Stats Tracker
@@ -77,7 +85,15 @@ function incrementUserRequest(userId, userName) {
 const server = http.createServer((req, res) => {
   if (req.url === "/ping" || req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    return res.end(JSON.stringify({ status: "alive", connected: isConnected, uptime: process.uptime() }));
+    return res.end(
+      JSON.stringify({
+        status: "alive",
+        connected: isConnected,
+        queueLength: requestQueue.length,
+        isProcessing: isProcessingQueue,
+        uptime: process.uptime(),
+      })
+    );
   }
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
@@ -91,7 +107,8 @@ const server = http.createServer((req, res) => {
           <h1 style="color:#25D366;margin:0 0 10px 0;">✅ FilmFeed Bot is Connected & Online!</h1>
           <p style="color:#aaa;">Bot Number: <b>${BOT_PHONE}</b></p>
           <p style="color:#aaa;">Target Group: <b>${TARGET_GROUP_JID}</b></p>
-          <div style="margin-top:20px;padding:10px 20px;background:#25D366;color:#000;border-radius:10px;font-weight:bold;">Status: 24/7 Active with 2GB Safety Check</div>
+          <p style="color:#aaa;">Queue Items: <b>${requestQueue.length}</b></p>
+          <div style="margin-top:20px;padding:10px 20px;background:#25D366;color:#000;border-radius:10px;font-weight:bold;">Status: 24/7 FIFO Queue Active</div>
         </div>
       </body>
       </html>
@@ -213,7 +230,7 @@ async function checkFileSize(url) {
 }
 
 // --------------------------------------------------------------------------
-// 5. File Downloader
+// 5. File Downloader with streaming
 // --------------------------------------------------------------------------
 async function downloadFile(url, destPath, onProgress) {
   const writer = fs.createWriteStream(destPath);
@@ -249,7 +266,158 @@ async function downloadFile(url, destPath, onProgress) {
 }
 
 // --------------------------------------------------------------------------
-// 6. WhatsApp Bot Engine
+// 6. Queue Processing Loop (One Movie at a Time)
+// --------------------------------------------------------------------------
+async function processQueue() {
+  if (isProcessingQueue || requestQueue.length === 0 || !waSocket) return;
+
+  isProcessingQueue = true;
+  const currentTask = requestQueue.shift();
+  currentProcessingItem = currentTask;
+
+  const { movieUrl, quality, token, replyTarget, requesterJid, pushName, mentionTag, mentionsList, userStats } = currentTask;
+  const { count, badge } = userStats;
+
+  logger.info(`[Queue Engine] Starting task for ${pushName}: ${movieUrl} (${quality}) | Remaining in queue: ${requestQueue.length}`);
+
+  try {
+    // Notify requester that their processing has officially started
+    await waSocket.sendMessage(replyTarget, {
+      text: `🚀 *[FilmFeed Auto-Bot]*\n\n*${pushName}*, ඔබගේ වාරය පැමිණියා! චිත්‍රපටය බාගත කිරීම දැන් ආරම්භ වේ...\n\n📺 Quality: *${quality}*\n🔑 Token: *${token}*`,
+      mentions: mentionsList,
+    });
+
+    // Resolve Movie details
+    const movieData = await resolveMovie(movieUrl, quality);
+
+    if (!movieData.success || !movieData.direct_url) {
+      await waSocket.sendMessage(replyTarget, {
+        text: `❌ *[FilmFeed Auto-Bot]* Error: ${movieData.error || "චිත්‍රපට ලින්ක් එක ලබා ගැනීමට නොහැකි විය."}`,
+      });
+      isProcessingQueue = false;
+      currentProcessingItem = null;
+      processQueue();
+      return;
+    }
+
+    const title = movieData.title || "Movie";
+    const posterUrl = movieData.poster || movieData.backdrop;
+    const directUrl = movieData.direct_url;
+    const resolvedQuality = movieData.quality || quality;
+
+    // 2GB Size Check BEFORE download
+    logger.info(`Checking file size for ${title}...`);
+    const verifiedSize = await checkFileSize(directUrl);
+    const actualBytes =
+      verifiedSize ||
+      (movieData.size_text && movieData.size_text.includes("GB")
+        ? parseFloat(movieData.size_text) * 1024 * 1024 * 1024
+        : 0);
+
+    if (actualBytes > MAX_FILE_SIZE_BYTES) {
+      const sizeInGB = (actualBytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+      logger.warn(`Movie ${title} size (${sizeInGB}) exceeds 2GB limit! Skipping download.`);
+
+      const sizeAlertMsg = 
+`⚠️ *[FilmFeed Auto-Bot] ගොනු විශාලත්ව සීමාව (2GB Limit)*
+
+ආයුබෝවන් *${pushName}*,
+ඔබ ඉල්ලූ *${title}* (${resolvedQuality}) චිත්‍රපටයේ ගොනු ප්‍රමාණය: *${sizeInGB}* කි.
+
+📌 *WhatsApp නීති රීති අනුව:*
+WhatsApp මඟින් Document එකක් ලෙස එකවර යැවිය හැක්කේ උපරිම *2.00 GB* දක්වා ගොනු පමණි.
+
+💡 *විසඳුම:*
+කරුණාකර පහත වෙබ් අඩවියට ගොස් *720p* හෝ *480p* Quality එක (2GB ට අඩු) තෝරා නැවත Request කරන්න:
+👉 https://web-umber-six-e1un7z6257.vercel.app`;
+
+      await waSocket.sendMessage(replyTarget, { text: sizeAlertMsg });
+      isProcessingQueue = false;
+      currentProcessingItem = null;
+      processQueue();
+      return;
+    }
+
+    // Advanced Poster Caption with Mention and Analytics
+    const caption = 
+`🎬 *${title}*
+━━━━━━━━━━━━━━━━━━━━
+👤 *Requested By:* ${mentionTag} (${pushName})
+🎯 *User Stats:* ඔබගේ ${count} වන චිත්‍රපට ඉල්ලීම [${badge}]
+🌟 *Quality:* ${resolvedQuality} ${movieData.size_text ? `(${movieData.size_text})` : ""}
+🔑 *Token:* ${token || "DIRECT"}
+⚡ *Subtitle:* Sinhala Subtitles Included
+━━━━━━━━━━━━━━━━━━━━
+📝 *Storyline / සාරාංශය:*
+${movieData.description ? movieData.description.substring(0, 420) + "..." : "FilmFeed Direct Release"}
+
+📥 _චිත්‍රපටය බාගත වෙමින් පවතී... ස්වල්ප වේලාවකින් Document එකක් ලෙස Group එකට Upload වනු ඇත!_`;
+
+    // 1. Send Poster to WhatsApp Group
+    if (posterUrl) {
+      await waSocket.sendMessage(TARGET_GROUP_JID, {
+        image: { url: posterUrl },
+        caption: caption,
+        mentions: mentionsList,
+      });
+    } else {
+      await waSocket.sendMessage(TARGET_GROUP_JID, {
+        text: caption,
+        mentions: mentionsList,
+      });
+    }
+
+    // 2. Download Movie File
+    const safeName = title.replace(/[^a-zA-Z0-9_-]/g, "_") + `_${resolvedQuality}.mp4`;
+    const tempFilePath = path.join(TEMP_DIR, `${Date.now()}_${safeName}`);
+
+    logger.info(`Downloading video from ${directUrl} to ${tempFilePath}`);
+
+    await downloadFile(directUrl, tempFilePath, (downloaded, total) => {
+      const percent = Math.round((downloaded / total) * 100);
+      if (percent % 25 === 0) {
+        logger.info(`Download progress for ${title}: ${percent}% (${Math.round(downloaded / 1024 / 1024)}MB)`);
+      }
+    });
+
+    logger.info(`Download complete. Uploading document to WhatsApp group ${TARGET_GROUP_JID}...`);
+
+    // 3. Upload Movie Document with Mention to Group
+    await waSocket.sendMessage(TARGET_GROUP_JID, {
+      document: fs.readFileSync(tempFilePath),
+      mimetype: "video/mp4",
+      fileName: `${title} [${resolvedQuality}] [FilmFeed].mp4`,
+      caption: `✅ *${title}* (${resolvedQuality})\n👤 Requested By: ${mentionTag} (${count}th movie)\n✨ Uploaded by FilmFeed Auto-Bot`,
+      mentions: mentionsList,
+    });
+
+    // 4. Instant File Deletion from Disk
+    if (fs.existsSync(tempFilePath)) {
+      fs.unlinkSync(tempFilePath);
+      logger.info(`🗑️ Temporary file deleted from disk: ${tempFilePath}`);
+    }
+
+    // 5. Notify Requester
+    await waSocket.sendMessage(replyTarget, {
+      text: `🎉 *[FilmFeed Auto-Bot]* සාර්ථකයි!\n*${pushName}*, ඔබ ඉල්ලූ *${title}* (${resolvedQuality}) චිත්‍රපටය WhatsApp සමූහය වෙත යවන ලදී. 🍿 Enjoy!`,
+      mentions: mentionsList,
+    });
+
+  } catch (err) {
+    logger.error({ err }, "Error processing queued movie task");
+    await waSocket.sendMessage(replyTarget, {
+      text: `⚠️ *[FilmFeed Auto-Bot]* දෝෂයක් සිදු විය: ${err.message}`,
+    });
+  } finally {
+    isProcessingQueue = false;
+    currentProcessingItem = null;
+    // Process next queued movie if available
+    setTimeout(processQueue, 1500);
+  }
+}
+
+// --------------------------------------------------------------------------
+// 7. WhatsApp Bot Initialization & Event Handler
 // --------------------------------------------------------------------------
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
@@ -266,6 +434,8 @@ async function startBot() {
     browser: ["FilmFeed Downloader", "Chrome", "1.0.0"],
     keepAliveIntervalMs: 25000,
   });
+
+  waSocket = sock;
 
   sock.ev.on("creds.update", saveCreds);
 
@@ -297,6 +467,8 @@ async function startBot() {
       isConnected = true;
       logger.info(`✅ FilmFeed Bot Connected successfully! Active on: ${BOT_PHONE}`);
       logger.info(`🎯 Target Group: ${TARGET_GROUP_JID}`);
+      // Process pending queue if any
+      processQueue();
     }
   });
 
@@ -309,6 +481,10 @@ async function startBot() {
       const remoteJid = msg.key.remoteJid;
       const senderPhone = (msg.key.participant || remoteJid || "").split("@")[0];
       const pushName = msg.pushName || senderPhone || "Movie Fan";
+
+      const requesterJid = msg.key.participant || (remoteJid.endsWith("@s.whatsapp.net") ? remoteJid : null);
+      const mentionTag = requesterJid ? `@${requesterJid.split("@")[0]}` : pushName;
+      const mentionsList = requesterJid ? [requesterJid] : [];
 
       const text =
         msg.message.conversation ||
@@ -328,136 +504,72 @@ async function startBot() {
       const quality = match[2] ? match[2].trim() : "1080p";
       const token = match[3] ? match[3].trim() : "";
 
-      logger.info(`Processing: URL=${movieUrl}, Quality=${quality}, Requester=${pushName}`);
-
       const replyTarget = remoteJid;
 
-      try {
-        // Track User Request Statistics
-        const { count, badge } = incrementUserRequest(senderPhone, pushName);
+      // Track User Stats
+      const userStats = incrementUserRequest(senderPhone, pushName);
+      const { count, badge } = userStats;
+
+      // Check current queue status
+      const isBusy = isProcessingQueue || requestQueue.length > 0;
+      const queuePosition = requestQueue.length + (isProcessingQueue ? 1 : 0);
+
+      const taskItem = {
+        movieUrl,
+        quality,
+        token,
+        replyTarget,
+        requesterJid,
+        pushName,
+        mentionTag,
+        mentionsList,
+        userStats,
+        createdAt: Date.now(),
+      };
+
+      if (isBusy) {
+        // Enqueue task
+        requestQueue.push(taskItem);
+        logger.info(`Task added to queue at position #${queuePosition} for ${pushName}`);
+
+        const queueMessage = 
+`⏳ *[FilmFeed Auto-Bot] පෝලිමේ රඳවා ඇත (Queued)*
+
+ආයුබෝවන් *${pushName}* (${mentionTag}),
+දැනට වෙනත් චිත්‍රපටයක් Download/Upload වෙමින් පවතී.
+
+📊 *ඔබගේ පෝලිම් ස්ථානය (Queue Position):* *#${queuePosition}*
+🎯 *User Stats:* ${count} වන ඉල්ලීම [${badge}]
+📺 *Quality:* ${quality}
+🔑 *Token:* ${token}
+
+_කලින් ඉල්ලීම් අවසන් වූ සැණින් ඔබගේ චිත්‍රපටය බාගත කර Group එකට Upload වනු ඇත! ස්තූතියි!_`;
 
         await sock.sendMessage(replyTarget, {
-          text: `⏳ *[FilmFeed Auto-Bot]*\n\nආයුබෝවන් *${pushName}*!\nඔබගේ *${count}* වන චිත්‍රපට ඉල්ලීම ලැබුණා (${badge}).\nDirect High-Speed ලින්ක් එක සකසමින් පවතී...\n\n📺 Quality: *${quality}*\n🔑 Token: *${token}*`,
-        });
-
-        // Resolve Direct Link & Movie Info
-        const movieData = await resolveMovie(movieUrl, quality);
-
-        if (!movieData.success || !movieData.direct_url) {
-          await sock.sendMessage(replyTarget, {
-            text: `❌ *[FilmFeed Auto-Bot]* Error: ${movieData.error || "චිත්‍රපට ලින්ක් එක ලබා ගැනීමට නොහැකි විය."}`,
-          });
-          continue;
-        }
-
-        const title = movieData.title || "Movie";
-        const posterUrl = movieData.poster || movieData.backdrop;
-        const directUrl = movieData.direct_url;
-        const resolvedQuality = movieData.quality || quality;
-
-        // ------------------------------------------------------------------
-        // 2GB Size Check BEFORE downloading
-        // ------------------------------------------------------------------
-        logger.info(`Checking file size for ${title}...`);
-        const verifiedSize = await checkFileSize(directUrl);
-        const actualBytes = verifiedSize || (movieData.size_text && movieData.size_text.includes("GB") ? parseFloat(movieData.size_text) * 1024 * 1024 * 1024 : 0);
-
-        if (actualBytes > MAX_FILE_SIZE_BYTES) {
-          const sizeInGB = (actualBytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
-          logger.warn(`Movie ${title} size (${sizeInGB}) exceeds 2GB limit! Skipping download.`);
-
-          const sizeAlertMsg = 
-`⚠️ *[FilmFeed Auto-Bot] ගොනු විශාලත්ව සීමාව (2GB Limit)*
-
-ආයුබෝවන් *${pushName}*,
-ඔබ ඉල්ලූ *${title}* (${resolvedQuality}) චිත්‍රපටයේ ගොනු ප්‍රමාණය: *${sizeInGB}* කි.
-
-📌 *WhatsApp නීති රීති අනුව:*
-WhatsApp මඟින් Document එකක් ලෙස එකවර යැවිය හැක්කේ උපරිම *2.00 GB* දක්වා ගොනු පමණි.
-
-💡 *විසඳුම:*
-කරුණාකර පහත වෙබ් අඩවියට ගොස් *720p* හෝ *480p* Quality එක (2GB ට අඩු) තෝරා නැවත Request කරන්න:
-👉 https://web-umber-six-e1un7z6257.vercel.app`;
-
-          await sock.sendMessage(replyTarget, { text: sizeAlertMsg });
-          continue;
-        }
-
-        // ------------------------------------------------------------------
-        // Advanced Poster Caption with WhatsApp @Mention Tag
-        // ------------------------------------------------------------------
-        const requesterJid = msg.key.participant || (remoteJid.endsWith("@s.whatsapp.net") ? remoteJid : null);
-        const mentionTag = requesterJid ? `@${requesterJid.split("@")[0]}` : pushName;
-        const mentionsList = requesterJid ? [requesterJid] : [];
-
-        const caption = 
-`🎬 *${title}*
-━━━━━━━━━━━━━━━━━━━━
-👤 *Requested By:* ${mentionTag} (${pushName})
-🎯 *User Stats:* ඔබගේ ${count} වන චිත්‍රපට ඉල්ලීම [${badge}]
-🌟 *Quality:* ${resolvedQuality} ${movieData.size_text ? `(${movieData.size_text})` : ""}
-🔑 *Token:* ${token || "DIRECT"}
-⚡ *Subtitle:* Sinhala Subtitles Included
-━━━━━━━━━━━━━━━━━━━━
-📝 *Storyline / සාරාංශය:*
-${movieData.description ? movieData.description.substring(0, 420) + "..." : "FilmFeed Direct Release"}
-
-📥 _චිත්‍රපටය බාගත වෙමින් පවතී... ස්වල්ප වේලාවකින් Document එකක් ලෙස Group එකට Upload වනු ඇත!_`;
-
-        // Send Poster with Mention to Group
-        if (posterUrl) {
-          await sock.sendMessage(TARGET_GROUP_JID, {
-            image: { url: posterUrl },
-            caption: caption,
-            mentions: mentionsList,
-          });
-        } else {
-          await sock.sendMessage(TARGET_GROUP_JID, {
-            text: caption,
-            mentions: mentionsList,
-          });
-        }
-
-        // Download Movie
-        const safeName = title.replace(/[^a-zA-Z0-9_-]/g, "_") + `_${resolvedQuality}.mp4`;
-        const tempFilePath = path.join(TEMP_DIR, `${Date.now()}_${safeName}`);
-
-        logger.info(`Downloading video from ${directUrl} to ${tempFilePath}`);
-
-        await downloadFile(directUrl, tempFilePath, (downloaded, total) => {
-          const percent = Math.round((downloaded / total) * 100);
-          if (percent % 25 === 0) {
-            logger.info(`Download progress: ${percent}% (${Math.round(downloaded / 1024 / 1024)}MB)`);
-          }
-        });
-
-        logger.info(`Download complete. Uploading document to WhatsApp group ${TARGET_GROUP_JID}...`);
-
-        // Upload Movie Document with Mention to WhatsApp Group
-        await sock.sendMessage(TARGET_GROUP_JID, {
-          document: fs.readFileSync(tempFilePath),
-          mimetype: "video/mp4",
-          fileName: `${title} [${resolvedQuality}] [FilmFeed].mp4`,
-          caption: `✅ *${title}* (${resolvedQuality})\n👤 Requested By: ${mentionTag} (${count}th movie)\n✨ Uploaded by FilmFeed Auto-Bot`,
+          text: queueMessage,
           mentions: mentionsList,
         });
 
-        // Instant Disk Cleanup
-        if (fs.existsSync(tempFilePath)) {
-          fs.unlinkSync(tempFilePath);
-          logger.info(`🗑️ Temporary file deleted from disk: ${tempFilePath}`);
-        }
+      } else {
+        // Enqueue and start processing immediately
+        requestQueue.push(taskItem);
 
-        // User Confirmation
+        const startMessage = 
+`⏳ *[FilmFeed Auto-Bot] සකසමින් පවතී (Processing Now)*
+
+ආයුබෝවන් *${pushName}* (${mentionTag})!
+ඔබගේ *${count}* වන චිත්‍රපට ඉල්ලීම ලැබුණා (${badge}).
+Direct High-Speed ලින්ක් එක සකසා බාගත කිරීම ආරම්භ විය...
+
+📺 *Quality:* ${quality}
+🔑 *Token:* ${token}`;
+
         await sock.sendMessage(replyTarget, {
-          text: `🎉 *[FilmFeed Auto-Bot]* සාර්ථකයි!\n*${pushName}*, ඔබ ඉල්ලූ *${title}* (${resolvedQuality}) චිත්‍රපටය WhatsApp සමූහය වෙත යවන ලදී. 🍿 Enjoy!`,
+          text: startMessage,
+          mentions: mentionsList,
         });
 
-      } catch (err) {
-        logger.error({ err }, "Error handling movie request");
-        await sock.sendMessage(replyTarget, {
-          text: `⚠️ *[FilmFeed Auto-Bot]* දෝෂයක් සිදු විය: ${err.message}`,
-        });
+        processQueue();
       }
     }
   });
