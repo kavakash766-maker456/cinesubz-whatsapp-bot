@@ -432,7 +432,7 @@ async function processQueue() {
 
           // Upload Episode Document to All Groups
           await broadcastToGroups({
-            document: fs.readFileSync(tempFilePath),
+            document: { url: tempFilePath },
             mimetype: "video/mp4",
             fileName: `${epTitle} [${resolvedQuality}] [FilmFeed].mp4`,
             caption: `✅ *${epTitle}* (${resolvedQuality})\n👤 Requested By: ${mentionTag}\n📦 Season ${seasonNumber} Pack [${epIndex}/${totalEpisodes} Episodes]\n✨ Uploaded by FilmFeed Auto-Bot`,
@@ -564,7 +564,7 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
 
       // 3. Upload Document to all groups
       await broadcastToGroups({
-        document: fs.readFileSync(tempFilePath),
+        document: { url: tempFilePath },
         mimetype: "video/mp4",
         fileName: `${title} [${resolvedQuality}] [FilmFeed].mp4`,
         caption: `✅ *${title}* (${resolvedQuality})\n👤 Requested By: ${mentionTag} (${count}th movie)\n✨ Uploaded by FilmFeed Auto-Bot`,
