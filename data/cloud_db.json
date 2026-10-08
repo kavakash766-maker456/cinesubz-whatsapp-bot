@@ -22,12 +22,25 @@
       "isVip": false,
       "createdAt": "2026-10-08T19:02:17.148Z",
       "lastLoginAt": "2026-10-08T19:12:11.710Z"
+    },
+    "usr_ksyxigqq": {
+      "id": "usr_ksyxigqq",
+      "name": "Pp Songs of day",
+      "email": "ppppaaaassss25@gmail.com",
+      "image": "https://lh3.googleusercontent.com/a/ACg8ocJGFdtYdVBIPMn4QNq9oFf_AEDpgGJPwslZnvD8O5lD2mGadQ=s96-c",
+      "phone": "",
+      "deviceId": "dev_7dbu1wos7y_muzw0mnx",
+      "coins": 50,
+      "isVip": false,
+      "createdAt": "2026-10-08T19:12:54.272Z",
+      "lastLoginAt": "2026-10-08T19:12:54.272Z"
     }
   },
   "deviceMap": {
     "dev_admin_master": "user_admin_01",
     "dev_x9vbzfnwwq_muzwkgjj": "usr_zm0oc7ug",
-    "dev_2dybax2r01_muzwxobo": "usr_zm0oc7ug"
+    "dev_2dybax2r01_muzwxobo": "usr_zm0oc7ug",
+    "dev_7dbu1wos7y_muzw0mnx": "usr_ksyxigqq"
   },
   "requests": []
 }
