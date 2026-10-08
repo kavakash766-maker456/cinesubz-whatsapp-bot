@@ -18,6 +18,13 @@ import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -308,10 +315,20 @@ def scrape_movie(url: str, log=sys.stderr.write):
         if m:
             details["imdb"] = float(m.group(1))
 
-    desc = root.find(cls="details-desc")
+    desc = root.find(cls="details-desc") or root.find(cls="entry-content") or root.find(cls="description")
     description = desc.text() if desc else ""
+    if not description:
+        # Fallback to og:description meta
+        m_desc = re.search(r'property=["\']og:description["\']\s+content=["\']([^"\']+)', html) or \
+                 re.search(r'name=["\']description["\']\s+content=["\']([^"\']+)', html)
+        if m_desc:
+            description = m_desc.group(1).strip()
+
     if description:
         description = re.sub(r"\s+", " ", description).strip()
+        # Remove trailing complete collection or repeat tags
+        description = re.sub(r"Avatar Complete Collection.*", "", description)
+        description = re.sub(r"තවත් ලස්සන කතාවකින්.*", "", description).strip()
 
     entries = []
     for item in root.find_all(cls="movie-download-link-item"):
