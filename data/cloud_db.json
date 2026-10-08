@@ -34,15 +34,51 @@
       "isVip": false,
       "createdAt": "2026-10-08T19:12:54.272Z",
       "lastLoginAt": "2026-10-08T19:12:54.272Z"
+    },
+    "usr_wysu5x1l": {
+      "id": "usr_wysu5x1l",
+      "name": "Mihin Frenando",
+      "email": "mihinfrenando@gmail.com",
+      "image": "https://lh3.googleusercontent.com/a/ACg8ocKDyMHGu2a2sXUdkp-BHYA8l1PMAFP7Lpb1RnUUjQc21T5FPw=s96-c",
+      "phone": "",
+      "deviceId": "dev_pne1oavpl2_muzx1okc",
+      "coins": 50,
+      "isVip": false,
+      "createdAt": "2026-10-08T19:40:43.708Z",
+      "lastLoginAt": "2026-10-08T19:40:43.708Z"
     }
   },
   "deviceMap": {
     "dev_admin_master": "user_admin_01",
     "dev_x9vbzfnwwq_muzwkgjj": "usr_zm0oc7ug",
     "dev_2dybax2r01_muzwxobo": "usr_zm0oc7ug",
-    "dev_7dbu1wos7y_muzw0mnx": "usr_ksyxigqq"
+    "dev_7dbu1wos7y_muzw0mnx": "usr_ksyxigqq",
+    "dev_pne1oavpl2_muzx1okc": "usr_wysu5x1l"
   },
   "requests": [
+    {
+      "userId": "usr_ksyxigqq",
+      "userName": "Pp Songs of day",
+      "userPhone": "Guest",
+      "title": "Insidious: Out of the Further (2026) Sinhala Subtitles | සිංහල උපසිරැසි සමඟ",
+      "type": "movie",
+      "quality": "480p",
+      "token": "KVY7NY",
+      "status": "completed",
+      "id": "req_muzxsqmc",
+      "timestamp": "2026-10-08T19:36:04.548Z"
+    },
+    {
+      "userName": "Guest User",
+      "userPhone": "Guest",
+      "title": "Insidious (2010) Sinhala Subtitle | සිංහල උපසිරැසි සමඟ",
+      "type": "movie",
+      "quality": "720p",
+      "token": "03YE0W",
+      "status": "completed",
+      "id": "req_muzxsl7i",
+      "timestamp": "2026-10-08T19:35:57.534Z"
+    },
     {
       "userId": "usr_ksyxigqq",
       "userName": "Pp Songs of day",
