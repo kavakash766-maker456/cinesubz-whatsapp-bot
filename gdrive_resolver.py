@@ -212,7 +212,7 @@ def resolve_gdrive_movie(url, requested_quality=None):
     if is_anime:
         raw_title = anime_meta.get("title", "Anime Movie")
         title = raw_title.replace(" | සිංහල උපසිරැසි සමඟ", "").strip()
-        poster = anime_meta.get("backdrop") or anime_meta.get("poster") or ""
+        poster = anime_meta.get("poster") or anime_meta.get("backdrop") or ""
         backdrop = anime_meta.get("backdrop") or poster
         description = anime_meta.get("description") or "Official Anime Release with Sinhala Subtitles."
         return {
