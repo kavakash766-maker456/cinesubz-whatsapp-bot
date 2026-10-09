@@ -626,11 +626,12 @@ def main():
             file_id = m_id.group(1)
         else:
             try:
-                from gdrive_resolver import load_cartoons_map
-                cartoons = load_cartoons_map()
-                meta = cartoons.get(args.url)
-                if meta and meta.get("embed_url"):
-                    m_id = re.search(r"/(?:file/d/|uc\?id=)([a-zA-Z0-9_-]+)", meta["embed_url"])
+                from gdrive_resolver import resolve_gdrive_movie
+                g_res = resolve_gdrive_movie(args.url, args.quality)
+                if g_res.get("file_id"):
+                    file_id = g_res["file_id"]
+                elif g_res.get("download_url"):
+                    m_id = re.search(r"/(?:file/d/|uc\?id=)([a-zA-Z0-9_-]+)", g_res["download_url"])
                     if m_id:
                         file_id = m_id.group(1)
             except Exception:
@@ -665,8 +666,8 @@ def main():
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return
 
-    # Handle Google Drive & Sinhala Dubbed Cartoons directly
-    if "drive.google.com" in args.url or "lakvision" in args.url:
+    # Handle Google Drive, Anime & Sinhala Dubbed Cartoons directly
+    if "drive.google.com" in args.url or "lakvision" in args.url or "slanimeclub" in args.url or "anime" in args.url:
         try:
             from gdrive_resolver import resolve_gdrive_movie
         except ImportError:
@@ -675,7 +676,7 @@ def main():
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
             from gdrive_resolver import resolve_gdrive_movie
 
-        result = resolve_gdrive_movie(args.url)
+        result = resolve_gdrive_movie(args.url, args.quality)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
 

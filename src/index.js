@@ -231,13 +231,16 @@ async function resolveSeriesEpisodes(seriesUrl) {
   });
 }
 
-async function downloadGDriveFile(url, destPath) {
+async function downloadGDriveFile(url, destPath, quality = null) {
   return new Promise((resolve, reject) => {
     const resolverScript = path.join(__dirname, "../resolver.py");
     const pythonCmd = process.platform === "win32" ? "python" : "python3";
     const args = [resolverScript, url, "--download-gdrive", destPath];
+    if (quality) {
+      args.push("--quality", quality);
+    }
 
-    logger.info(`Invoking Google Drive gdown engine for: ${url}`);
+    logger.info(`Invoking Google Drive gdown engine for: ${url} (Quality: ${quality || "auto"})`);
     execFile(pythonCmd, args, { maxBuffer: 20 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
         logger.error({ err, stderr }, "gdown script execution error");
@@ -555,6 +558,16 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
       }
 
       // Poster Caption
+      let audioSubText = "Sinhala Subtitles Included";
+      let downloadSourceText = "චිත්‍රපටය";
+      if (movieData.is_anime) {
+        audioSubText = "Japanese Audio • Sinhala Subtitles Included (සිංහල උපසිරැසි සමඟ)";
+        downloadSourceText = "Anime චිත්‍රපටය Google Drive මඟින්";
+      } else if (movieData.is_cartoon) {
+        audioSubText = "Sinhala Dubbed (හඬකැවූ කාටූන්)";
+        downloadSourceText = "කාටූනය Google Drive මඟින්";
+      }
+
       const caption = 
 `🎬 *${title}*
 ━━━━━━━━━━━━━━━━━━━━
@@ -562,12 +575,12 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
 🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
 🌟 *Quality:* ${resolvedQuality} ${movieData.size_text ? `(${movieData.size_text})` : ""}
 🔑 *Token:* ${token || "DIRECT"}
-⚡ *Audio / Language:* ${movieData.is_cartoon ? "Sinhala Dubbed (හඬකැවූ කාටූන්)" : "Sinhala Subtitles Included"}
+⚡ *Audio / Sub:* ${audioSubText}
 ━━━━━━━━━━━━━━━━━━━━
 📝 *Storyline / සාරාංශය:*
 ${movieData.description ? movieData.description.substring(0, 420) + "..." : "FilmFeed Direct Release"}
 
-📥 _${movieData.is_cartoon ? "කාටූනය Google Drive මඟින්" : "චිත්‍රපටය"} බාගත වෙමින් පවතී... ස්වල්ප වේලාවකින් Document එකක් ලෙස Group එකට Upload වනු ඇත!_`;
+📥 _${downloadSourceText} බාගත වෙමින් පවතී... ස්වල්ප වේලාවකින් Document එකක් ලෙස Group එකට Upload වනු ඇත!_`;
 
       // 1. Send Poster to all groups
       if (posterUrl) {
@@ -587,11 +600,18 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
       const safeName = title.replace(/[^a-zA-Z0-9_-]/g, "_") + `_${resolvedQuality}.mp4`;
       const tempFilePath = path.join(TEMP_DIR, `${Date.now()}_${safeName}`);
 
-      const isGDrive = movieData.is_cartoon || movieUrl.includes("drive.google.com") || movieUrl.includes("lakvision");
+      const isGDrive =
+        movieData.is_cartoon ||
+        movieData.is_anime ||
+        movieData.is_gdrive ||
+        movieUrl.includes("drive.google.com") ||
+        movieUrl.includes("lakvision") ||
+        movieUrl.includes("slanimeclub") ||
+        movieUrl.includes("anime");
 
       if (isGDrive) {
         logger.info(`Starting high-speed Google Drive download for ${title}...`);
-        await downloadGDriveFile(movieUrl, tempFilePath);
+        await downloadGDriveFile(movieUrl, tempFilePath, resolvedQuality);
       } else {
         logger.info(`Downloading video from ${directUrl} to ${tempFilePath}`);
         await downloadFile(directUrl, tempFilePath, (downloaded, total) => {
