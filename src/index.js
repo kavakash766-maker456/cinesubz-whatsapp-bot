@@ -32,6 +32,13 @@ if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
 
 const logger = pino({ level: process.env.LOG_LEVEL || "info" });
 
+process.on("uncaughtException", (err) => {
+  logger.error({ err }, "Uncaught Exception in Bot Engine (recovered)");
+});
+process.on("unhandledRejection", (reason) => {
+  logger.error({ reason }, "Unhandled Rejection in Bot Engine (recovered)");
+});
+
 let latestQR = null;
 let isConnected = false;
 let waSocket = null;
@@ -664,26 +671,31 @@ async function startBot() {
     for (const msg of m.messages) {
       if (!msg.message) continue;
 
-      const rawJid = msg.key.participant || (remoteJid && remoteJid.endsWith("@s.whatsapp.net") ? remoteJid : null);
-      // Normalize to pure phone number (strips :device suffix such as :1 or :12)
-      const cleanPhone = rawJid
-        ? rawJid.replace(/:\d+/, "").split("@")[0]
-        : (senderPhone || "").replace(/:\d+/, "");
-      const cleanJid = cleanPhone ? `${cleanPhone}@s.whatsapp.net` : null;
+      try {
+        const remoteJid = msg.key.remoteJid || "";
+        const senderPhone = (msg.key.participant || remoteJid || "").split("@")[0].replace(/:\d+/, "");
+        const pushName = msg.pushName || senderPhone || "Movie Fan";
 
-      const requesterJid = cleanJid;
-      const mentionTag = cleanPhone ? `@${cleanPhone}` : pushName;
-      const mentionsList = cleanJid ? [cleanJid] : [];
+        const rawJid = msg.key.participant || (remoteJid.endsWith("@s.whatsapp.net") ? remoteJid : null);
+        // Normalize to pure phone number (strips :device suffix such as :1 or :12)
+        const cleanPhone = rawJid
+          ? rawJid.replace(/:\d+/, "").split("@")[0]
+          : senderPhone;
+        const cleanJid = cleanPhone ? `${cleanPhone}@s.whatsapp.net` : null;
 
-      const text =
-        msg.message.conversation ||
-        msg.message.extendedTextMessage?.text ||
-        msg.message.imageMessage?.caption ||
-        "";
+        const requesterJid = cleanJid;
+        const mentionTag = cleanPhone ? `@${cleanPhone}` : pushName;
+        const mentionsList = cleanJid ? [cleanJid] : [];
 
-      if (!text || (!text.includes("!req") && !text.includes("!season"))) continue;
+        const text =
+          msg.message.conversation ||
+          msg.message.extendedTextMessage?.text ||
+          msg.message.imageMessage?.caption ||
+          "";
 
-      logger.info(`Received command: ${text} from ${pushName} (${remoteJid})`);
+        if (!text || (!text.includes("!req") && !text.includes("!season"))) continue;
+
+        logger.info(`Received command: ${text} from ${pushName} (${remoteJid})`);
 
       // 1. Check for TV Series Season command:
       // !req_season <url> | S<num> | <quality> | <token> OR !req <url> | S1 | 720p | token
@@ -781,8 +793,11 @@ ${isSeriesSeason ? `📺 *TV Series (Season ${seasonNumber}) Complete Pack* ස�
 
         processQueue();
       }
+    } catch (msgErr) {
+      logger.error({ msgErr }, "Error handling incoming WhatsApp message item");
     }
-  });
+  }
+});
 }
 
 startBot().catch((err) => logger.error({ err }, "Bot startup failed"));
