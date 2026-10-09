@@ -231,6 +231,34 @@ async function resolveSeriesEpisodes(seriesUrl) {
   });
 }
 
+async function downloadGDriveFile(url, destPath) {
+  return new Promise((resolve, reject) => {
+    const resolverScript = path.join(__dirname, "../resolver.py");
+    const pythonCmd = process.platform === "win32" ? "python" : "python3";
+    const args = [resolverScript, url, "--download-gdrive", destPath];
+
+    logger.info(`Invoking Google Drive gdown engine for: ${url}`);
+    execFile(pythonCmd, args, { maxBuffer: 20 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) {
+        logger.error({ err, stderr }, "gdown script execution error");
+        return reject(err);
+      }
+      try {
+        const data = JSON.parse(stdout);
+        if (data.success && fs.existsSync(destPath) && fs.statSync(destPath).size > 1000000) {
+          logger.info(`gdown download successful! Final size: ${Math.round(data.size / 1024 / 1024)}MB`);
+          resolve(destPath);
+        } else {
+          reject(new Error(data.error || "Google Drive download produced 0MB or invalid file"));
+        }
+      } catch (parseErr) {
+        logger.error({ stdout, stderr }, "Failed to parse gdown response JSON");
+        reject(parseErr);
+      }
+    });
+  });
+}
+
 // --------------------------------------------------------------------------
 // 4. File Size Inspection via Ranged Request
 // --------------------------------------------------------------------------
@@ -559,16 +587,32 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
       const safeName = title.replace(/[^a-zA-Z0-9_-]/g, "_") + `_${resolvedQuality}.mp4`;
       const tempFilePath = path.join(TEMP_DIR, `${Date.now()}_${safeName}`);
 
-      logger.info(`Downloading video from ${directUrl} to ${tempFilePath}`);
+      const isGDrive = movieData.is_cartoon || movieUrl.includes("drive.google.com") || movieUrl.includes("lakvision");
 
-      await downloadFile(directUrl, tempFilePath, (downloaded, total) => {
-        const percent = Math.round((downloaded / total) * 100);
-        if (percent % 25 === 0) {
-          logger.info(`Download progress for ${title}: ${percent}% (${Math.round(downloaded / 1024 / 1024)}MB)`);
-        }
-      });
+      if (isGDrive) {
+        logger.info(`Starting high-speed Google Drive download for ${title}...`);
+        await downloadGDriveFile(movieUrl, tempFilePath);
+      } else {
+        logger.info(`Downloading video from ${directUrl} to ${tempFilePath}`);
+        await downloadFile(directUrl, tempFilePath, (downloaded, total) => {
+          const percent = Math.round((downloaded / total) * 100);
+          if (percent % 25 === 0) {
+            logger.info(`Download progress for ${title}: ${percent}% (${Math.round(downloaded / 1024 / 1024)}MB)`);
+          }
+        });
+      }
 
-      logger.info(`Download complete. Uploading document to WhatsApp groups...`);
+      // Verify file exists on disk and is non-zero
+      if (!fs.existsSync(tempFilePath)) {
+        throw new Error("ගොනුව බාගත කිරීම අසාර්ථක විය. File not created on disk.");
+      }
+      const finalFileSize = fs.statSync(tempFilePath).size;
+      if (finalFileSize < 1000000) {
+        throw new Error(`බාගත කිරීමේදී දෝෂයක් සිදු විය (ගොනුව ${Math.round(finalFileSize / 1024)}KB ලෙස ලැබුණි, 0MB දෝෂයකි). කරුණාකර වෙනත් කාටූනයක් උත්සාහ කරන්න.`);
+      }
+
+      const finalSizeMB = Math.round(finalFileSize / (1024 * 1024));
+      logger.info(`Download verified! Final file size on disk: ${finalSizeMB}MB. Uploading document to WhatsApp groups...`);
 
       // 3. Upload Document to all groups
       await broadcastToGroups({

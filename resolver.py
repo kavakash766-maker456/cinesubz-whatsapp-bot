@@ -602,14 +602,54 @@ def resolve_direct_link(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("url", help="CineSubz movie / episode / TV series URL")
+    ap.add_argument("url", help="CineSubz movie / episode / TV series URL or Google Drive URL")
     ap.add_argument("--quality", default=None, help="Target quality (e.g. 1080p, 720p)")
     ap.add_argument(
         "--episodes",
         action="store_true",
         help="List all episodes of a TV series page instead of resolving a download",
     )
+    ap.add_argument(
+        "--download-gdrive",
+        dest="download_output",
+        default=None,
+        help="Download Google Drive cartoon/movie directly to specified output file path",
+    )
     args = ap.parse_args()
+
+    # Direct Google Drive downloader using gdown
+    if args.download_output:
+        import re, os
+        file_id = None
+        m_id = re.search(r"/(?:file/d/|uc\?id=)([a-zA-Z0-9_-]+)", args.url)
+        if m_id:
+            file_id = m_id.group(1)
+        else:
+            try:
+                from gdrive_resolver import load_cartoons_map
+                cartoons = load_cartoons_map()
+                meta = cartoons.get(args.url)
+                if meta and meta.get("embed_url"):
+                    m_id = re.search(r"/(?:file/d/|uc\?id=)([a-zA-Z0-9_-]+)", meta["embed_url"])
+                    if m_id:
+                        file_id = m_id.group(1)
+            except Exception:
+                pass
+
+        if not file_id:
+            print(json.dumps({"success": False, "error": "Could not identify Google Drive file ID from URL"}))
+            return
+
+        try:
+            import gdown
+            res = gdown.download(id=file_id, output=args.download_output, quiet=False)
+            if res and os.path.exists(args.download_output) and os.path.getsize(args.download_output) > 1000000:
+                print(json.dumps({"success": True, "path": args.download_output, "size": os.path.getsize(args.download_output)}))
+            else:
+                print(json.dumps({"success": False, "error": "Google Drive download failed or produced 0MB"}))
+        except Exception as dl_err:
+            print(json.dumps({"success": False, "error": str(dl_err)}))
+        return
 
     if args.episodes:
         data = scrape_movie(args.url)

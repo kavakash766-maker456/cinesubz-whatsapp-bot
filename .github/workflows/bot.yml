@@ -44,7 +44,7 @@ jobs:
       - name: Install Python Packages
         run: |
           python -m pip install --upgrade pip
-          pip install cryptography pycryptodome requests beautifulsoup4
+          pip install cryptography pycryptodome requests beautifulsoup4 gdown
 
       - name: Install Node Dependencies
         run: |
