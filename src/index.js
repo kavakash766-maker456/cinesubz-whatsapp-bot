@@ -690,13 +690,14 @@ async function startBot() {
   });
 
   sock.ev.on("messages.upsert", async (m) => {
-    if (m.type !== "notify") return;
+    if (!m.messages || m.messages.length === 0) return;
 
     for (const msg of m.messages) {
       if (!msg.message) continue;
 
       try {
         const remoteJid = msg.key.remoteJid || "";
+        const fromMe = Boolean(msg.key.fromMe);
         const senderPhone = (msg.key.participant || remoteJid || "").split("@")[0].replace(/:\d+/, "");
         const pushName = msg.pushName || senderPhone || "Movie Fan";
 
@@ -711,15 +712,29 @@ async function startBot() {
         const mentionTag = cleanPhone ? `@${cleanPhone}` : pushName;
         const mentionsList = cleanJid ? [cleanJid] : [];
 
-        const text =
-          msg.message.conversation ||
-          msg.message.extendedTextMessage?.text ||
-          msg.message.imageMessage?.caption ||
+        // Unwrap potential layers: ephemeral, viewOnce, document captions
+        let innerMsg = msg.message;
+        if (innerMsg.ephemeralMessage?.message) innerMsg = innerMsg.ephemeralMessage.message;
+        if (innerMsg.viewOnceMessage?.message) innerMsg = innerMsg.viewOnceMessage.message;
+        if (innerMsg.viewOnceMessageV2?.message) innerMsg = innerMsg.viewOnceMessageV2.message;
+        if (innerMsg.documentWithCaptionMessage?.message) innerMsg = innerMsg.documentWithCaptionMessage.message;
+
+        const rawText =
+          innerMsg.conversation ||
+          innerMsg.extendedTextMessage?.text ||
+          innerMsg.imageMessage?.caption ||
+          innerMsg.videoMessage?.caption ||
           "";
+
+        const text = rawText.trim();
+
+        if (text) {
+          logger.info(`[Msg] from: ${remoteJid} | fromMe: ${fromMe} | text: "${text.substring(0, 80).replace(/\n/g, " ")}"`);
+        }
 
         if (!text || (!text.includes("!req") && !text.includes("!season"))) continue;
 
-        logger.info(`Received command: ${text} from ${pushName} (${remoteJid})`);
+        logger.info(`🎯 Received FilmFeed command from ${pushName} (${remoteJid}): ${text}`);
 
       // 1. Check for TV Series Season command:
       // !req_season <url> | S<num> | <quality> | <token> OR !req <url> | S1 | 720p | token
