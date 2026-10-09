@@ -653,6 +653,16 @@ def main():
         return
 
     if args.episodes:
+        # Check if Anime Series from local json first!
+        try:
+            from gdrive_resolver import get_anime_series_episodes
+            anime_series_data = get_anime_series_episodes(args.url)
+            if anime_series_data and anime_series_data.get("episodes"):
+                print(json.dumps(anime_series_data, ensure_ascii=False, indent=2))
+                return
+        except Exception:
+            pass
+
         data = scrape_movie(args.url)
         out = {
             "success": bool(data.get("episodes")),
@@ -667,7 +677,15 @@ def main():
         return
 
     # Handle Google Drive, Anime & Sinhala Dubbed Cartoons directly
-    if "drive.google.com" in args.url or "lakvision" in args.url or "slanimeclub" in args.url or "anime" in args.url:
+    is_gdrive_or_anime = (
+        "drive.google.com" in args.url
+        or "lakvision" in args.url
+        or "slanimeclub" in args.url
+        or "animeclub" in args.url
+        or "anime" in args.url
+    )
+
+    if is_gdrive_or_anime:
         try:
             from gdrive_resolver import resolve_gdrive_movie
         except ImportError:

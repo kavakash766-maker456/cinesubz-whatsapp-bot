@@ -28,6 +28,50 @@ def get_anime_movies_file():
             return c
     return None
 
+def get_anime_series_file():
+    candidates = [
+        os.path.join(os.path.dirname(__file__), "data/anime_series.json"),
+        os.path.join(os.path.dirname(__file__), "../data/anime_series.json"),
+        os.path.abspath("data/anime_series.json"),
+        r"C:\Users\akash\Desktop\anime\series.json"
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return None
+
+def get_anime_series_episodes(url):
+    sf = get_anime_series_file()
+    if not sf:
+        return None
+    try:
+        with open(sf, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            clean_url = url.strip().rstrip("/")
+            for s in data.get("series", []):
+                s_url = (s.get("url") or "").strip().rstrip("/")
+                if s_url == clean_url or clean_url in s_url or s_url in clean_url:
+                    poster = s.get("backdrop") or s.get("poster") or ""
+                    eps = [
+                        {
+                            "season": 1,
+                            "episode": ep.get("n", i + 1),
+                            "title": ep.get("title") or f"Episode {i + 1}",
+                            "url": ep.get("url") or s_url,
+                        }
+                        for i, ep in enumerate(s.get("episodes", []))
+                    ]
+                    return {
+                        "success": True,
+                        "title": s.get("title", "Anime Series").replace(" | සිංහල උපසිරැසි සමඟ", "").strip(),
+                        "poster": poster,
+                        "backdrop": s.get("backdrop") or poster,
+                        "episodes": eps,
+                    }
+    except Exception:
+        pass
+    return None
+
 def load_cartoons_map():
     cf = get_cartoons_file()
     if not cf:
@@ -83,19 +127,30 @@ def resolve_gdrive_movie(url, requested_quality=None):
         links = anime_meta.get("links", [])
         chosen_link = None
 
+        # Prioritize Google Drive links exclusively over Telegram/bot links
+        drive_links = [
+            l for l in links
+            if (l.get("source") or "").lower() == "drive"
+            or "drive.google.com" in (l.get("resolved") or "")
+        ]
+        pool = drive_links if drive_links else links
+
         if requested_quality:
             rq = requested_quality.lower()
-            for l in links:
+            for l in pool:
                 q = (l.get("quality") or "").lower()
                 if rq in q:
                     chosen_link = l
                     break
 
-        if not chosen_link and links:
-            # Prefer 720p or 1080p, else first
-            chosen_link = next((l for l in links if "720" in (l.get("quality") or "")), None) or \
-                          next((l for l in links if "1080" in (l.get("quality") or "")), None) or \
-                          links[0]
+        if not chosen_link and pool:
+            # Prefer 720p, then 1080p, then 480p, else first
+            chosen_link = (
+                next((l for l in pool if "720" in (l.get("quality") or "")), None)
+                or next((l for l in pool if "1080" in (l.get("quality") or "")), None)
+                or next((l for l in pool if "480" in (l.get("quality") or "")), None)
+                or pool[0]
+            )
 
         if chosen_link and chosen_link.get("resolved"):
             resolved_url = chosen_link["resolved"]
