@@ -625,6 +625,20 @@ def main():
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return
 
+    # Handle Google Drive & Sinhala Dubbed Cartoons directly
+    if "drive.google.com" in args.url or "lakvision" in args.url:
+        try:
+            from gdrive_resolver import resolve_gdrive_movie
+        except ImportError:
+            import os, sys
+            sys.path.insert(0, os.path.dirname(__file__))
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+            from gdrive_resolver import resolve_gdrive_movie
+
+        result = resolve_gdrive_movie(args.url)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
     result = resolve_direct_link(args.url, args.quality)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

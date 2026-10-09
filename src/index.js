@@ -531,15 +531,15 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
 `🎬 *${title}*
 ━━━━━━━━━━━━━━━━━━━━
 👤 *Requested By:* ${mentionTag} (${pushName})
-🎯 *User Stats:* ඔබගේ ${count} වන චිත්‍රපට ඉල්ලීම [${badge}]
+🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
 🌟 *Quality:* ${resolvedQuality} ${movieData.size_text ? `(${movieData.size_text})` : ""}
 🔑 *Token:* ${token || "DIRECT"}
-⚡ *Subtitle:* Sinhala Subtitles Included
+⚡ *Audio / Language:* ${movieData.is_cartoon ? "Sinhala Dubbed (හඬකැවූ කාටූන්)" : "Sinhala Subtitles Included"}
 ━━━━━━━━━━━━━━━━━━━━
 📝 *Storyline / සාරාංශය:*
 ${movieData.description ? movieData.description.substring(0, 420) + "..." : "FilmFeed Direct Release"}
 
-📥 _චිත්‍රපටය බාගත වෙමින් පවතී... ස්වල්ප වේලාවකින් Document එකක් ලෙස Group එකට Upload වනු ඇත!_`;
+📥 _${movieData.is_cartoon ? "කාටූනය Google Drive මඟින්" : "චිත්‍රපටය"} බාගත වෙමින් පවතී... ස්වල්ප වේලාවකින් Document එකක් ලෙස Group එකට Upload වනු ඇත!_`;
 
       // 1. Send Poster to all groups
       if (posterUrl) {
