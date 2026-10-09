@@ -68,6 +68,7 @@ jobs:
           LOG_LEVEL: "info"
         run: |
           mkdir -p auth_info temp
+          rm -f auth_info/session-*.json || true
           while true; do
             echo "🚀 Starting FilmFeed Bot Engine..."
             node src/index.js || true

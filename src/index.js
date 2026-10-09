@@ -615,6 +615,21 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
 // 7. WhatsApp Bot Initialization & Event Handler
 // --------------------------------------------------------------------------
 async function startBot() {
+  // Purge stale Signal session files before loading auth state so corrupt counters never persist
+  try {
+    if (fs.existsSync(AUTH_DIR)) {
+      const files = fs.readdirSync(AUTH_DIR);
+      for (const file of files) {
+        if (file.startsWith("session-")) {
+          fs.unlinkSync(path.join(AUTH_DIR, file));
+          logger.info(`Cleaned stale Signal session file: ${file}`);
+        }
+      }
+    }
+  } catch (cleanErr) {
+    logger.warn({ err: cleanErr }, "Notice: could not clean stale session files");
+  }
+
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version, isLatest } = await fetchLatestBaileysVersion();
 
