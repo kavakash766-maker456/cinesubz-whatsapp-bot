@@ -567,7 +567,15 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
         document: { url: tempFilePath },
         mimetype: "video/mp4",
         fileName: `${title} [${resolvedQuality}] [FilmFeed].mp4`,
-        caption: `✅ *${title}* (${resolvedQuality})\n👤 Requested By: ${mentionTag} (${count}th movie)\n✨ Uploaded by FilmFeed Auto-Bot`,
+        caption: 
+`🎬 *${title}* (${resolvedQuality})
+━━━━━━━━━━━━━━━━━━━━
+👤 *Requested By:* ${mentionTag}
+🎯 *User Stats:* ${count} වන සාර්ථක නිකුතුව! [${badge}]
+⚡ *Status:* Group Broadcast Completed
+━━━━━━━━━━━━━━━━━━━━
+🍿 FilmFeed 4K Auto-Bot Engine
+👉 Request: https://web-umber-six-e1un7z6257.vercel.app`,
         mentions: mentionsList,
       });
 
