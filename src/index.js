@@ -4,6 +4,7 @@ const {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
 } = require("@whiskeysockets/baileys");
 const pino = require("pino");
 const qrcode = require("qrcode-terminal");
@@ -623,10 +624,18 @@ async function startBot() {
     version,
     logger: pino({ level: "silent" }),
     printQRInTerminal: false,
-    auth: state,
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, logger),
+    },
     generateHighQualityLinkPreview: true,
     browser: ["FilmFeed Downloader", "Chrome", "1.0.0"],
     keepAliveIntervalMs: 25000,
+    syncFullHistory: false,
+    markOnlineOnConnect: true,
+    getMessage: async (key) => {
+      return { conversation: "" };
+    },
   });
 
   waSocket = sock;
