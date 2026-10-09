@@ -664,13 +664,16 @@ async function startBot() {
     for (const msg of m.messages) {
       if (!msg.message) continue;
 
-      const remoteJid = msg.key.remoteJid;
-      const senderPhone = (msg.key.participant || remoteJid || "").split("@")[0];
-      const pushName = msg.pushName || senderPhone || "Movie Fan";
+      const rawJid = msg.key.participant || (remoteJid && remoteJid.endsWith("@s.whatsapp.net") ? remoteJid : null);
+      // Normalize to pure phone number (strips :device suffix such as :1 or :12)
+      const cleanPhone = rawJid
+        ? rawJid.replace(/:\d+/, "").split("@")[0]
+        : (senderPhone || "").replace(/:\d+/, "");
+      const cleanJid = cleanPhone ? `${cleanPhone}@s.whatsapp.net` : null;
 
-      const requesterJid = msg.key.participant || (remoteJid.endsWith("@s.whatsapp.net") ? remoteJid : null);
-      const mentionTag = requesterJid ? `@${requesterJid.split("@")[0]}` : pushName;
-      const mentionsList = requesterJid ? [requesterJid] : [];
+      const requesterJid = cleanJid;
+      const mentionTag = cleanPhone ? `@${cleanPhone}` : pushName;
+      const mentionsList = cleanJid ? [cleanJid] : [];
 
       const text =
         msg.message.conversation ||
