@@ -55,9 +55,9 @@ jobs:
         id: session-cache
         with:
           path: auth_info
-          key: whatsapp-session-${{ github.run_id }}
+          key: whatsapp-session-v2-${{ github.run_id }}
           restore-keys: |
-            whatsapp-session-
+            whatsapp-session-v2-
 
       - name: Run FilmFeed Bot Engine
         env:
@@ -81,4 +81,4 @@ jobs:
         if: always()
         with:
           path: auth_info
-          key: whatsapp-session-${{ github.run_id }}
+          key: whatsapp-session-v2-${{ github.run_id }}
