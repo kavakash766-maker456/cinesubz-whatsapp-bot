@@ -131,13 +131,17 @@ class CloudSession {
       const credsPath = path.join(this.authDir, "creds.json");
       if (!fs.existsSync(credsPath)) return;
 
+      let credsData = null;
       try {
-        const isValidAuth = Boolean(credsData && credsData.registered === true);
-        if (!isValidAuth) {
-          console.log("[CloudSession] Session not fully registered yet; skipping cloud vault sync until pairing completes.");
-          return;
-        }
-      } catch (_) {
+        credsData = JSON.parse(fs.readFileSync(credsPath, "utf8"));
+      } catch (err) {
+        console.warn(`[CloudSession] Error reading creds.json: ${err.message}`);
+        return;
+      }
+
+      const isValidAuth = Boolean(credsData && credsData.registered === true);
+      if (!isValidAuth) {
+        console.log("[CloudSession] Session not fully registered yet (registered !== true); skipping cloud vault sync.");
         return;
       }
 

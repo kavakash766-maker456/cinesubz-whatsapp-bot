@@ -56,12 +56,31 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
           SESSION_VAULT_ID: "8f37b6dbcf07ff6fab07b21cc8cbe05b"
+          RUNNER_LIFETIME_HOURS: "4.8"
         run: |
           mkdir -p auth_info temp
+          START_TIME=$(date +%s)
           while true; do
             echo "🚀 Starting FilmFeed Bot Engine..."
-            node src/index.js || true
-            echo "⚠️ Bot process stopped. Restarting automatically in 5 seconds..."
+            node src/index.js
+            EXIT_CODE=$?
+            NOW=$(date +%s)
+            ELAPSED=$((NOW - START_TIME))
+
+            # Scheduled rotation handoff after ~4.5 hours (16200s):
+            # Exit loop so next runner starts cleanly
+            if [ $EXIT_CODE -eq 0 ] && [ $ELAPSED -ge 16200 ]; then
+              echo "✅ Scheduled 4.8-hour runner rotation completed cleanly. Handing off to next 24/7 runner..."
+              break
+            fi
+
+            # Prevent GitHub Actions hard kill (terminate before 320m limit)
+            if [ $ELAPSED -ge 17280 ]; then
+              echo "⏳ Runner lifespan reached 4.8 hours. Handing off to next 24/7 runner..."
+              break
+            fi
+
+            echo "⚠️ Bot process exited with code $EXIT_CODE after ${ELAPSED}s. Restarting in 5s..."
             sleep 5
           done
 

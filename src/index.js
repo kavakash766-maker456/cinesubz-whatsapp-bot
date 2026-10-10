@@ -849,6 +849,38 @@ async function startBot() {
     cloudSession.scheduleSync();
   });
 
+  // Auto-sync vault periodically every 15 minutes to keep keys & stats updated
+  if (!global.periodicSyncStarted) {
+    global.periodicSyncStarted = true;
+    setInterval(async () => {
+      if (isConnected) {
+        try {
+          await cloudSession.sync();
+          logger.info("☁️ [AutoSync] Periodic session vault sync completed successfully.");
+        } catch (e) {
+          logger.warn(`☁️ [AutoSync] Periodic sync skipped: ${e.message}`);
+        }
+      }
+    }, 15 * 60 * 1000);
+
+    // 4.8 Hours Graceful Runner Rotation (prevents hard kills by GitHub Actions)
+    const RUNNER_LIFETIME_HOURS = parseFloat(process.env.RUNNER_LIFETIME_HOURS || "4.8");
+    if (RUNNER_LIFETIME_HOURS > 0) {
+      const lifetimeMs = RUNNER_LIFETIME_HOURS * 60 * 60 * 1000;
+      setTimeout(async () => {
+        logger.info(`⏰ [Rotation] Scheduled ${RUNNER_LIFETIME_HOURS}h runner rotation. Syncing cloud vault...`);
+        try {
+          await cloudSession.sync();
+          logger.info("☁️ [Rotation] Cloud vault sync complete.");
+        } catch (e) {
+          logger.warn(`☁️ [Rotation] Vault sync error: ${e.message}`);
+        }
+        logger.info("👋 Exiting cleanly for next continuous runner.");
+        process.exit(0);
+      }, lifetimeMs);
+    }
+  }
+
   // Pairing code only when explicitly requested, to avoid conflict with QR handshake
   if (process.env.USE_PAIRING_CODE === "true" && !state.creds.registered && BOT_PHONE) {
     setTimeout(async () => {
