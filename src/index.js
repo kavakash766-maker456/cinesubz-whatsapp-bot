@@ -5,6 +5,7 @@ const {
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
+  Browsers,
 } = require("@whiskeysockets/baileys");
 const pino = require("pino");
 const qrcode = require("qrcode-terminal");
@@ -704,7 +705,7 @@ async function startBot() {
       keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
     generateHighQualityLinkPreview: true,
-    browser: ["FilmFeed Downloader", "Chrome", "1.0.0"],
+    browser: Browsers.ubuntu("Chrome"),
     keepAliveIntervalMs: 25000,
     syncFullHistory: false,
     markOnlineOnConnect: true,
@@ -724,8 +725,8 @@ async function startBot() {
     cloudSession.scheduleSync();
   });
 
-  // Automatic WhatsApp 8-digit Pairing Code support
-  if (!state.creds.registered && BOT_PHONE) {
+  // Pairing code only when explicitly requested, to avoid conflict with QR handshake
+  if (process.env.USE_PAIRING_CODE === "true" && !state.creds.registered && BOT_PHONE) {
     setTimeout(async () => {
       try {
         if (!sock.authState.creds.registered) {
@@ -739,7 +740,7 @@ async function startBot() {
       } catch (err) {
         logger.warn(`Could not request pairing code: ${err.message}`);
       }
-    }, 4000);
+    }, 3000);
   }
 
   sock.ev.on("connection.update", async (update) => {
