@@ -9,12 +9,12 @@ on:
 
 concurrency:
   group: whatsapp-bot-instance
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 320
 
     steps:
       - name: Checkout Repository
@@ -46,15 +46,6 @@ jobs:
         run: |
           npm install
 
-      - name: Restore WhatsApp Session Cache
-        uses: actions/cache/restore@v4
-        id: session-cache
-        with:
-          path: auth_info
-          key: whatsapp-session-v2-${{ github.run_id }}
-          restore-keys: |
-            whatsapp-session-v2-
-
       - name: Run FilmFeed Bot Engine
         env:
           BOT_PHONE: "94760372547"
@@ -62,19 +53,21 @@ jobs:
           TARGET_GROUP_JIDS: "120363419930344447@g.us,120363428509877949@g.us"
           AUTH_DIR: "auth_info"
           LOG_LEVEL: "info"
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           mkdir -p auth_info temp
           while true; do
-            git pull origin main || true
             echo "🚀 Starting FilmFeed Bot Engine..."
             node src/index.js || true
             echo "⚠️ Bot process stopped. Restarting automatically in 5 seconds..."
             sleep 5
           done
 
-      - name: Save WhatsApp Session Cache
-        uses: actions/cache/save@v4
+      - name: Auto-Trigger Next 24/7 Session Runner
         if: always()
-        with:
-          path: auth_info
-          key: whatsapp-session-v2-${{ github.run_id }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          echo "🔄 Automatically queuing next continuous 24/7 runner..."
+          gh workflow run "FilmFeed WhatsApp Bot 24/7" || curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.v3+json" "https://api.github.com/repos/${{ github.repository }}/actions/workflows/bot.yml/dispatches" -d '{"ref":"main"}' || true

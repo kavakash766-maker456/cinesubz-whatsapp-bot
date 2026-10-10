@@ -13,6 +13,7 @@ const path = require("path");
 const fs = require("fs");
 const { execFile } = require("child_process");
 const axios = require("axios");
+const CloudSession = require("./cloud_session");
 
 const PORT = process.env.PORT || 7860;
 const BOT_PHONE = process.env.BOT_PHONE || "94760372547";
@@ -22,6 +23,7 @@ const TARGET_GROUP_JIDS = (process.env.TARGET_GROUP_JIDS || "120363419930344447@
   .filter(Boolean);
 const TARGET_GROUP_JID = TARGET_GROUP_JIDS[0];
 const AUTH_DIR = process.env.AUTH_DIR || path.join(__dirname, "../auth_info");
+const cloudSession = new CloudSession(AUTH_DIR, process.env.GH_PAT || process.env.GITHUB_TOKEN || process.env.GH_TOKEN);
 const TEMP_DIR = path.join(__dirname, "../temp");
 const STATS_FILE = path.join(AUTH_DIR, "user_stats.json");
 const SELF_URL = process.env.SELF_URL || process.env.RENDER_EXTERNAL_URL || process.env.KOYEB_APP_URL || null;
@@ -686,6 +688,8 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
 // 7. WhatsApp Bot Initialization & Event Handler
 // --------------------------------------------------------------------------
 async function startBot() {
+  await cloudSession.restore();
+
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version, isLatest } = await fetchLatestBaileysVersion();
 
@@ -715,7 +719,28 @@ async function startBot() {
 
   waSocket = sock;
 
-  sock.ev.on("creds.update", saveCreds);
+  sock.ev.on("creds.update", async () => {
+    await saveCreds();
+    cloudSession.scheduleSync();
+  });
+
+  // Automatic WhatsApp 8-digit Pairing Code support
+  if (!state.creds.registered && BOT_PHONE) {
+    setTimeout(async () => {
+      try {
+        if (!sock.authState.creds.registered) {
+          const code = await sock.requestPairingCode(BOT_PHONE);
+          console.log("\n========================================================");
+          console.log(`🔥 [FILMFEED 8-DIGIT PAIRING CODE]: ${code}`);
+          console.log(`👉 Open WhatsApp on ${BOT_PHONE} -> Linked Devices -> Link with Phone Number`);
+          console.log(`👉 Enter pairing code: ${code}`);
+          console.log("========================================================\n");
+        }
+      } catch (err) {
+        logger.warn(`Could not request pairing code: ${err.message}`);
+      }
+    }, 4000);
+  }
 
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
@@ -745,6 +770,14 @@ async function startBot() {
       isConnected = true;
       logger.info(`✅ FilmFeed Bot Connected successfully! Active on: ${BOT_PHONE}`);
       logger.info(`🎯 Target Group: ${TARGET_GROUP_JID}`);
+      await cloudSession.sync();
+      try {
+        const credsPath = path.join(AUTH_DIR, "creds.json");
+        if (fs.existsSync(credsPath)) {
+          const b64 = Buffer.from(fs.readFileSync(credsPath)).toString("base64");
+          console.log(`🔑 [PERMANENT_SESSION_KEY]: ${b64.slice(0, 40)}... (Vault Synced)`);
+        }
+      } catch (_) {}
       processQueue();
     }
   });
