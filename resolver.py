@@ -628,10 +628,9 @@ def main():
             try:
                 from gdrive_resolver import resolve_gdrive_movie
                 g_res = resolve_gdrive_movie(args.url, args.quality)
-                if g_res.get("file_id"):
-                    file_id = g_res["file_id"]
-                elif g_res.get("download_url"):
-                    m_id = re.search(r"/(?:file/d/|uc\?id=)([a-zA-Z0-9_-]+)", g_res["download_url"])
+                file_id = g_res.get("gdrive_id") or g_res.get("file_id")
+                if not file_id and g_res.get("direct_url"):
+                    m_id = re.search(r"/(?:file/d/|uc\?id=)([a-zA-Z0-9_-]+)", g_res["direct_url"])
                     if m_id:
                         file_id = m_id.group(1)
             except Exception:

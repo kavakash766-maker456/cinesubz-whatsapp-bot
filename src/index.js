@@ -362,12 +362,19 @@ async function processQueue() {
 
   // Helper function to broadcast message to all active groups
   const broadcastToGroups = async (payload) => {
+    let sentCount = 0;
+    let lastError = null;
     for (const jid of TARGET_GROUP_JIDS) {
       try {
         await waSocket.sendMessage(jid, payload);
+        sentCount++;
       } catch (err) {
-        logger.error({ err, jid }, `Failed sending to group ${jid}`);
+        lastError = err;
+        logger.error({ err, jid }, `Failed sending to group ${jid}: ${err.message}`);
       }
+    }
+    if (sentCount === 0 && TARGET_GROUP_JIDS.length > 0) {
+      throw lastError || new Error("WhatsApp message delivery failed to all target groups");
     }
   };
 
@@ -679,21 +686,6 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
 // 7. WhatsApp Bot Initialization & Event Handler
 // --------------------------------------------------------------------------
 async function startBot() {
-  // Purge stale Signal session files before loading auth state so corrupt counters never persist
-  try {
-    if (fs.existsSync(AUTH_DIR)) {
-      const files = fs.readdirSync(AUTH_DIR);
-      for (const file of files) {
-        if (file.startsWith("session-")) {
-          fs.unlinkSync(path.join(AUTH_DIR, file));
-          logger.info(`Cleaned stale Signal session file: ${file}`);
-        }
-      }
-    }
-  } catch (cleanErr) {
-    logger.warn({ err: cleanErr }, "Notice: could not clean stale session files");
-  }
-
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version, isLatest } = await fetchLatestBaileysVersion();
 
@@ -712,6 +704,10 @@ async function startBot() {
     keepAliveIntervalMs: 25000,
     syncFullHistory: false,
     markOnlineOnConnect: true,
+    defaultQueryTimeoutMs: 300000,
+    mediaUploadTimeoutMs: 600000,
+    connectTimeoutMs: 60000,
+    retryRequestDelayMs: 2000,
     getMessage: async (key) => {
       return { conversation: "" };
     },

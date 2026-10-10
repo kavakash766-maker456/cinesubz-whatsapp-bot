@@ -226,6 +226,7 @@ def resolve_gdrive_movie(url, requested_quality=None):
             "direct_url": direct_url,
             "is_anime": True,
             "is_cartoon": False,
+            "file_id": file_id,
             "gdrive_id": file_id,
         }
 
@@ -244,6 +245,7 @@ def resolve_gdrive_movie(url, requested_quality=None):
         "direct_url": direct_url,
         "is_cartoon": True,
         "is_anime": False,
+        "file_id": file_id,
         "gdrive_id": file_id,
     }
 
