@@ -90,9 +90,9 @@ class CloudSession {
       const files = JSON.parse(unzipped);
 
       const credsObj = files["creds.json"] ? JSON.parse(files["creds.json"]) : null;
-      const isValidAuth = Boolean(credsObj && (credsObj.registered || (credsObj.me && credsObj.me.id)));
+      const isValidAuth = Boolean(credsObj && credsObj.registered === true);
       if (!isValidAuth) {
-        console.log("[CloudSession] Cloud vault credentials are not authenticated yet; skipping restore.");
+        console.log("[CloudSession] Cloud vault credentials are not registered (registered !== true); skipping restore to generate fresh QR.");
         return false;
       }
 
@@ -132,9 +132,9 @@ class CloudSession {
       if (!fs.existsSync(credsPath)) return;
 
       try {
-        const credsData = JSON.parse(fs.readFileSync(credsPath, "utf8"));
-        const isValidAuth = Boolean(credsData.registered || (credsData.me && credsData.me.id));
+        const isValidAuth = Boolean(credsData && credsData.registered === true);
         if (!isValidAuth) {
+          console.log("[CloudSession] Session not fully registered yet; skipping cloud vault sync until pairing completes.");
           return;
         }
       } catch (_) {

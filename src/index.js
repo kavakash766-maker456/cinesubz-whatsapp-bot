@@ -821,8 +821,8 @@ async function startBot() {
 
   const sock = makeWASocket({
     version,
-    logger: pino({ level: "silent" }),
-    printQRInTerminal: false,
+    logger: pino({ level: process.env.BAILEYS_LOG_LEVEL || "info" }),
+    printQRInTerminal: true,
     auth: {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger),
@@ -884,19 +884,18 @@ async function startBot() {
       const ghToken = process.env.GH_PAT || process.env.GITHUB_TOKEN;
       const vaultId = process.env.SESSION_VAULT_ID || "8f37b6dbcf07ff6fab07b21cc8cbe05b";
       if (ghToken && vaultId) {
-        fetch(`https://api.github.com/gists/${vaultId}`, {
-          method: "PATCH",
+        axios.patch(`https://api.github.com/gists/${vaultId}`, {
+          files: {
+            "latest_qr.txt": { content: qrUrl },
+          },
+        }, {
           headers: {
             Authorization: "Bearer " + ghToken,
             Accept: "application/vnd.github+json",
             "User-Agent": "FilmFeed-QR",
           },
-          body: JSON.stringify({
-            files: {
-              "latest_qr.txt": { content: qrUrl },
-            },
-          }),
-        }).catch(() => {});
+          timeout: 8000,
+        }).catch((e) => console.warn("[QR Gist Sync] error:", e.message));
       }
     }
 
@@ -974,7 +973,7 @@ async function startBot() {
         const text = rawText.trim();
 
         if (text) {
-          logger.info(`[Msg] from: ${remoteJid} | fromMe: ${fromMe} | text: "${text.substring(0, 80).replace(/\n/g, " ")}"`);
+          console.log(`📩 [Msg Received] from: ${pushName} (${remoteJid}) | fromMe: ${fromMe}:\n${text}`);
         }
 
         let commandFound = false;
@@ -984,42 +983,54 @@ async function startBot() {
         let quality = "720p";
         let token = "";
 
-        // 1. Season command: !req_season, /season, .season, or !req ... | S1
-        const seasonMatch =
-          text.match(/[!/.]?(?:req_season|season)\s+([^\s|]+)(?:\s*\|\s*[Ss]?(\d+))?(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i) ||
-          text.match(/[!/.]?req(?:uest)?\s+([^\s|]+)\s*\|\s*[Ss](\d+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
+        const textLines = text.split("\n");
 
-        if (seasonMatch) {
-          commandFound = true;
-          isSeriesSeason = true;
-          movieUrl = seasonMatch[1].trim();
-          seasonNumber = seasonMatch[2] ? parseInt(seasonMatch[2].trim(), 10) : 1;
-          quality = seasonMatch[3] ? seasonMatch[3].trim() : "720p";
-          token = seasonMatch[4] ? seasonMatch[4].trim() : "";
-        } else {
-          // 2. Standard Movie command: !req <url> | <quality> | <token> or .req /req
-          const reqMatch = text.match(/[!/.]?req(?:uest)?\s+([^\s|]+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
-          if (reqMatch && (reqMatch[1].startsWith("http") || reqMatch[1].includes("cinesubz") || reqMatch[1].includes("sinhalasub"))) {
+        // 1. Line-by-line check for commands (prevents false matches on headers like *Request Source:*)
+        for (const rawLine of textLines) {
+          const line = rawLine.trim();
+          if (!line) continue;
+
+          // 1A. Season Command: !req_season, /season, .season, or !req <url> | S1
+          const sMatch =
+            line.match(/^[!/.]?(?:req_season|season)\s+([^\s|]+)(?:\s*\|\s*[Ss]?(\d+))?(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i) ||
+            line.match(/^[!/.]?req(?:uest)?\s+([^\s|]+)\s*\|\s*[Ss](\d+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
+
+          if (sMatch && (sMatch[1].startsWith("http") || sMatch[1].includes("cinesubz") || sMatch[1].includes("sinhalasub"))) {
             commandFound = true;
-            movieUrl = reqMatch[1].trim();
-            quality = reqMatch[2] ? reqMatch[2].trim() : "720p";
-            token = reqMatch[3] ? reqMatch[3].trim() : "";
+            isSeriesSeason = true;
+            movieUrl = sMatch[1].trim();
+            seasonNumber = sMatch[2] ? parseInt(sMatch[2].trim(), 10) : 1;
+            quality = sMatch[3] ? sMatch[3].trim() : "720p";
+            token = sMatch[4] ? sMatch[4].trim() : "";
+            break;
+          }
+
+          // 1B. Movie Command: !req <url> | <quality> | <token>
+          const rMatch = line.match(/^[!/.]?req(?:uest)?\s+(https?:\/\/[^\s|]+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
+          if (rMatch) {
+            commandFound = true;
+            movieUrl = rMatch[1].trim();
+            quality = rMatch[2] ? rMatch[2].trim() : "720p";
+            token = rMatch[3] ? rMatch[3].trim() : "";
             if (movieUrl.includes("/tvshows/")) {
               isSeriesSeason = true;
               seasonNumber = 1;
             }
-          } else {
-            // 3. Raw URL pasted directly (CineSubz or SinhalaSub)
-            const urlMatch = text.match(/(https?:\/\/[^\s|]+(?:cinesubz|sinhalasub)[^\s|]*)/i);
-            if (urlMatch) {
-              commandFound = true;
-              movieUrl = urlMatch[1].trim();
-              quality = "720p";
-              token = "DIRECT";
-              if (movieUrl.includes("/tvshows/")) {
-                isSeriesSeason = true;
-                seasonNumber = 1;
-              }
+            break;
+          }
+        }
+
+        // 2. Fallback: Search anywhere for a CineSubz or SinhalaSub URL if no formal command was triggered
+        if (!commandFound) {
+          const urlMatch = text.match(/(https?:\/\/[^\s|]*(?:cinesubz|sinhalasub)[^\s|\n]*)/i);
+          if (urlMatch) {
+            commandFound = true;
+            movieUrl = urlMatch[1].trim();
+            quality = "720p";
+            token = "DIRECT";
+            if (movieUrl.includes("/tvshows/")) {
+              isSeriesSeason = true;
+              seasonNumber = 1;
             }
           }
         }
