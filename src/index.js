@@ -873,11 +873,31 @@ async function startBot() {
     if (qr) {
       latestQR = qr;
       isConnected = false;
+      const qrUrl = "https://api.qrserver.com/v1/create-qr-code/?size=350x350&data=" + encodeURIComponent(qr);
       console.log("\n==================================================");
       console.log("📲 SCAN THE QR CODE BELOW WITH WHATSAPP (0760372547):");
       console.log("==================================================");
       qrcode.generate(qr, { small: true });
-      console.log("\n👉 Web QR Link: https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=" + encodeURIComponent(qr) + "\n");
+      console.log("\n👉 Web QR Link: " + qrUrl + "\n");
+
+      // Auto-publish QR link to Gist for instant 1-click access
+      const ghToken = process.env.GH_PAT || process.env.GITHUB_TOKEN;
+      const vaultId = process.env.SESSION_VAULT_ID || "8f37b6dbcf07ff6fab07b21cc8cbe05b";
+      if (ghToken && vaultId) {
+        fetch(`https://api.github.com/gists/${vaultId}`, {
+          method: "PATCH",
+          headers: {
+            Authorization: "Bearer " + ghToken,
+            Accept: "application/vnd.github+json",
+            "User-Agent": "FilmFeed-QR",
+          },
+          body: JSON.stringify({
+            files: {
+              "latest_qr.txt": { content: qrUrl },
+            },
+          }),
+        }).catch(() => {});
+      }
     }
 
     if (connection === "close") {
