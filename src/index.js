@@ -316,33 +316,70 @@ async function checkFileSize(url) {
 // 5. File Downloader
 // --------------------------------------------------------------------------
 async function downloadFile(url, destPath, onProgress) {
-  const writer = fs.createWriteStream(destPath);
-  const response = await axios({
-    url,
-    method: "GET",
-    responseType: "stream",
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    },
-    timeout: 300000,
-  });
-
-  const totalLength = parseInt(response.headers["content-length"] || "0", 10);
-  let downloaded = 0;
-
-  response.data.on("data", (chunk) => {
-    downloaded += chunk.length;
-    if (totalLength > 0 && onProgress) {
-      onProgress(downloaded, totalLength);
-    }
-  });
-
   return new Promise((resolve, reject) => {
-    response.data.pipe(writer);
-    writer.on("finish", () => resolve(destPath));
-    writer.on("error", (err) => {
-      fs.unlink(destPath, () => {});
+    const fastDownloader = path.join(__dirname, "../fast_downloader.py");
+    const pythonCmd = process.platform === "win32" ? "python" : "python3";
+    const { spawn } = require("child_process");
+
+    const child = spawn(pythonCmd, [fastDownloader, url, destPath, "8"]);
+    let buffer = "";
+
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString();
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const data = JSON.parse(line.trim());
+          if (data.type === "progress" && onProgress) {
+            onProgress(data.downloaded, data.total, data.speed_mb);
+          }
+        } catch (_) {}
+      }
+    });
+
+    child.stderr.on("data", (errData) => {
+      logger.warn(`[FastDownloader] ${errData.toString().trim()}`);
+    });
+
+    child.on("close", (code) => {
+      if (code === 0 && fs.existsSync(destPath) && fs.statSync(destPath).size > 1000000) {
+        resolve(destPath);
+      } else {
+        logger.warn(`Fast parallel downloader exited with code ${code}. Falling back to standard stream...`);
+        const writer = fs.createWriteStream(destPath);
+        axios({
+          url,
+          method: "GET",
+          responseType: "stream",
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          },
+          timeout: 300000,
+        })
+          .then((response) => {
+            const totalLength = parseInt(response.headers["content-length"] || "0", 10);
+            let downloaded = 0;
+            response.data.on("data", (c) => {
+              downloaded += c.length;
+              if (onProgress) onProgress(downloaded, totalLength, 0);
+            });
+            response.data.pipe(writer);
+            writer.on("finish", () => resolve(destPath));
+            writer.on("error", (err) => {
+              fs.unlink(destPath, () => {});
+              reject(err);
+            });
+          })
+          .catch(reject);
+      }
+    });
+
+    child.on("error", (err) => {
+      logger.error({ err }, "Failed spawning fast_downloader.py");
       reject(err);
     });
   });
@@ -622,13 +659,14 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
         await downloadGDriveFile(movieUrl, tempFilePath, resolvedQuality);
       } else {
         logger.info(`Downloading video from ${directUrl} to ${tempFilePath}`);
-        await downloadFile(directUrl, tempFilePath, (downloaded, total) => {
+        await downloadFile(directUrl, tempFilePath, (downloaded, total, speed_mb) => {
           const now = Date.now();
           const percent = total > 0 ? Math.round((downloaded / total) * 100) : 0;
-          if (now - lastProgressEdit > 3000 || percent % 25 === 0) {
+          if (now - lastProgressEdit > 3000 || percent % 20 === 0) {
             lastProgressEdit = now;
             const dMB = Math.round(downloaded / (1024 * 1024));
             const tMB = Math.round(total / (1024 * 1024));
+            const speedText = speed_mb && speed_mb > 0 ? `${speed_mb} MB/s` : "Ultra High-Speed CDN";
             if (liveStatusMsg?.key) {
               waSocket.sendMessage(replyTarget, {
                 text: 
@@ -638,7 +676,7 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
 👤 *Requested By:* ${pushName} [${badge}]
 ⏳ *තත්ත්වය:* බාගත වෙමින් පවතී...
 📥 *Download Progress:* ${percent}% (${dMB}MB / ${tMB}MB)
-⚡ *Speed:* High-Speed CDN
+⚡ *Speed:* ${speedText} (8x Multi-Stream)
 ━━━━━━━━━━━━━━━━━━━━`,
                 edit: liveStatusMsg.key,
               }).catch(() => {});
