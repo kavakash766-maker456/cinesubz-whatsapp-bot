@@ -712,7 +712,8 @@ async function startBot() {
     defaultQueryTimeoutMs: 300000,
     mediaUploadTimeoutMs: 600000,
     connectTimeoutMs: 60000,
-    retryRequestDelayMs: 2000,
+    retryRequestDelayMs: 5000,
+    maxMsgRetryCount: 3,
     getMessage: async (key) => {
       return { conversation: "" };
     },
@@ -764,19 +765,15 @@ async function startBot() {
         `Connection closed (code: ${statusCode}, error: ${lastDisconnect?.error}). Reconnecting...`
       );
 
-      if (isLoggedOut || !state.creds.registered) {
+      if (isLoggedOut) {
+        logger.warn("Session logged out by user. Clearing auth directory...");
         try {
-          const credsPath = path.join(AUTH_DIR, "creds.json");
-          if (fs.existsSync(credsPath)) {
-            const data = JSON.parse(fs.readFileSync(credsPath, "utf8"));
-            if (!data.registered) {
-              fs.unlinkSync(credsPath);
-            }
-          }
+          fs.rmSync(AUTH_DIR, { recursive: true, force: true });
         } catch (_) {}
       }
 
-      setTimeout(startBot, 4000);
+      const delay = statusCode === 515 ? 1000 : 3000;
+      setTimeout(startBot, delay);
     } else if (connection === "open") {
       latestQR = null;
       isConnected = true;
