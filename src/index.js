@@ -757,14 +757,25 @@ async function startBot() {
 
     if (connection === "close") {
       isConnected = false;
-      const shouldReconnect =
-        lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const isLoggedOut = statusCode === DisconnectReason.loggedOut;
       logger.warn(
-        `Connection closed due to ${lastDisconnect?.error}. Reconnecting: ${shouldReconnect}`
+        `Connection closed (code: ${statusCode}, error: ${lastDisconnect?.error}). Reconnecting...`
       );
-      if (shouldReconnect) {
-        setTimeout(startBot, 3000);
+
+      if (isLoggedOut || !state.creds.registered) {
+        try {
+          const credsPath = path.join(AUTH_DIR, "creds.json");
+          if (fs.existsSync(credsPath)) {
+            const data = JSON.parse(fs.readFileSync(credsPath, "utf8"));
+            if (!data.registered) {
+              fs.unlinkSync(credsPath);
+            }
+          }
+        } catch (_) {}
       }
+
+      setTimeout(startBot, 4000);
     } else if (connection === "open") {
       latestQR = null;
       isConnected = true;

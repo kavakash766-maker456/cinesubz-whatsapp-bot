@@ -79,6 +79,12 @@ class CloudSession {
       const unzipped = zlib.gunzipSync(compressed).toString("utf8");
       const files = JSON.parse(unzipped);
 
+      const credsObj = files["creds.json"] ? JSON.parse(files["creds.json"]) : null;
+      if (!credsObj || !credsObj.registered) {
+        console.log("[CloudSession] Cloud vault credentials are not registered yet; skipping restore.");
+        return false;
+      }
+
       if (!fs.existsSync(this.authDir)) {
         fs.mkdirSync(this.authDir, { recursive: true });
       }
@@ -111,8 +117,21 @@ class CloudSession {
 
     try {
       if (!fs.existsSync(this.authDir)) return;
+      const credsPath = path.join(this.authDir, "creds.json");
+      if (!fs.existsSync(credsPath)) return;
+
+      try {
+        const credsData = JSON.parse(fs.readFileSync(credsPath, "utf8"));
+        if (!credsData.registered) {
+          // Do not sync unregistered credentials
+          return;
+        }
+      } catch (_) {
+        return;
+      }
+
       const fileNames = fs.readdirSync(this.authDir).filter((f) => f.endsWith(".json"));
-      if (fileNames.length === 0 || !fs.existsSync(path.join(this.authDir, "creds.json"))) {
+      if (fileNames.length === 0) {
         return;
       }
 

@@ -1,6 +1,7 @@
 node_modules/
 temp/
-auth_info/session-*.json
+auth_info/
+.env
 
 __pycache__/
 *.pyc
