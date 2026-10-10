@@ -519,8 +519,19 @@ def _resolve_one(drive_url: str):
 def resolve_direct_link(
     movie_url: str, requested_quality: str = None, _depth: int = 0
 ):
-    movie = scrape_movie(movie_url)
-    downloads = movie["downloads"]
+    if "sinhalasub.lk" in movie_url:
+        try:
+            from sinhalasub_resolver import resolve_sinhalasub_movie
+            return resolve_sinhalasub_movie(movie_url, requested_quality)
+        except Exception as e:
+            return {"error": f"Sinhalasub resolver error: {e}"}
+
+    try:
+        movie = scrape_movie(movie_url)
+    except Exception as scrape_err:
+        movie = {"downloads": [], "details": {}, "error": str(scrape_err)}
+
+    downloads = movie.get("downloads") or []
     episodes = movie.get("episodes") or []
 
     # TV series page: no direct links -> follow the first available episode.
@@ -538,6 +549,18 @@ def resolve_direct_link(
         return result
 
     if not downloads:
+        title = movie.get("details", {}).get("title", "")
+        if not title and movie_url:
+            slug = movie_url.rstrip("/").split("/")[-1]
+            title = slug.replace("-", " ")
+        if title:
+            try:
+                from sinhalasub_resolver import search_sinhalasub, resolve_sinhalasub_movie
+                s_results = search_sinhalasub(title)
+                if s_results:
+                    return resolve_sinhalasub_movie(s_results[0]["url"], requested_quality)
+            except Exception:
+                pass
         return {"error": "No download links found on movie page", "movie": movie}
 
     # Filter/sort by requested quality if specified

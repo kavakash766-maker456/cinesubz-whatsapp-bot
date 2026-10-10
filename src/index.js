@@ -68,14 +68,28 @@ function getUserStats() {
   return {};
 }
 
-function incrementUserRequest(userId, userName) {
+function incrementUserRequest(userId, userName, movieTitle, quality) {
   const stats = getUserStats();
   if (!stats[userId]) {
-    stats[userId] = { count: 0, name: userName, firstSeen: new Date().toISOString() };
+    stats[userId] = { count: 0, name: userName, firstSeen: new Date().toISOString(), history: [] };
+  }
+  if (!stats[userId].history) {
+    stats[userId].history = [];
   }
   stats[userId].count += 1;
   stats[userId].name = userName || stats[userId].name;
   stats[userId].lastSeen = new Date().toISOString();
+
+  if (movieTitle) {
+    stats[userId].history.push({
+      title: movieTitle,
+      quality: quality || "720p",
+      date: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+    });
+    if (stats[userId].history.length > 25) {
+      stats[userId].history = stats[userId].history.slice(-25);
+    }
+  }
 
   try {
     fs.writeFileSync(STATS_FILE, JSON.stringify(stats, null, 2), "utf8");
@@ -84,6 +98,7 @@ function incrementUserRequest(userId, userName) {
   }
 
   const count = stats[userId].count;
+  const history = stats[userId].history || [];
   let badge = "🌟 New Member";
   if (count >= 20) badge = "👑 Film Legend (VIP)";
   else if (count >= 10) badge = "🥇 Elite Cinephile";
@@ -91,7 +106,7 @@ function incrementUserRequest(userId, userName) {
   else if (count >= 2) badge = "🥉 Regular Member";
   else badge = "✨ First Request (Welcome!)";
 
-  return { count, badge };
+  return { count, badge, history };
 }
 
 // --------------------------------------------------------------------------
@@ -512,10 +527,13 @@ async function processQueue() {
       // ----------------------------------------------------------------------
       // MODE B: SINGLE MOVIE PROCESSING
       // ----------------------------------------------------------------------
-      await waSocket.sendMessage(replyTarget, {
+      const statusTrackerKeys = [];
+
+      const initialQueueMsg = await waSocket.sendMessage(replyTarget, {
         text: `🚀 *[FilmFeed Auto-Bot]*\n\n*${pushName}*, ඔබගේ වාරය පැමිණියා! චිත්‍රපටය බාගත කිරීම දැන් ආරම්භ වේ...\n\n📺 Quality: *${quality}*\n🔑 Token: *${token}*`,
         mentions: mentionsList,
       });
+      if (initialQueueMsg?.key) statusTrackerKeys.push(initialQueueMsg.key);
 
       const movieData = await resolveMovie(movieUrl, quality);
 
@@ -567,32 +585,111 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
         return;
       }
 
-      // Poster Caption
-      let audioSubText = "Sinhala Subtitles Included";
-      let downloadSourceText = "චිත්‍රපටය";
-      if (movieData.is_anime) {
-        audioSubText = "Japanese Audio • Sinhala Subtitles Included (සිංහල උපසිරැසි සමඟ)";
-        downloadSourceText = "Anime චිත්‍රපටය Google Drive මඟින්";
-      } else if (movieData.is_cartoon) {
-        audioSubText = "Sinhala Dubbed (හඬකැවූ කාටූන්)";
-        downloadSourceText = "කාටූනය Google Drive මඟින්";
+      // Live Real-Time Status Tracker Message for Requester
+      let liveStatusMsg = null;
+      try {
+        liveStatusMsg = await waSocket.sendMessage(replyTarget, {
+          text: 
+`🎬 *[FilmFeed Downloader]*
+━━━━━━━━━━━━━━━━━━━━
+📌 *චිත්‍රපටය:* *${title}* (${resolvedQuality})
+👤 *Requested By:* ${pushName} [${badge}]
+⏳ *තත්ත්වය:* බාගත කිරීම ආරම්භ විය...
+📥 *Download Progress:* 0%
+⚡ *Server:* High-Speed CDN
+━━━━━━━━━━━━━━━━━━━━`,
+          mentions: mentionsList,
+        });
+        if (liveStatusMsg?.key) statusTrackerKeys.push(liveStatusMsg.key);
+      } catch (_) {}
+
+      // 1. Download Movie File to Disk First
+      const safeName = title.replace(/[^a-zA-Z0-9_-]/g, "_") + `_${resolvedQuality}.mp4`;
+      const tempFilePath = path.join(TEMP_DIR, `${Date.now()}_${safeName}`);
+
+      const isGDrive =
+        movieData.is_cartoon ||
+        movieData.is_anime ||
+        movieData.is_gdrive ||
+        movieUrl.includes("drive.google.com") ||
+        movieUrl.includes("lakvision") ||
+        movieUrl.includes("slanimeclub") ||
+        movieUrl.includes("anime");
+
+      let lastProgressEdit = 0;
+      if (isGDrive) {
+        logger.info(`Starting high-speed Google Drive download for ${title}...`);
+        await downloadGDriveFile(movieUrl, tempFilePath, resolvedQuality);
+      } else {
+        logger.info(`Downloading video from ${directUrl} to ${tempFilePath}`);
+        await downloadFile(directUrl, tempFilePath, (downloaded, total) => {
+          const now = Date.now();
+          const percent = total > 0 ? Math.round((downloaded / total) * 100) : 0;
+          if (now - lastProgressEdit > 3000 || percent % 25 === 0) {
+            lastProgressEdit = now;
+            const dMB = Math.round(downloaded / (1024 * 1024));
+            const tMB = Math.round(total / (1024 * 1024));
+            if (liveStatusMsg?.key) {
+              waSocket.sendMessage(replyTarget, {
+                text: 
+`🎬 *[FilmFeed Downloader]*
+━━━━━━━━━━━━━━━━━━━━
+📌 *චිත්‍රපටය:* *${title}* (${resolvedQuality})
+👤 *Requested By:* ${pushName} [${badge}]
+⏳ *තත්ත්වය:* බාගත වෙමින් පවතී...
+📥 *Download Progress:* ${percent}% (${dMB}MB / ${tMB}MB)
+⚡ *Speed:* High-Speed CDN
+━━━━━━━━━━━━━━━━━━━━`,
+                edit: liveStatusMsg.key,
+              }).catch(() => {});
+            }
+          }
+        });
       }
 
+      // 2. Verify file exists on disk and is non-zero
+      if (!fs.existsSync(tempFilePath)) {
+        throw new Error("ගොනුව බාගත කිරීම අසාර්ථක විය. File not created on disk.");
+      }
+      const finalFileSize = fs.statSync(tempFilePath).size;
+      if (finalFileSize < 1000000) {
+        throw new Error(`බාගත කිරීමේදී දෝෂයක් සිදු විය (ගොනුව ${Math.round(finalFileSize / 1024)}KB ලෙස ලැබුණි, 0MB දෝෂයකි).`);
+      }
+
+      const finalSizeMB = Math.round(finalFileSize / (1024 * 1024));
+      logger.info(`Download verified! Final file size on disk: ${finalSizeMB}MB.`);
+
+      // Update Live Status Message: Uploading
+      if (liveStatusMsg?.key) {
+        await waSocket.sendMessage(replyTarget, {
+          text: 
+`🎬 *[FilmFeed Downloader]*
+━━━━━━━━━━━━━━━━━━━━
+📌 *චිත්‍රපටය:* *${title}* (${resolvedQuality})
+👤 *Requested By:* ${pushName} [${badge}]
+✅ *Download:* 100% සම්පූර්ණයි (${finalSizeMB}MB)
+📤 *Uploading:* WhatsApp සමූහය වෙත යවමින් පවතී...
+⚡ *Status:* Group Broadcast in Progress
+━━━━━━━━━━━━━━━━━━━━`,
+          edit: liveStatusMsg.key,
+        }).catch(() => {});
+      }
+
+      // 3. Send Poster to WhatsApp Group ONLY AFTER download is complete & verified
       const caption = 
 `🎬 *${title}*
 ━━━━━━━━━━━━━━━━━━━━
 👤 *Requested By:* ${mentionTag} (${pushName})
 🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
-🌟 *Quality:* ${resolvedQuality} ${movieData.size_text ? `(${movieData.size_text})` : ""}
+🌟 *Quality:* ${resolvedQuality} ${movieData.size_text ? `(${movieData.size_text})` : `(${finalSizeMB}MB)`}
 🔑 *Token:* ${token || "DIRECT"}
-⚡ *Audio / Sub:* ${audioSubText}
+⚡ *Audio / Sub:* Sinhala Subtitles Included
 ━━━━━━━━━━━━━━━━━━━━
 📝 *Storyline / සාරාංශය:*
 ${movieData.description ? movieData.description.substring(0, 420) + "..." : "FilmFeed Direct Release"}
 
-📥 _${downloadSourceText} බාගත වෙමින් පවතී... ස්වල්ප වේලාවකින් Document එකක් ලෙස Group එකට Upload වනු ඇත!_`;
+🍿 _චිත්‍රපටය පහතින් Document එකක් ලෙස ලැබෙනු ඇත!_`;
 
-      // 1. Send Poster to all groups
       if (posterUrl) {
         await broadcastToGroups({
           image: { url: posterUrl },
@@ -606,45 +703,8 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
         });
       }
 
-      // 2. Download Movie File
-      const safeName = title.replace(/[^a-zA-Z0-9_-]/g, "_") + `_${resolvedQuality}.mp4`;
-      const tempFilePath = path.join(TEMP_DIR, `${Date.now()}_${safeName}`);
-
-      const isGDrive =
-        movieData.is_cartoon ||
-        movieData.is_anime ||
-        movieData.is_gdrive ||
-        movieUrl.includes("drive.google.com") ||
-        movieUrl.includes("lakvision") ||
-        movieUrl.includes("slanimeclub") ||
-        movieUrl.includes("anime");
-
-      if (isGDrive) {
-        logger.info(`Starting high-speed Google Drive download for ${title}...`);
-        await downloadGDriveFile(movieUrl, tempFilePath, resolvedQuality);
-      } else {
-        logger.info(`Downloading video from ${directUrl} to ${tempFilePath}`);
-        await downloadFile(directUrl, tempFilePath, (downloaded, total) => {
-          const percent = Math.round((downloaded / total) * 100);
-          if (percent % 25 === 0) {
-            logger.info(`Download progress for ${title}: ${percent}% (${Math.round(downloaded / 1024 / 1024)}MB)`);
-          }
-        });
-      }
-
-      // Verify file exists on disk and is non-zero
-      if (!fs.existsSync(tempFilePath)) {
-        throw new Error("ගොනුව බාගත කිරීම අසාර්ථක විය. File not created on disk.");
-      }
-      const finalFileSize = fs.statSync(tempFilePath).size;
-      if (finalFileSize < 1000000) {
-        throw new Error(`බාගත කිරීමේදී දෝෂයක් සිදු විය (ගොනුව ${Math.round(finalFileSize / 1024)}KB ලෙස ලැබුණි, 0MB දෝෂයකි). කරුණාකර වෙනත් කාටූනයක් උත්සාහ කරන්න.`);
-      }
-
-      const finalSizeMB = Math.round(finalFileSize / (1024 * 1024));
-      logger.info(`Download verified! Final file size on disk: ${finalSizeMB}MB. Uploading document to WhatsApp groups...`);
-
-      // 3. Upload Document to all groups
+      // 4. Upload Document to all groups
+      logger.info(`Uploading ${finalSizeMB}MB document to WhatsApp groups...`);
       await broadcastToGroups({
         document: { url: tempFilePath },
         mimetype: "video/mp4",
@@ -661,14 +721,39 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
         mentions: mentionsList,
       });
 
-      // 4. Delete temp file
+      // 5. Delete temp file from disk
       if (fs.existsSync(tempFilePath)) {
         fs.unlinkSync(tempFilePath);
       }
 
-      // 5. Notify Requester
+      // 6. Delete intermediate status messages from user's chat
+      for (const k of statusTrackerKeys) {
+        try {
+          await waSocket.sendMessage(replyTarget, { delete: k });
+        } catch (_) {}
+      }
+
+      // 7. Record movie in user's history and send final summary
+      const updatedStats = incrementUserRequest(requesterJid || replyTarget, pushName, title, resolvedQuality);
+      const historyList = (updatedStats.history || []).slice(-10);
+      let historyText = "";
+      historyList.forEach((item, idx) => {
+        historyText += `\n${idx + 1}. 🎬 ${item.title} *(${item.quality})* - _${item.date}_`;
+      });
+
       await waSocket.sendMessage(replyTarget, {
-        text: `🎉 *[FilmFeed Auto-Bot]* සාර්ථකයි!\n*${pushName}*, ඔබ ඉල්ලූ *${title}* (${resolvedQuality}) චිත්‍රපටය WhatsApp සමූහය වෙත යවන ලදී. 🍿 Enjoy!`,
+        text: 
+`🎉 *[FilmFeed Auto-Bot]* සාර්ථකයි!
+━━━━━━━━━━━━━━━━━━━━
+👤 *සාමාජිකයා:* ${pushName} [${updatedStats.badge}]
+🎬 *නිකුත් වූ චිත්‍රපටය:* *${title}* (${resolvedQuality})
+📦 *ප්‍රමාණය:* ${finalSizeMB}MB
+⚡ *තත්ත්වය:* සමූහය වෙත සාර්ථකව යවන ලදී (Broadcast Complete)
+
+📜 *ඔබ මෙතෙක් ලබාගත් චිත්‍රපට ලැයිස්තුව (${updatedStats.count}):*${historyText}
+━━━━━━━━━━━━━━━━━━━━
+🍿 FilmFeed Group එකෙන් දැන්ම Download කරගන්න!
+👉 Website: https://web-umber-six-e1un7z6257.vercel.app`,
         mentions: mentionsList,
       });
     }
