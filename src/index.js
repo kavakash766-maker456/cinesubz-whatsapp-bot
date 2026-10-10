@@ -977,72 +977,96 @@ async function startBot() {
           logger.info(`[Msg] from: ${remoteJid} | fromMe: ${fromMe} | text: "${text.substring(0, 80).replace(/\n/g, " ")}"`);
         }
 
-        if (!text || (!text.includes("!req") && !text.includes("!season"))) continue;
+        let commandFound = false;
+        let isSeriesSeason = false;
+        let seasonNumber = 1;
+        let movieUrl = "";
+        let quality = "720p";
+        let token = "";
 
-        logger.info(`🎯 Received FilmFeed command from ${pushName} (${remoteJid}): ${text}`);
+        // 1. Season command: !req_season, /season, .season, or !req ... | S1
+        const seasonMatch =
+          text.match(/[!/.]?(?:req_season|season)\s+([^\s|]+)(?:\s*\|\s*[Ss]?(\d+))?(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i) ||
+          text.match(/[!/.]?req(?:uest)?\s+([^\s|]+)\s*\|\s*[Ss](\d+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
 
-      // 1. Check for TV Series Season command:
-      // !req_season <url> | S<num> | <quality> | <token> OR !req <url> | S1 | 720p | token
-      const seasonMatch = text.match(/!(?:req_season|season)\s+([^\s|]+)(?:\s*\|\s*[Ss]?(\d+))?(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i) ||
-                          text.match(/!req(?:uest)?\s+([^\s|]+)\s*\|\s*[Ss](\d+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
-
-      let isSeriesSeason = false;
-      let seasonNumber = 1;
-      let movieUrl = "";
-      let quality = "720p";
-      let token = "";
-
-      if (seasonMatch) {
-        isSeriesSeason = true;
-        movieUrl = seasonMatch[1].trim();
-        seasonNumber = seasonMatch[2] ? parseInt(seasonMatch[2].trim(), 10) : 1;
-        quality = seasonMatch[3] ? seasonMatch[3].trim() : "720p";
-        token = seasonMatch[4] ? seasonMatch[4].trim() : "";
-      } else {
-        // Standard Movie command: !req <url> | <quality> | <token>
-        const match = text.match(/!req(?:uest)?\s+([^\s|]+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
-        if (!match) continue;
-
-        movieUrl = match[1].trim();
-        quality = match[2] ? match[2].trim() : "1080p";
-        token = match[3] ? match[3].trim() : "";
-        if (movieUrl.includes("/tvshows/")) {
+        if (seasonMatch) {
+          commandFound = true;
           isSeriesSeason = true;
-          seasonNumber = 1;
+          movieUrl = seasonMatch[1].trim();
+          seasonNumber = seasonMatch[2] ? parseInt(seasonMatch[2].trim(), 10) : 1;
+          quality = seasonMatch[3] ? seasonMatch[3].trim() : "720p";
+          token = seasonMatch[4] ? seasonMatch[4].trim() : "";
+        } else {
+          // 2. Standard Movie command: !req <url> | <quality> | <token> or .req /req
+          const reqMatch = text.match(/[!/.]?req(?:uest)?\s+([^\s|]+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
+          if (reqMatch && (reqMatch[1].startsWith("http") || reqMatch[1].includes("cinesubz") || reqMatch[1].includes("sinhalasub"))) {
+            commandFound = true;
+            movieUrl = reqMatch[1].trim();
+            quality = reqMatch[2] ? reqMatch[2].trim() : "720p";
+            token = reqMatch[3] ? reqMatch[3].trim() : "";
+            if (movieUrl.includes("/tvshows/")) {
+              isSeriesSeason = true;
+              seasonNumber = 1;
+            }
+          } else {
+            // 3. Raw URL pasted directly (CineSubz or SinhalaSub)
+            const urlMatch = text.match(/(https?:\/\/[^\s|]+(?:cinesubz|sinhalasub)[^\s|]*)/i);
+            if (urlMatch) {
+              commandFound = true;
+              movieUrl = urlMatch[1].trim();
+              quality = "720p";
+              token = "DIRECT";
+              if (movieUrl.includes("/tvshows/")) {
+                isSeriesSeason = true;
+                seasonNumber = 1;
+              }
+            }
+          }
         }
-      }
 
-      const replyTarget = remoteJid;
-      const userStats = incrementUserRequest(senderPhone, pushName);
-      const { count, badge } = userStats;
+        if (!commandFound || !movieUrl) continue;
 
-      const isBusy = isProcessingQueue || requestQueue.length > 0;
-      const queuePosition = requestQueue.length + (isProcessingQueue ? 1 : 0);
+        logger.info(`🎯 Accepted FilmFeed command from ${pushName} (${remoteJid}): URL=${movieUrl} | Q=${quality}`);
 
-      const taskItem = {
-        isSeriesSeason,
-        seasonNumber,
-        movieUrl,
-        quality,
-        token,
-        replyTarget,
-        requesterJid,
-        pushName,
-        mentionTag,
-        mentionsList,
-        userStats,
-        createdAt: Date.now(),
-      };
+        const replyTarget = remoteJid;
+        const userStats = incrementUserRequest(senderPhone, pushName);
+        const { count, badge } = userStats;
 
-      if (isBusy) {
-        requestQueue.push(taskItem);
-        logger.info(`Task added to queue at #${queuePosition} for ${pushName}`);
+        // Instant Acknowledgment Message
+        try {
+          await waSocket.sendMessage(replyTarget, {
+            text: `📥 *[FilmFeed Auto-Bot]*\n\n*${pushName}*, ඔබගේ ඉල්ලීම පද්ධතියට ලැබුණි! 🎬\n\n📌 *Quality:* ${quality}\n⏳ බාගත කිරීම සඳහා පෝලිමට එක් කරන ලදී...`,
+            mentions: mentionsList,
+          });
+        } catch (_) {}
 
-        const queueMessage = 
+        const isBusy = isProcessingQueue || requestQueue.length > 0;
+        const queuePosition = requestQueue.length + (isProcessingQueue ? 1 : 0);
+
+        const taskItem = {
+          isSeriesSeason,
+          seasonNumber,
+          movieUrl,
+          quality,
+          token,
+          replyTarget,
+          requesterJid,
+          pushName,
+          mentionTag,
+          mentionsList,
+          userStats,
+          createdAt: Date.now(),
+        };
+
+        if (isBusy) {
+          requestQueue.push(taskItem);
+          logger.info(`Task added to queue at #${queuePosition} for ${pushName}`);
+
+          const queueMessage = 
 `⏳ *[FilmFeed Auto-Bot] පෝලිමේ රඳවා ඇත (Queued)*
 
 ආයුබෝවන් *${pushName}* (${mentionTag}),
-දැනට වෙනත් ${isProcessingQueue && currentProcessingItem?.isSeriesSeason ? "TV Series Season එකක්" : "චිත්‍රපටයක්"} බාගත වෙමින් පවතී.
+දැනට වෙනත් චිත්‍රපටයක් බාගත වෙමින් පවතී.
 
 📊 *ඔබගේ පෝලිම් ස්ථානය (Queue Position):* *#${queuePosition}*
 📦 *ඉල්ලීම:* ${isSeriesSeason ? `TV Series (Season ${seasonNumber})` : "Movie"}
@@ -1052,36 +1076,35 @@ async function startBot() {
 
 _කලින් ඉල්ලීම් අවසන් වූ සැණින් ඔබගේ ඉල්ලීම බාගත කර Group එකට Upload වනු ඇත! ස්තූතියි!_`;
 
-        await sock.sendMessage(replyTarget, {
-          text: queueMessage,
-          mentions: mentionsList,
-        });
+          await waSocket.sendMessage(replyTarget, {
+            text: queueMessage,
+            mentions: mentionsList,
+          });
+        } else {
+          requestQueue.push(taskItem);
 
-      } else {
-        requestQueue.push(taskItem);
-
-        const startMessage = 
-`⏳ *[FilmFeed Auto-Bot] සකසමින් පවතී (Processing Now)*
+          const startMessage = 
+`🚀 *[FilmFeed Auto-Bot] සකසමින් පවතී (Processing)*
 
 ආයුබෝවන් *${pushName}* (${mentionTag})!
 ඔබගේ *${count}* වන ඉල්ලීම ලැබුණා [${badge}].
-${isSeriesSeason ? `📺 *TV Series (Season ${seasonNumber}) Complete Pack* සකස් කිරීම ආරම්භ විය...` : "🎬 Direct High-Speed ලින්ක් එක සකසා බාගත කිරීම ආරම්භ විය..."}
+${isSeriesSeason ? `📺 *TV Series (Season ${seasonNumber}) Pack* සකස් කිරීම ආරම්භ විය...` : "🎬 Direct High-Speed ලින්ක් එක සකසා බාගත කිරීම ආරම්භ විය..."}
 
 📺 *Quality:* ${quality}
 🔑 *Token:* ${token}`;
 
-        await sock.sendMessage(replyTarget, {
-          text: startMessage,
-          mentions: mentionsList,
-        });
+          await waSocket.sendMessage(replyTarget, {
+            text: startMessage,
+            mentions: mentionsList,
+          });
 
-        processQueue();
+          processQueue();
+        }
+      } catch (msgErr) {
+        logger.error({ msgErr }, "Error handling incoming WhatsApp message item");
       }
-    } catch (msgErr) {
-      logger.error({ msgErr }, "Error handling incoming WhatsApp message item");
     }
-  }
-});
+  });
 }
 
 startBot().catch((err) => logger.error({ err }, "Bot startup failed"));
