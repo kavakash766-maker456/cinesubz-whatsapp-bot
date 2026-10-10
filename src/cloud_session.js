@@ -1,7 +1,15 @@
 const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
+const https = require("https");
+const dns = require("dns");
+const axios = require("axios");
 
+try {
+  dns.setDefaultResultOrder("ipv4first");
+} catch (_) {}
+
+const ipv4Agent = new https.Agent({ family: 4, keepAlive: true });
 const GIST_DESC = "filmfeed-whatsapp-auth-vault-v1";
 const GIST_FILENAME = "session_vault.json";
 
@@ -31,14 +39,12 @@ class CloudSession {
     }
     if (!this.token) return null;
     try {
-      const res = await fetch("https://api.github.com/gists?per_page=30", {
+      const res = await axios.get("https://api.github.com/gists?per_page=30", {
         headers: this.getHeaders(),
+        httpsAgent: ipv4Agent,
+        timeout: 10000,
       });
-      if (!res.ok) {
-        console.warn(`[CloudSession] Failed to fetch gists: HTTP ${res.status}`);
-        return null;
-      }
-      const gists = await res.json();
+      const gists = res.data;
       const match = gists.find(
         (g) => g.description === GIST_DESC && g.files && g.files[GIST_FILENAME]
       );
@@ -66,15 +72,13 @@ class CloudSession {
         return false;
       }
 
-      const res = await fetch(`https://api.github.com/gists/${this.gistId}`, {
+      const res = await axios.get(`https://api.github.com/gists/${this.gistId}`, {
         headers: this.getHeaders(),
+        httpsAgent: ipv4Agent,
+        timeout: 12000,
       });
-      if (!res.ok) {
-        console.warn(`[CloudSession] Failed to read gist ${this.gistId}: HTTP ${res.status}`);
-        return false;
-      }
-
-      const data = await res.json();
+      
+      const data = res.data;
       const fileObj = data.files[GIST_FILENAME];
       if (!fileObj || !fileObj.content) {
         console.warn("[CloudSession] Vault file is empty.");
@@ -115,7 +119,7 @@ class CloudSession {
     if (this.syncTimeout) clearTimeout(this.syncTimeout);
     this.syncTimeout = setTimeout(() => {
       this.sync().catch((e) => console.warn(`[CloudSession] Background sync error: ${e.message}`));
-    }, 4000); // Debounce by 4s
+    }, 4000);
   }
 
   async sync() {
@@ -131,7 +135,6 @@ class CloudSession {
         const credsData = JSON.parse(fs.readFileSync(credsPath, "utf8"));
         const isValidAuth = Boolean(credsData.registered || (credsData.me && credsData.me.id));
         if (!isValidAuth) {
-          // Do not sync unauthenticated credentials
           return;
         }
       } catch (_) {
@@ -157,46 +160,35 @@ class CloudSession {
       }
 
       if (this.gistId) {
-        // Update existing gist
-        const res = await fetch(`https://api.github.com/gists/${this.gistId}`, {
-          method: "PATCH",
-          headers: this.getHeaders(),
-          body: JSON.stringify({
-            description: GIST_DESC,
-            files: {
-              [GIST_FILENAME]: {
-                content: base64Content,
-              },
+        await axios.patch(`https://api.github.com/gists/${this.gistId}`, {
+          description: GIST_DESC,
+          files: {
+            [GIST_FILENAME]: {
+              content: base64Content,
             },
-          }),
+          },
+        }, {
+          headers: this.getHeaders(),
+          httpsAgent: ipv4Agent,
+          timeout: 15000,
         });
-        if (res.ok) {
-          console.log(`☁️ [CloudSession] Synced ${fileNames.length} auth files to private cloud vault.`);
-        } else {
-          console.warn(`[CloudSession] Failed to update gist: HTTP ${res.status}`);
-        }
+        console.log(`☁️ [CloudSession] Synced ${fileNames.length} auth files to private cloud vault.`);
       } else {
-        // Create new private gist
-        const res = await fetch("https://api.github.com/gists", {
-          method: "POST",
-          headers: this.getHeaders(),
-          body: JSON.stringify({
-            description: GIST_DESC,
-            public: false,
-            files: {
-              [GIST_FILENAME]: {
-                content: base64Content,
-              },
+        const createdRes = await axios.post("https://api.github.com/gists", {
+          description: GIST_DESC,
+          public: false,
+          files: {
+            [GIST_FILENAME]: {
+              content: base64Content,
             },
-          }),
+          },
+        }, {
+          headers: this.getHeaders(),
+          httpsAgent: ipv4Agent,
+          timeout: 15000,
         });
-        if (res.ok) {
-          const created = await res.json();
-          this.gistId = created.id;
-          console.log(`☁️ [CloudSession] Created new private cloud vault (id: ${this.gistId}) and synced session.`);
-        } else {
-          console.warn(`[CloudSession] Failed to create gist: HTTP ${res.status}`);
-        }
+        this.gistId = createdRes.data.id;
+        console.log(`☁️ [CloudSession] Created new private cloud vault (id: ${this.gistId}) and synced session.`);
       }
     } catch (err) {
       console.warn(`[CloudSession] Sync failed: ${err.message}`);
