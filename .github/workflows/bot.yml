@@ -55,6 +55,7 @@ jobs:
           LOG_LEVEL: "info"
           GH_PAT: ${{ secrets.GH_PAT }}
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          SESSION_VAULT_ID: "8f37b6dbcf07ff6fab07b21cc8cbe05b"
         run: |
           mkdir -p auth_info temp
           while true; do
