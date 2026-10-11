@@ -47,13 +47,82 @@ def resolve_animekaizen_open_url(open_url):
     """Fetch AnimeKaizen redirect page and extract destination Google Drive URL"""
     try:
         r = requests.get(open_url, headers=HEADERS, timeout=15)
-        # Look for drive.google.com URL
         m = re.search(r"https://drive\.google\.com/[^\s\"\'<>]+", r.text)
         if m:
             return m.group(0).rstrip(",")
     except Exception:
         pass
     return None
+
+def resolve_cartoons_direct_url(post_url, post_id=None):
+    """
+    Calls Cartoons.lk WordPress AJAX endpoint to obtain the authentic pre-signed
+    Cloudflare R2 video stream URL instead of the HTML page.
+    """
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    
+    html = ""
+    try:
+        r = session.get(post_url, timeout=15)
+        html = r.text
+    except Exception:
+        pass
+        
+    m_nonce = re.search(r'nonce:\s*"([a-f0-9]+)"', html) or re.search(r'"nonce"\s*:\s*"([a-f0-9]+)"', html)
+    nonce = m_nonce.group(1) if m_nonce else None
+    
+    if not nonce:
+        try:
+            r_home = session.get("https://cartoons.lk/", timeout=15)
+            m_h = re.search(r'nonce:\s*"([a-f0-9]+)"', r_home.text) or re.search(r'"nonce"\s*:\s*"([a-f0-9]+)"', r_home.text)
+            if m_h:
+                nonce = m_h.group(1)
+        except Exception:
+            pass
+
+    if not nonce:
+        return None, "Failed to extract nonce from cartoons.lk"
+
+    if not post_id and html:
+        m_pid = re.search(r'[\?&]p=(\d+)', html) or re.search(r'postid-(\d+)', html) or re.search(r'data-post-id=["\'](\d+)["\']', html)
+        if m_pid:
+            post_id = m_pid.group(1)
+            
+    if not post_id:
+        return None, "Failed to identify post_id"
+
+    ajax_url = "https://cartoons.lk/wp-admin/admin-ajax.php"
+    payload = {
+        "action": "get_movie_link",
+        "post_id": str(post_id),
+        "nonce": nonce,
+        "type": "single",
+        "action_type": "download",
+        "link_index": "0",
+    }
+    headers = {
+        "X-Requested-With": "XMLHttpRequest",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": "https://cartoons.lk",
+        "Referer": post_url,
+    }
+    
+    try:
+        resp = session.post(ajax_url, data=payload, headers=headers, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("success") and data.get("data", {}).get("url"):
+                dl_url = data["data"]["url"]
+                # Follow 302 redirect once to obtain signed Cloudflare R2 direct stream URL
+                r2 = session.get(dl_url, allow_redirects=False, timeout=15)
+                if r2.status_code in (301, 302, 303, 307, 308):
+                    return r2.headers.get("Location", dl_url), None
+                return dl_url, None
+    except Exception as e:
+        return None, str(e)
+
+    return None, "Unable to resolve download link"
 
 def get_anime_series_episodes(url):
     sf = get_anime_series_file()
@@ -114,7 +183,7 @@ def get_anime_series_episodes(url):
                         "backdrop": s.get("backdrop") or poster,
                         "episodes": eps,
                     }
-    except Exception as e:
+    except Exception:
         pass
     return None
 
@@ -148,7 +217,6 @@ def load_anime_movies_map():
         for m in items:
             if m.get("url"):
                 out[m["url"].strip().rstrip("/")] = m
-            # Also map direct open links
             for link in m.get("download_links", []):
                 if link.get("url"):
                     out[link["url"].strip().rstrip("/")] = m
@@ -200,26 +268,31 @@ def resolve_gdrive_movie(url, requested_quality=None):
         is_anime = True
         direct_drive_url = resolve_animekaizen_open_url(clean_url)
 
-    # C. Check if Cartoon
-    elif cartoon_meta:
+    # C. Check if Sinhala Dubbed Cartoon (cartoons.lk)
+    elif cartoon_meta or "cartoons.lk" in clean_url:
         is_cartoon = True
-        title = cartoon_meta.get("title", "Sinhala Dubbed Cartoon")
-        poster = cartoon_meta.get("poster") or ""
-        desc = cartoon_meta.get("description") or "Sinhala Dubbed Cartoon / Movie from cartoons.lk."
-        post_url = cartoon_meta.get("url") or clean_url
+        title = (cartoon_meta.get("title") if cartoon_meta else "Sinhala Dubbed Cartoon").replace(" | සිංහල හඩකැවූ", "").strip()
+        poster = (cartoon_meta.get("poster") if cartoon_meta else "") or ""
+        desc = (cartoon_meta.get("description") if cartoon_meta else "Sinhala Dubbed Cartoon / Movie from cartoons.lk.")
+        post_url = (cartoon_meta.get("url") if cartoon_meta else clean_url) or clean_url
+        post_id = cartoon_meta.get("id") if cartoon_meta else None
 
-        return {
-            "success": True,
-            "title": title,
-            "poster": poster,
-            "backdrop": poster,
-            "description": desc,
-            "quality": "HD Dubbed",
-            "size_text": "Web",
-            "direct_url": post_url,
-            "is_cartoon": True,
-            "is_anime": False,
-        }
+        r2_url, r2_err = resolve_cartoons_direct_url(post_url, post_id)
+        if r2_url:
+            return {
+                "success": True,
+                "title": title,
+                "poster": poster,
+                "backdrop": poster,
+                "description": desc,
+                "quality": "HD Dubbed 720p",
+                "size_text": "1.1 GB",
+                "direct_url": r2_url,
+                "is_cartoon": True,
+                "is_anime": False,
+            }
+        else:
+            return {"success": False, "error": f"Cartoons.lk stream resolution error: {r2_err}"}
 
     # D. Direct Drive URL passed
     elif "drive.google.com" in clean_url:
@@ -238,10 +311,23 @@ def resolve_gdrive_movie(url, requested_quality=None):
             if m_folder:
                 folder_id = m_folder.group(1)
 
+    # If it's a Drive folder (e.g. Anime Kaizen series/movie folder)
+    if folder_id and not file_id:
+        try:
+            import gdown
+            folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
+            folder_files = gdown.download_folder(url=folder_url, skip_download=True, quiet=True)
+            if folder_files:
+                video_files = [f for f in folder_files if any(f.path.lower().endswith(ext) for ext in [".mp4", ".mkv", ".avi"])]
+                chosen_f = video_files[0] if video_files else folder_files[0]
+                file_id = chosen_f.id
+        except Exception:
+            pass
+
     # If it's a Drive file
     if file_id:
         session = requests.Session()
-        uc_url = f"https://drive.google.com/uc?id={file_id}&export=download"
+        uc_url = f"https://drive.google.com/uc?id={file_id}&export=download&confirm=t"
         try:
             resp = session.get(uc_url, timeout=25, headers=HEADERS)
             soup = BeautifulSoup(resp.text, "html.parser")
@@ -271,9 +357,10 @@ def resolve_gdrive_movie(url, requested_quality=None):
             "is_anime": True,
             "is_gdrive": True,
             "file_id": file_id,
+            "folder_id": folder_id,
         }
 
-    # If it's a Drive folder (e.g. Anime Kaizen series folder)
+    # If folder with no files parsed
     if folder_id:
         title = (anime_meta.get("title") if anime_meta else "Anime Release").replace(" | සිංහල උපසිරැසි සමඟ", "").strip()
         poster = (anime_meta.get("poster") or anime_meta.get("backdrop") or "") if anime_meta else ""
@@ -295,8 +382,7 @@ def resolve_gdrive_movie(url, requested_quality=None):
     return {"success": False, "error": "Unable to extract direct download link from file source."}
 
 if __name__ == "__main__":
-    import sys
-    test_url = sys.argv[1] if len(sys.argv) > 1 else "https://www.animekaizen.org/im-in-love-with-the-villainess-season-1-2/"
+    test_url = sys.argv[1] if len(sys.argv) > 1 else "https://cartoons.lk/jack-the-giant-slayer-sinhala-dubbed-movie/"
     q = sys.argv[2] if len(sys.argv) > 2 else None
     res = resolve_gdrive_movie(test_url, q)
     print(json.dumps(res, indent=2, ensure_ascii=False))

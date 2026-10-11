@@ -671,54 +671,51 @@ def main():
                 except Exception:
                     pass
 
-        # Handle Folder download via gdown
-        if folder_id:
+        # Handle Folder download via gdown (list files quickly and select target video)
+        if folder_id and not file_id:
             try:
-                import gdown, shutil
-                temp_dir = args.download_output + "_folder"
-                os.makedirs(temp_dir, exist_ok=True)
+                import gdown
                 folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
-                gdown.download_folder(url=folder_url, output=temp_dir, quiet=True)
-                files = []
-                for root, _, fnames in os.walk(temp_dir):
-                    for fn in fnames:
-                        fp = os.path.join(root, fn)
-                        files.append((os.path.getsize(fp), fp))
+                files = gdown.download_folder(url=folder_url, skip_download=True, quiet=True)
                 if files:
-                    files.sort(reverse=True)
-                    largest_file = files[0][1]
-                    shutil.move(largest_file, args.download_output)
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                    print(json.dumps({"success": True, "path": args.download_output, "size": os.path.getsize(args.download_output)}))
-                    return
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            except Exception as dl_err:
-                print(json.dumps({"success": False, "error": f"Folder download error: {str(dl_err)}"}))
-                return
+                    v_files = [f for f in files if any(f.path.lower().endswith(ext) for ext in [".mp4", ".mkv", ".avi"])]
+                    chosen_f = v_files[0] if v_files else files[0]
+                    file_id = chosen_f.id
+            except Exception:
+                pass
 
         # Direct file ID download via gdown
         if file_id:
             try:
                 import gdown
                 res = gdown.download(id=file_id, output=args.download_output, quiet=False)
-                if res and os.path.exists(args.download_output) and os.path.getsize(args.download_output) > 1000000:
+                if res and os.path.exists(args.download_output) and os.path.getsize(args.download_output) > 5000000:
                     print(json.dumps({"success": True, "path": args.download_output, "size": os.path.getsize(args.download_output)}))
                     return
             except Exception as dl_err:
                 pass
 
-        # Fallback: stream direct_url
+        # Fallback: stream direct_url (e.g. Cloudflare R2 or direct CDN stream)
         if g_res and g_res.get("direct_url") and g_res["direct_url"].startswith("http"):
             try:
+                try:
+                    from fast_downloader import parallel_download
+                    ok = parallel_download(g_res["direct_url"], args.download_output, 8)
+                    if ok and os.path.exists(args.download_output) and os.path.getsize(args.download_output) > 5000000:
+                        print(json.dumps({"success": True, "path": args.download_output, "size": os.path.getsize(args.download_output)}))
+                        return
+                except Exception:
+                    pass
+
                 import urllib.request
                 req = urllib.request.Request(g_res["direct_url"], headers={"User-Agent": UA})
                 with urllib.request.urlopen(req, timeout=120) as resp, open(args.download_output, "wb") as out_f:
                     while True:
-                        chunk = resp.read(1024 * 1024)
+                        chunk = resp.read(2 * 1024 * 1024)
                         if not chunk:
                             break
                         out_f.write(chunk)
-                if os.path.exists(args.download_output) and os.path.getsize(args.download_output) > 100000:
+                if os.path.exists(args.download_output) and os.path.getsize(args.download_output) > 5000000:
                     print(json.dumps({"success": True, "path": args.download_output, "size": os.path.getsize(args.download_output)}))
                     return
             except Exception as s_err:

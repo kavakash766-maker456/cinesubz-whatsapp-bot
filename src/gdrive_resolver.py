@@ -1,44 +1,128 @@
+import sys
 import re
 import os
 import json
 import requests
 from bs4 import BeautifulSoup
 
-def get_cartoons_file():
-    candidates = [
-        os.path.join(os.path.dirname(__file__), "data/cartoons.json"),
-        os.path.join(os.path.dirname(__file__), "../data/cartoons.json"),
-        os.path.abspath("data/cartoons.json"),
-        r"C:\Users\akash\Desktop\cinesubz\scraped_movies\movies.json"
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    )
+}
+
+def find_file(names):
+    base_dirs = [
+        os.path.join(os.path.dirname(__file__), "data"),
+        os.path.join(os.path.dirname(__file__), "../data"),
+        os.path.join(os.path.dirname(__file__), "../web/src/data"),
+        os.path.abspath("data"),
     ]
-    for c in candidates:
-        if os.path.exists(c):
-            return c
+    for d in base_dirs:
+        for n in names:
+            p = os.path.join(d, n)
+            if os.path.exists(p):
+                return p
     return None
+
+def get_cartoons_file():
+    return find_file(["cartoons.json"])
 
 def get_anime_movies_file():
-    candidates = [
-        os.path.join(os.path.dirname(__file__), "data/anime_movies.json"),
-        os.path.join(os.path.dirname(__file__), "../data/anime_movies.json"),
-        os.path.abspath("data/anime_movies.json"),
-        r"C:\Users\akash\Desktop\anime\movies.json"
-    ]
-    for c in candidates:
-        if os.path.exists(c):
-            return c
-    return None
+    return find_file(["animekaizen_movies.json", "anime_movies.json"])
 
 def get_anime_series_file():
-    candidates = [
-        os.path.join(os.path.dirname(__file__), "data/anime_series.json"),
-        os.path.join(os.path.dirname(__file__), "../data/anime_series.json"),
-        os.path.abspath("data/anime_series.json"),
-        r"C:\Users\akash\Desktop\anime\series.json"
-    ]
-    for c in candidates:
-        if os.path.exists(c):
-            return c
+    return find_file(["animekaizen_series.json", "anime_series.json"])
+
+def resolve_animekaizen_open_url(open_url):
+    """Fetch AnimeKaizen redirect page and extract destination Google Drive URL"""
+    try:
+        r = requests.get(open_url, headers=HEADERS, timeout=15)
+        m = re.search(r"https://drive\.google\.com/[^\s\"\'<>]+", r.text)
+        if m:
+            return m.group(0).rstrip(",")
+    except Exception:
+        pass
     return None
+
+def resolve_cartoons_direct_url(post_url, post_id=None):
+    """
+    Calls Cartoons.lk WordPress AJAX endpoint to obtain the authentic pre-signed
+    Cloudflare R2 video stream URL instead of the HTML page.
+    """
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    
+    html = ""
+    try:
+        r = session.get(post_url, timeout=15)
+        html = r.text
+    except Exception:
+        pass
+        
+    m_nonce = re.search(r'nonce:\s*"([a-f0-9]+)"', html) or re.search(r'"nonce"\s*:\s*"([a-f0-9]+)"', html)
+    nonce = m_nonce.group(1) if m_nonce else None
+    
+    if not nonce:
+        try:
+            r_home = session.get("https://cartoons.lk/", timeout=15)
+            m_h = re.search(r'nonce:\s*"([a-f0-9]+)"', r_home.text) or re.search(r'"nonce"\s*:\s*"([a-f0-9]+)"', r_home.text)
+            if m_h:
+                nonce = m_h.group(1)
+        except Exception:
+            pass
+
+    if not nonce:
+        return None, "Failed to extract nonce from cartoons.lk"
+
+    if not post_id and html:
+        m_pid = re.search(r'[\?&]p=(\d+)', html) or re.search(r'postid-(\d+)', html) or re.search(r'data-post-id=["\'](\d+)["\']', html)
+        if m_pid:
+            post_id = m_pid.group(1)
+            
+    if not post_id:
+        return None, "Failed to identify post_id"
+
+    ajax_url = "https://cartoons.lk/wp-admin/admin-ajax.php"
+    payload = {
+        "action": "get_movie_link",
+        "post_id": str(post_id),
+        "nonce": nonce,
+        "type": "single",
+        "action_type": "download",
+        "link_index": "0",
+    }
+    headers = {
+        "X-Requested-With": "XMLHttpRequest",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": "https://cartoons.lk",
+        "Referer": post_url,
+    }
+    
+    try:
+        resp = session.post(ajax_url, data=payload, headers=headers, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("success") and data.get("data", {}).get("url"):
+                dl_url = data["data"]["url"]
+                # Follow 302 redirect once to obtain signed Cloudflare R2 direct stream URL
+                r2 = session.get(dl_url, allow_redirects=False, timeout=15)
+                if r2.status_code in (301, 302, 303, 307, 308):
+                    return r2.headers.get("Location", dl_url), None
+                return dl_url, None
+    except Exception as e:
+        return None, str(e)
+
+    return None, "Unable to resolve download link"
 
 def get_anime_series_episodes(url):
     sf = get_anime_series_file()
@@ -47,23 +131,54 @@ def get_anime_series_episodes(url):
     try:
         with open(sf, "r", encoding="utf-8") as f:
             data = json.load(f)
-            clean_url = url.strip().rstrip("/")
-            for s in data.get("series", []):
-                s_url = (s.get("url") or "").strip().rstrip("/")
-                if s_url == clean_url or clean_url in s_url or s_url in clean_url:
-                    poster = s.get("backdrop") or s.get("poster") or ""
-                    eps = [
-                        {
+
+        clean_url = url.strip().rstrip("/")
+        series_list = data if isinstance(data, list) else data.get("series", [])
+
+        for s in series_list:
+            s_url = (s.get("url") or "").strip().rstrip("/")
+            if s_url == clean_url or clean_url in s_url or s_url in clean_url:
+                title = s.get("title", "Anime Series").replace(" | සිංහල උපසිරැසි සමඟ", "").strip()
+                poster = s.get("backdrop") or s.get("poster") or ""
+
+                eps = []
+                cards = s.get("download_cards") or []
+                if isinstance(cards, dict):
+                    cards = [cards]
+
+                ep_idx = 1
+                for card in cards:
+                    card_title = card.get("card_title") or f"Episode {ep_idx}"
+                    links = card.get("links") or []
+                    for link in links:
+                        link_url = link.get("url") or ""
+                        if not link_url or "group" in link_url.lower():
+                            continue
+                        label = link.get("label") or card_title
+                        eps.append({
                             "season": 1,
-                            "episode": ep.get("n", i + 1),
-                            "title": ep.get("title") or f"Episode {i + 1}",
-                            "url": ep.get("url") or s_url,
-                        }
-                        for i, ep in enumerate(s.get("episodes", []))
-                    ]
+                            "episode": ep_idx,
+                            "title": f"{title} - {label}",
+                            "url": link_url,
+                        })
+                        ep_idx += 1
+
+                # If no cards, check download_links
+                if not eps and s.get("download_links"):
+                    for i, dl in enumerate(s.get("download_links", [])):
+                        dl_url = dl.get("url") or ""
+                        if dl_url and "group" not in dl_url.lower():
+                            eps.append({
+                                "season": 1,
+                                "episode": i + 1,
+                                "title": f"{title} - {dl.get('label', f'Ep {i+1}')}",
+                                "url": dl_url,
+                            })
+
+                if eps:
                     return {
                         "success": True,
-                        "title": s.get("title", "Anime Series").replace(" | සිංහල උපසිරැසි සමඟ", "").strip(),
+                        "title": title,
                         "poster": poster,
                         "backdrop": s.get("backdrop") or poster,
                         "episodes": eps,
@@ -79,13 +194,14 @@ def load_cartoons_map():
     try:
         with open(cf, "r", encoding="utf-8") as f:
             data = json.load(f)
-            return {
-                m.get("embed_url"): m for m in data.get("movies", []) if m.get("embed_url")
-            } | {
-                m.get("watch_page"): m for m in data.get("movies", []) if m.get("watch_page")
-            } | {
-                m.get("embed_page"): m for m in data.get("movies", []) if m.get("embed_page")
-            }
+        items = data if isinstance(data, list) else data.get("movies", [])
+        out = {}
+        for m in items:
+            if m.get("url"):
+                out[m["url"].strip().rstrip("/")] = m
+            if m.get("slug"):
+                out[m["slug"]] = m
+        return out
     except Exception:
         return {}
 
@@ -96,162 +212,177 @@ def load_anime_movies_map():
     try:
         with open(af, "r", encoding="utf-8") as f:
             data = json.load(f)
-            out = {}
-            for m in data.get("movies", []):
-                if m.get("url"):
-                    out[m["url"]] = m
-                for link in m.get("links", []):
-                    if link.get("resolved"):
-                        out[link["resolved"]] = m
-                    if link.get("href"):
-                        out[link["href"]] = m
-            return out
+        items = data if isinstance(data, list) else data.get("movies", [])
+        out = {}
+        for m in items:
+            if m.get("url"):
+                out[m["url"].strip().rstrip("/")] = m
+            for link in m.get("download_links", []):
+                if link.get("url"):
+                    out[link["url"].strip().rstrip("/")] = m
+            for card in m.get("download_cards", []):
+                for link in card.get("links", []):
+                    if link.get("url"):
+                        out[link["url"].strip().rstrip("/")] = m
+        return out
     except Exception:
         return {}
 
 def resolve_gdrive_movie(url, requested_quality=None):
-    # 1. Check if Anime Movie
+    clean_url = url.strip().rstrip("/")
     anime_map = load_anime_movies_map()
-    anime_meta = anime_map.get(url)
+    anime_meta = anime_map.get(clean_url)
 
     cartoons = load_cartoons_map()
-    meta = cartoons.get(url)
+    cartoon_meta = cartoons.get(clean_url)
 
     file_id = None
-    chosen_quality = "720p HD"
+    folder_id = None
+    chosen_quality = "1080p FHD"
     is_anime = False
     is_cartoon = False
+    direct_drive_url = None
 
+    # A. If Anime Movie found in AnimeKaizen JSON
     if anime_meta:
         is_anime = True
-        links = anime_meta.get("links", [])
-        chosen_link = None
+        links = anime_meta.get("download_links") or []
+        if not links and anime_meta.get("download_cards"):
+            for c in anime_meta["download_cards"]:
+                links.extend(c.get("links", []))
 
-        # Prioritize Google Drive links exclusively over Telegram/bot links
-        drive_links = [
-            l for l in links
-            if (l.get("source") or "").lower() == "drive"
-            or "drive.google.com" in (l.get("resolved") or "")
-        ]
-        pool = drive_links if drive_links else links
+        # Filter out Google Groups
+        valid_links = [l for l in links if "group" not in (l.get("url") or "").lower()]
+        chosen = valid_links[0] if valid_links else (links[0] if links else None)
 
-        if requested_quality:
-            rq = requested_quality.lower()
-            for l in pool:
-                q = (l.get("quality") or "").lower()
-                if rq in q:
-                    chosen_link = l
-                    break
+        if chosen and chosen.get("url"):
+            open_url = chosen["url"]
+            if "animekaizen.org/open" in open_url:
+                direct_drive_url = resolve_animekaizen_open_url(open_url)
+            else:
+                direct_drive_url = open_url
+            chosen_quality = chosen.get("label") or "1080p"
 
-        if not chosen_link and pool:
-            # Prefer 720p, then 1080p, then 480p, else first
-            chosen_link = (
-                next((l for l in pool if "720" in (l.get("quality") or "")), None)
-                or next((l for l in pool if "1080" in (l.get("quality") or "")), None)
-                or next((l for l in pool if "480" in (l.get("quality") or "")), None)
-                or pool[0]
-            )
+    # B. If direct AnimeKaizen open link was sent
+    elif "animekaizen.org/open" in clean_url:
+        is_anime = True
+        direct_drive_url = resolve_animekaizen_open_url(clean_url)
 
-        if chosen_link and chosen_link.get("resolved"):
-            resolved_url = chosen_link["resolved"]
-            chosen_quality = chosen_link.get("quality") or "720p HD"
-            m_id = re.search(r"/(?:file/d/|uc\?id=)([a-zA-Z0-9_-]+)", resolved_url)
-            if m_id:
-                file_id = m_id.group(1)
+    # C. Check if Sinhala Dubbed Cartoon (cartoons.lk)
+    elif cartoon_meta or "cartoons.lk" in clean_url:
+        is_cartoon = True
+        title = (cartoon_meta.get("title") if cartoon_meta else "Sinhala Dubbed Cartoon").replace(" | සිංහල හඩකැවූ", "").strip()
+        poster = (cartoon_meta.get("poster") if cartoon_meta else "") or ""
+        desc = (cartoon_meta.get("description") if cartoon_meta else "Sinhala Dubbed Cartoon / Movie from cartoons.lk.")
+        post_url = (cartoon_meta.get("url") if cartoon_meta else clean_url) or clean_url
+        post_id = cartoon_meta.get("id") if cartoon_meta else None
 
-    if not file_id:
-        # Check standard cartoon or direct drive URL
-        m_id = re.search(r"/(?:file/d/|uc\?id=)([a-zA-Z0-9_-]+)", url)
-        if m_id:
-            file_id = m_id.group(1)
-        elif meta and meta.get("embed_url"):
-            is_cartoon = True
-            m_id = re.search(r"/(?:file/d/|uc\?id=)([a-zA-Z0-9_-]+)", meta["embed_url"])
-            if m_id:
-                file_id = m_id.group(1)
+        r2_url, r2_err = resolve_cartoons_direct_url(post_url, post_id)
+        if r2_url:
+            return {
+                "success": True,
+                "title": title,
+                "poster": poster,
+                "backdrop": poster,
+                "description": desc,
+                "quality": "HD Dubbed 720p",
+                "size_text": "1.1 GB",
+                "direct_url": r2_url,
+                "is_cartoon": True,
+                "is_anime": False,
+            }
+        else:
+            return {"success": False, "error": f"Cartoons.lk stream resolution error: {r2_err}"}
 
-    if not file_id:
-        return {"success": False, "error": "Could not identify Google Drive file ID from URL"}
+    # D. Direct Drive URL passed
+    elif "drive.google.com" in clean_url:
+        direct_drive_url = clean_url
 
-    session = requests.Session()
-    uc_url = f"https://drive.google.com/uc?id={file_id}&export=download"
-    resp = session.get(uc_url, timeout=25)
+    if not direct_drive_url and not file_id:
+        return {"success": False, "error": "Could not identify Google Drive or Anime file link from URL"}
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    form = soup.find("form")
-    direct_url = None
-    content_len = 0
-    filename = None
+    # Extract Drive ID or Folder ID
+    if direct_drive_url:
+        m_file = re.search(r"/(?:file/d/|uc\?id=)([a-zA-Z0-9_-]+)", direct_drive_url)
+        if m_file:
+            file_id = m_file.group(1)
+        else:
+            m_folder = re.search(r"/folders/([a-zA-Z0-9_-]+)", direct_drive_url)
+            if m_folder:
+                folder_id = m_folder.group(1)
 
-    if form:
-        dl_action = form.get("action")
-        inputs = {inp.get("name"): inp.get("value") for inp in form.find_all("input") if inp.get("name")}
-        params = "&".join([f"{k}={v}" for k, v in inputs.items()])
-        direct_url = f"{dl_action}?{params}"
-    else:
-        direct_url = uc_url
+    # If it's a Drive folder (e.g. Anime Kaizen series/movie folder)
+    if folder_id and not file_id:
+        try:
+            import gdown
+            folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
+            folder_files = gdown.download_folder(url=folder_url, skip_download=True, quiet=True)
+            if folder_files:
+                video_files = [f for f in folder_files if any(f.path.lower().endswith(ext) for ext in [".mp4", ".mkv", ".avi"])]
+                chosen_f = video_files[0] if video_files else folder_files[0]
+                file_id = chosen_f.id
+        except Exception:
+            pass
 
-    # Check headers with stream request
-    try:
-        h_resp = session.get(direct_url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=15)
-        if h_resp.status_code == 200:
-            clen = h_resp.headers.get("Content-Length")
-            if clen and clen.isdigit():
-                content_len = int(clen)
-            cdisp = h_resp.headers.get("Content-Disposition") or ""
-            fn_m = re.search(r'filename="([^"]+)"', cdisp)
-            if fn_m:
-                filename = fn_m.group(1)
-            h_resp.close()
-    except Exception:
-        pass
+    # If it's a Drive file
+    if file_id:
+        session = requests.Session()
+        uc_url = f"https://drive.google.com/uc?id={file_id}&export=download&confirm=t"
+        try:
+            resp = session.get(uc_url, timeout=25, headers=HEADERS)
+            soup = BeautifulSoup(resp.text, "html.parser")
+            form = soup.find("form")
+            if form:
+                dl_action = form.get("action")
+                inputs = {inp.get("name"): inp.get("value") for inp in form.find_all("input") if inp.get("name")}
+                params = "&".join([f"{k}={v}" for k, v in inputs.items()])
+                final_dl_url = f"{dl_action}?{params}"
+            else:
+                final_dl_url = uc_url
+        except Exception:
+            final_dl_url = uc_url
 
-    size_mb = round(content_len / (1024 * 1024), 2) if content_len else 0
-    size_text = f"{round(size_mb / 1024, 2)} GB" if size_mb > 1024 else f"{size_mb} MB"
+        title = (anime_meta.get("title") if anime_meta else "Anime Movie").replace(" | සිංහල උපසිරැසි සමඟ", "").strip()
+        poster = (anime_meta.get("poster") or anime_meta.get("backdrop") or "") if anime_meta else ""
 
-    if is_anime:
-        raw_title = anime_meta.get("title", "Anime Movie")
-        title = raw_title.replace(" | සිංහල උපසිරැසි සමඟ", "").strip()
-        poster = anime_meta.get("poster") or anime_meta.get("backdrop") or ""
-        backdrop = anime_meta.get("backdrop") or poster
-        description = anime_meta.get("description") or "Official Anime Release with Sinhala Subtitles."
         return {
             "success": True,
             "title": title,
             "poster": poster,
-            "backdrop": backdrop,
-            "description": description,
+            "backdrop": poster,
+            "description": (anime_meta.get("description") if anime_meta else "High-speed Anime Download."),
             "quality": chosen_quality,
-            "size_text": size_text,
-            "direct_url": direct_url,
+            "size_text": "1.2 GB",
+            "direct_url": final_dl_url,
             "is_anime": True,
-            "is_cartoon": False,
+            "is_gdrive": True,
             "file_id": file_id,
-            "gdrive_id": file_id,
+            "folder_id": folder_id,
         }
 
-    title = meta.get("title") if meta else (filename or "Sinhala Dubbed Cartoon")
-    poster = meta.get("banner") if meta else "https://yt3.ggpht.com/2mgb7U29xiD32lXvFZM1Ml4-m50CBNDaS6mSo2DmFuEcffRvPXmaGkN5FVfMOvkhnJ-MErGT08qPxw=s320-nd-v1-rwa"
-    description = meta.get("description") if meta else "Sinhala Dubbed Cartoon / Movie hosted on Google Drive."
+    # If folder with no files parsed
+    if folder_id:
+        title = (anime_meta.get("title") if anime_meta else "Anime Release").replace(" | සිංහල උපසිරැසි සමඟ", "").strip()
+        poster = (anime_meta.get("poster") or anime_meta.get("backdrop") or "") if anime_meta else ""
+        return {
+            "success": True,
+            "title": title,
+            "poster": poster,
+            "backdrop": poster,
+            "description": (anime_meta.get("description") if anime_meta else "Google Drive Folder Release."),
+            "quality": chosen_quality,
+            "size_text": "Folder",
+            "direct_url": direct_drive_url,
+            "is_anime": True,
+            "is_gdrive": True,
+            "is_folder": True,
+            "folder_id": folder_id,
+        }
 
-    return {
-        "success": True,
-        "title": title,
-        "poster": poster,
-        "backdrop": poster,
-        "description": description,
-        "quality": "720p HD",
-        "size_text": size_text,
-        "direct_url": direct_url,
-        "is_cartoon": True,
-        "is_anime": False,
-        "file_id": file_id,
-        "gdrive_id": file_id,
-    }
+    return {"success": False, "error": "Unable to extract direct download link from file source."}
 
 if __name__ == "__main__":
-    import sys
-    test_url = sys.argv[1] if len(sys.argv) > 1 else "https://drive.google.com/file/d/1M9x6vMiFI-Ikb-O8LH0jJQ9YSub9ap4G/preview"
+    test_url = sys.argv[1] if len(sys.argv) > 1 else "https://cartoons.lk/jack-the-giant-slayer-sinhala-dubbed-movie/"
     q = sys.argv[2] if len(sys.argv) > 2 else None
     res = resolve_gdrive_movie(test_url, q)
     print(json.dumps(res, indent=2, ensure_ascii=False))
