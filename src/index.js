@@ -934,16 +934,19 @@ async function startBot() {
     if (connection === "close") {
       isConnected = false;
       const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+      const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
       logger.warn(
         `Connection closed (code: ${statusCode}, error: ${lastDisconnect?.error}). Reconnecting...`
       );
 
       if (isLoggedOut) {
-        logger.warn("Session logged out by user. Clearing auth directory...");
+        logger.warn("🚨 Session was logged out/revoked by WhatsApp (Code 401). Purging dead session from vault and starting fresh QR...");
         try {
           fs.rmSync(AUTH_DIR, { recursive: true, force: true });
         } catch (_) {}
+        await cloudSession.clearVault();
+        setTimeout(startBot, 2000);
+        return;
       }
 
       const delay = statusCode === 515 ? 1000 : 3000;

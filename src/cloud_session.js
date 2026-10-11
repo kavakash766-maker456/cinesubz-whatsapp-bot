@@ -86,7 +86,6 @@ class CloudSession {
       }
 
       let contentStr = fileObj.content;
-      // Handle truncated or raw files if content is not directly supplied by Gist API
       if (!contentStr && fileObj.raw_url) {
         console.log("[CloudSession] Content truncated in API; fetching from raw_url...");
         const rawRes = await axios.get(fileObj.raw_url, {
@@ -102,12 +101,23 @@ class CloudSession {
         return false;
       }
 
-      const compressed = Buffer.from(contentStr, "base64");
-      const unzipped = zlib.gunzipSync(compressed).toString("utf8");
-      const files = JSON.parse(unzipped);
+      // Check if vault was explicitly cleared/invalidated
+      if (contentStr.includes('"invalid":true') || contentStr.startsWith("{")) {
+        console.log("[CloudSession] Vault was previously cleared or marked invalid; skipping restore to generate fresh QR.");
+        return false;
+      }
+
+      let files = null;
+      try {
+        const compressed = Buffer.from(contentStr, "base64");
+        const unzipped = zlib.gunzipSync(compressed).toString("utf8");
+        files = JSON.parse(unzipped);
+      } catch (err) {
+        console.log(`[CloudSession] Could not unpack vault (${err.message}); skipping restore to generate fresh QR.`);
+        return false;
+      }
 
       const credsObj = files["creds.json"] ? JSON.parse(files["creds.json"]) : null;
-      // In Baileys MD, an authenticated session is identified by creds.me.id or creds.registered === true
       const isValidAuth = Boolean(
         credsObj &&
         (credsObj.registered === true || (credsObj.me && credsObj.me.id))
@@ -118,7 +128,6 @@ class CloudSession {
         return false;
       }
 
-      // If creds has me.id, ensure registered is set to true so Baileys does not request fresh pairing/QR
       if (credsObj.me && credsObj.me.id) {
         credsObj.registered = true;
         files["creds.json"] = JSON.stringify(credsObj, null, 2);
@@ -139,6 +148,33 @@ class CloudSession {
     } catch (err) {
       console.warn(`⚠️ [CloudSession] Restore failed: ${err.message}`);
       return false;
+    }
+  }
+
+  async clearVault() {
+    if (!this.token) return;
+    try {
+      if (!this.gistId) await this.findGist();
+      if (this.gistId) {
+        await axios.patch(`https://api.github.com/gists/${this.gistId}`, {
+          description: GIST_DESC,
+          files: {
+            [GIST_FILENAME]: {
+              content: JSON.stringify({ invalid: true, cleared_at: new Date().toISOString() }),
+            },
+            "latest_qr.txt": {
+              content: "Awaiting new QR generation...",
+            },
+          },
+        }, {
+          headers: this.getHeaders(),
+          httpsAgent: ipv4Agent,
+          timeout: 15000,
+        });
+        console.log("🗑️ [CloudSession] Revoked/expired session cleared from Private Cloud Vault.");
+      }
+    } catch (err) {
+      console.warn(`[CloudSession] Failed to clear vault: ${err.message}`);
     }
   }
 
@@ -167,7 +203,6 @@ class CloudSession {
         return;
       }
 
-      // In Baileys MD, valid authenticated session has me.id or registered === true
       const isValidAuth = Boolean(
         credsData &&
         (credsData.registered === true || (credsData.me && credsData.me.id))
@@ -178,7 +213,6 @@ class CloudSession {
         return;
       }
 
-      // Keep registered explicitly true once authenticated with me.id
       if (credsData.me && credsData.me.id && credsData.registered !== true) {
         credsData.registered = true;
         try {
