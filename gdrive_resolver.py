@@ -34,14 +34,31 @@ def find_file(names):
                 return p
     return None
 
+def find_all_files(names):
+    base_dirs = [
+        os.path.join(os.path.dirname(__file__), "data"),
+        os.path.join(os.path.dirname(__file__), "../data"),
+        os.path.join(os.path.dirname(__file__), "../web/src/data"),
+        os.path.abspath("data"),
+    ]
+    found = []
+    seen_names = set()
+    for d in base_dirs:
+        for n in names:
+            p = os.path.join(d, n)
+            if os.path.exists(p) and n not in seen_names:
+                seen_names.add(n)
+                found.append(p)
+    return found
+
 def get_cartoons_file():
     return find_file(["cartoons.json"])
 
-def get_anime_movies_file():
-    return find_file(["animekaizen_movies.json", "anime_movies.json"])
+def get_anime_movies_files():
+    return find_all_files(["animeclub_movies.json", "animekaizen_movies.json", "anime_movies.json"])
 
-def get_anime_series_file():
-    return find_file(["animekaizen_series.json", "anime_series.json"])
+def get_anime_series_files():
+    return find_all_files(["animeclub_series.json", "animekaizen_series.json", "anime_series.json"])
 
 def resolve_animekaizen_open_url(open_url):
     """Fetch AnimeKaizen redirect page and extract destination Google Drive URL"""

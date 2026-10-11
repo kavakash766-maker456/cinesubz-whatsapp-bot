@@ -304,6 +304,53 @@ async function downloadGDriveFile(url, destPath, quality = null) {
   });
 }
 
+async function downloadTelegramFile(url, destPath, onProgress) {
+  return new Promise((resolve, reject) => {
+    const tgScript = path.join(__dirname, "../telegram_downloader.py");
+    const pythonCmd = process.platform === "win32" ? "python" : "python3";
+    const args = [tgScript, url, destPath];
+
+    logger.info(`Invoking Telegram MTProto Downloader for: ${url}`);
+    const proc = spawn(pythonCmd, args);
+
+    let stdoutData = "";
+    let stderrData = "";
+
+    proc.stdout.on("data", (data) => {
+      const text = data.toString();
+      stdoutData += text;
+      const progressMatch = text.match(/\[PROGRESS\]\s+([\d.]+)%\s+\((\d+)\/(\d+)\)\s+([\d.]+)\s+MB\/s/);
+      if (progressMatch && onProgress) {
+        const percent = parseFloat(progressMatch[1]);
+        const cur = parseInt(progressMatch[2], 10);
+        const total = parseInt(progressMatch[3], 10);
+        const speed = parseFloat(progressMatch[4]);
+        onProgress(cur, total, speed);
+      }
+    });
+
+    proc.stderr.on("data", (data) => {
+      stderrData += data.toString();
+    });
+
+    proc.on("close", (code) => {
+      try {
+        const lines = stdoutData.trim().split("\n");
+        const lastLine = lines[lines.length - 1];
+        const res = JSON.parse(lastLine);
+        if (res.success && fs.existsSync(destPath) && fs.statSync(destPath).size > 100000) {
+          logger.info(`Telegram download successful! Size: ${Math.round(res.file_size / 1024 / 1024)}MB`);
+          resolve(destPath);
+        } else {
+          reject(new Error(res.error || stderrData || "Telegram download failed"));
+        }
+      } catch (e) {
+        reject(new Error(stderrData || stdoutData || "Failed to parse telegram downloader output"));
+      }
+    });
+  });
+}
+
 // --------------------------------------------------------------------------
 // 4. File Size Inspection via Ranged Request
 // --------------------------------------------------------------------------
@@ -553,7 +600,13 @@ async function processQueue() {
           const safeName = epTitle.replace(/[^a-zA-Z0-9_-]/g, "_") + `_${resolvedQuality}.mp4`;
           const tempFilePath = path.join(TEMP_DIR, `${Date.now()}_${safeName}`);
 
-          await downloadFile(directUrl, tempFilePath);
+          if (directUrl.includes("t.me") || epData.is_telegram) {
+            await downloadTelegramFile(directUrl, tempFilePath);
+          } else if (epData.is_gdrive || directUrl.includes("drive.google.com")) {
+            await downloadGDriveFile(directUrl, tempFilePath, resolvedQuality);
+          } else {
+            await downloadFile(directUrl, tempFilePath);
+          }
 
           // Upload Episode Document to All Groups
           await broadcastToGroups({
@@ -668,17 +721,49 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
       const safeName = title.replace(/[^a-zA-Z0-9_-]/g, "_") + `_${resolvedQuality}.mp4`;
       const tempFilePath = path.join(TEMP_DIR, `${Date.now()}_${safeName}`);
 
+      const isTelegram =
+        movieData.is_telegram ||
+        (directUrl && directUrl.includes("t.me")) ||
+        (movieUrl && movieUrl.includes("t.me"));
+
       const isGDrive =
-        movieData.is_cartoon ||
+        !isTelegram &&
+        (movieData.is_cartoon ||
         movieData.is_anime ||
         movieData.is_gdrive ||
         movieUrl.includes("drive.google.com") ||
         movieUrl.includes("lakvision") ||
         movieUrl.includes("slanimeclub") ||
-        movieUrl.includes("anime");
+        movieUrl.includes("anime"));
 
       let lastProgressEdit = 0;
-      if (isGDrive) {
+      if (isTelegram) {
+        logger.info(`Starting Telegram MTProto download for ${title}...`);
+        await downloadTelegramFile(directUrl || movieUrl, tempFilePath, (downloaded, total, speed_mb) => {
+          const now = Date.now();
+          const percent = total > 0 ? Math.round((downloaded / total) * 100) : 0;
+          if (now - lastProgressEdit > 3000 || percent % 20 === 0) {
+            lastProgressEdit = now;
+            const dMB = Math.round(downloaded / (1024 * 1024));
+            const tMB = Math.round(total / (1024 * 1024));
+            const speedText = speed_mb && speed_mb > 0 ? `${speed_mb} MB/s` : "Ultra Telegram CDN";
+            if (liveStatusMsg?.key) {
+              waSocket.sendMessage(replyTarget, {
+                text: 
+`🎬 *[FilmFeed Downloader]*
+━━━━━━━━━━━━━━━━━━━━
+📌 *චිත්‍රපටය:* *${title}* (${resolvedQuality})
+👤 *Requested By:* ${pushName} [${badge}]
+⏳ *තත්ත්වය:* Telegram හරහා බාගත වෙමින් පවතී...
+📥 *Download Progress:* ${percent}% (${dMB}MB / ${tMB}MB)
+⚡ *Speed:* ${speedText} (MTProto Secure Stream)
+━━━━━━━━━━━━━━━━━━━━`,
+                edit: liveStatusMsg.key,
+              }).catch(() => {});
+            }
+          }
+        });
+      } else if (isGDrive) {
         logger.info(`Starting high-speed Google Drive download for ${title}...`);
         await downloadGDriveFile(movieUrl, tempFilePath, resolvedQuality);
       } else {
