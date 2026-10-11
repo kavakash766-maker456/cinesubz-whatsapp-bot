@@ -863,8 +863,8 @@ async function startBot() {
       }
     }, 15 * 60 * 1000);
 
-    // 4.8 Hours Graceful Runner Rotation (prevents hard kills by GitHub Actions)
-    const RUNNER_LIFETIME_HOURS = parseFloat(process.env.RUNNER_LIFETIME_HOURS || "4.8");
+    // 4.5 Hours Graceful Runner Rotation (prevents hard kills by GitHub Actions)
+    const RUNNER_LIFETIME_HOURS = parseFloat(process.env.RUNNER_LIFETIME_HOURS || "4.5");
     if (RUNNER_LIFETIME_HOURS > 0) {
       const lifetimeMs = RUNNER_LIFETIME_HOURS * 60 * 60 * 1000;
       setTimeout(async () => {

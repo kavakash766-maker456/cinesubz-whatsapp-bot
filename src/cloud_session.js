@@ -75,25 +75,53 @@ class CloudSession {
       const res = await axios.get(`https://api.github.com/gists/${this.gistId}`, {
         headers: this.getHeaders(),
         httpsAgent: ipv4Agent,
-        timeout: 12000,
+        timeout: 15000,
       });
       
       const data = res.data;
       const fileObj = data.files[GIST_FILENAME];
-      if (!fileObj || !fileObj.content) {
-        console.warn("[CloudSession] Vault file is empty.");
+      if (!fileObj) {
+        console.warn("[CloudSession] Vault file missing in Gist.");
         return false;
       }
 
-      const compressed = Buffer.from(fileObj.content, "base64");
+      let contentStr = fileObj.content;
+      // Handle truncated or raw files if content is not directly supplied by Gist API
+      if (!contentStr && fileObj.raw_url) {
+        console.log("[CloudSession] Content truncated in API; fetching from raw_url...");
+        const rawRes = await axios.get(fileObj.raw_url, {
+          headers: this.getHeaders(),
+          httpsAgent: ipv4Agent,
+          timeout: 25000,
+        });
+        contentStr = typeof rawRes.data === "string" ? rawRes.data : JSON.stringify(rawRes.data);
+      }
+
+      if (!contentStr) {
+        console.warn("[CloudSession] Vault content is empty.");
+        return false;
+      }
+
+      const compressed = Buffer.from(contentStr, "base64");
       const unzipped = zlib.gunzipSync(compressed).toString("utf8");
       const files = JSON.parse(unzipped);
 
       const credsObj = files["creds.json"] ? JSON.parse(files["creds.json"]) : null;
-      const isValidAuth = Boolean(credsObj && credsObj.registered === true);
+      // In Baileys MD, an authenticated session is identified by creds.me.id or creds.registered === true
+      const isValidAuth = Boolean(
+        credsObj &&
+        (credsObj.registered === true || (credsObj.me && credsObj.me.id))
+      );
+
       if (!isValidAuth) {
-        console.log("[CloudSession] Cloud vault credentials are not registered (registered !== true); skipping restore to generate fresh QR.");
+        console.log("[CloudSession] Cloud vault does not contain authenticated credentials; skipping restore to generate fresh QR.");
         return false;
+      }
+
+      // If creds has me.id, ensure registered is set to true so Baileys does not request fresh pairing/QR
+      if (credsObj.me && credsObj.me.id) {
+        credsObj.registered = true;
+        files["creds.json"] = JSON.stringify(credsObj, null, 2);
       }
 
       if (!fs.existsSync(this.authDir)) {
@@ -106,7 +134,7 @@ class CloudSession {
         restoredCount++;
       }
 
-      console.log(`✅ [CloudSession] Successfully restored ${restoredCount} session files from Private Cloud Vault!`);
+      console.log(`✅ [CloudSession] Successfully restored ${restoredCount} session files from Private Cloud Vault! (Linked to: ${credsObj.me?.id || "Registered User"})`);
       return true;
     } catch (err) {
       console.warn(`⚠️ [CloudSession] Restore failed: ${err.message}`);
@@ -139,10 +167,23 @@ class CloudSession {
         return;
       }
 
-      const isValidAuth = Boolean(credsData && credsData.registered === true);
+      // In Baileys MD, valid authenticated session has me.id or registered === true
+      const isValidAuth = Boolean(
+        credsData &&
+        (credsData.registered === true || (credsData.me && credsData.me.id))
+      );
+
       if (!isValidAuth) {
-        console.log("[CloudSession] Session not fully registered yet (registered !== true); skipping cloud vault sync.");
+        console.log("[CloudSession] Session not authenticated yet; skipping cloud vault sync.");
         return;
+      }
+
+      // Keep registered explicitly true once authenticated with me.id
+      if (credsData.me && credsData.me.id && credsData.registered !== true) {
+        credsData.registered = true;
+        try {
+          fs.writeFileSync(credsPath, JSON.stringify(credsData, null, 2), "utf8");
+        } catch (_) {}
       }
 
       const fileNames = fs.readdirSync(this.authDir).filter((f) => f.endsWith(".json"));
@@ -174,7 +215,7 @@ class CloudSession {
         }, {
           headers: this.getHeaders(),
           httpsAgent: ipv4Agent,
-          timeout: 15000,
+          timeout: 20000,
         });
         console.log(`☁️ [CloudSession] Synced ${fileNames.length} auth files to private cloud vault.`);
       } else {
@@ -189,7 +230,7 @@ class CloudSession {
         }, {
           headers: this.getHeaders(),
           httpsAgent: ipv4Agent,
-          timeout: 15000,
+          timeout: 20000,
         });
         this.gistId = createdRes.data.id;
         console.log(`☁️ [CloudSession] Created new private cloud vault (id: ${this.gistId}) and synced session.`);
