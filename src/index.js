@@ -68,15 +68,43 @@ function getUserStats() {
   return {};
 }
 
+function saveUserStats(stats) {
+  try {
+    fs.writeFileSync(STATS_FILE, JSON.stringify(stats, null, 2), "utf8");
+  } catch (e) {
+    logger.error({ e }, "Error saving stats file");
+  }
+}
+
+function checkAndResetDaily(userRecord) {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  if (userRecord.dailyDate !== todayStr) {
+    userRecord.dailyDate = todayStr;
+    userRecord.dailyCount = 0;
+  }
+}
+
 function incrementUserRequest(userId, userName, movieTitle, quality) {
   const stats = getUserStats();
   if (!stats[userId]) {
-    stats[userId] = { count: 0, name: userName, firstSeen: new Date().toISOString(), history: [] };
+    stats[userId] = {
+      count: 0,
+      name: userName,
+      firstSeen: new Date().toISOString(),
+      history: [],
+      dailyCount: 0,
+      dailyDate: new Date().toISOString().slice(0, 10),
+      isVip: false,
+      isBanned: false,
+    };
   }
   if (!stats[userId].history) {
     stats[userId].history = [];
   }
+  checkAndResetDaily(stats[userId]);
+
   stats[userId].count += 1;
+  stats[userId].dailyCount = (stats[userId].dailyCount || 0) + 1;
   stats[userId].name = userName || stats[userId].name;
   stats[userId].lastSeen = new Date().toISOString();
 
@@ -91,11 +119,7 @@ function incrementUserRequest(userId, userName, movieTitle, quality) {
     }
   }
 
-  try {
-    fs.writeFileSync(STATS_FILE, JSON.stringify(stats, null, 2), "utf8");
-  } catch (e) {
-    logger.error({ e }, "Error saving stats file");
-  }
+  saveUserStats(stats);
 
   const count = stats[userId].count;
   const history = stats[userId].history || [];
@@ -106,7 +130,7 @@ function incrementUserRequest(userId, userName, movieTitle, quality) {
   else if (count >= 2) badge = "🥉 Regular Member";
   else badge = "✨ First Request (Welcome!)";
 
-  return { count, badge, history };
+  return { count, badge, history, isVip: Boolean(stats[userId].isVip), isBanned: Boolean(stats[userId].isBanned) };
 }
 
 // --------------------------------------------------------------------------
@@ -1009,6 +1033,59 @@ async function startBot() {
 
         if (text) {
           console.log(`📩 [Msg Received] from: ${pushName} (${remoteJid}) | fromMe: ${fromMe}:\n${text}`);
+
+          // Admin Management Commands
+          const isAdmin = cleanPhone === "94760372547" || cleanPhone === BOT_PHONE || fromMe;
+          if (isAdmin && text.startsWith("!")) {
+            const parts = text.split(/\s+/);
+            const adminCmd = parts[0].toLowerCase();
+            const targetPhone = parts[1] ? parts[1].replace(/[^0-9]/g, "") : "";
+
+            if (adminCmd === "!unban" && targetPhone) {
+              const allStats = getUserStats();
+              if (allStats[targetPhone]) {
+                allStats[targetPhone].isBanned = false;
+                allStats[targetPhone].duplicateCount = 0;
+                saveUserStats(allStats);
+                await waSocket.sendMessage(remoteJid, { text: `✅ User +${targetPhone} has been UNBANNED successfully.` });
+                continue;
+              }
+            } else if (adminCmd === "!ban" && targetPhone) {
+              const allStats = getUserStats();
+              if (!allStats[targetPhone]) allStats[targetPhone] = { count: 0, name: "User", firstSeen: new Date().toISOString() };
+              allStats[targetPhone].isBanned = true;
+              allStats[targetPhone].bannedAt = new Date().toISOString();
+              allStats[targetPhone].banReason = parts.slice(2).join(" ") || "Manually banned by Admin";
+              saveUserStats(allStats);
+              await waSocket.sendMessage(remoteJid, { text: `🚫 User +${targetPhone} has been BANNED.` });
+              continue;
+            } else if (adminCmd === "!vip" && targetPhone) {
+              const allStats = getUserStats();
+              if (!allStats[targetPhone]) allStats[targetPhone] = { count: 0, name: "User", firstSeen: new Date().toISOString() };
+              allStats[targetPhone].isVip = true;
+              saveUserStats(allStats);
+              await waSocket.sendMessage(remoteJid, { text: `👑 VIP status ACTIVATED for +${targetPhone}.` });
+              continue;
+            } else if (adminCmd === "!unvip" && targetPhone) {
+              const allStats = getUserStats();
+              if (allStats[targetPhone]) {
+                allStats[targetPhone].isVip = false;
+                saveUserStats(allStats);
+                await waSocket.sendMessage(remoteJid, { text: `❌ VIP status REVOKED for +${targetPhone}.` });
+                continue;
+              }
+            } else if (adminCmd === "!stats" && targetPhone) {
+              const allStats = getUserStats();
+              const u = allStats[targetPhone];
+              if (u) {
+                checkAndResetDaily(u);
+                await waSocket.sendMessage(remoteJid, {
+                  text: `📊 *[User Info: +${targetPhone}]*\nName: ${u.name}\nDaily: ${u.dailyCount}/6\nTotal: ${u.count}\nVIP: ${u.isVip ? "YES 👑" : "NO"}\nBanned: ${u.isBanned ? "YES 🚫" : "NO"}`,
+                });
+                continue;
+              }
+            }
+          }
         }
 
         let commandFound = false;
@@ -1030,7 +1107,7 @@ async function startBot() {
             line.match(/^[!/.]?(?:req_season|season)\s+([^\s|]+)(?:\s*\|\s*[Ss]?(\d+))?(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i) ||
             line.match(/^[!/.]?req(?:uest)?\s+([^\s|]+)\s*\|\s*[Ss](\d+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
 
-          if (sMatch && (sMatch[1].startsWith("http") || sMatch[1].includes("cinesubz") || sMatch[1].includes("sinhalasub"))) {
+          if (sMatch && (sMatch[1].startsWith("http") || sMatch[1].includes("cinesubz") || sMatch[1].includes("sinhalasub") || sMatch[1].includes("anime") || sMatch[1].includes("cartoons"))) {
             commandFound = true;
             isSeriesSeason = true;
             movieUrl = sMatch[1].trim();
@@ -1055,9 +1132,9 @@ async function startBot() {
           }
         }
 
-        // 2. Fallback: Search anywhere for a CineSubz or SinhalaSub URL if no formal command was triggered
+        // 2. Fallback: Search anywhere for a CineSubz, SinhalaSub, Anime or Cartoons URL if no formal command was triggered
         if (!commandFound) {
-          const urlMatch = text.match(/(https?:\/\/[^\s|]*(?:cinesubz|sinhalasub)[^\s|\n]*)/i);
+          const urlMatch = text.match(/(https?:\/\/[^\s|]*(?:cinesubz|sinhalasub|animekaizen|cartoons)[^\s|\n]*)/i);
           if (urlMatch) {
             commandFound = true;
             movieUrl = urlMatch[1].trim();
@@ -1075,6 +1152,124 @@ async function startBot() {
         logger.info(`🎯 Accepted FilmFeed command from ${pushName} (${remoteJid}): URL=${movieUrl} | Q=${quality}`);
 
         const replyTarget = remoteJid;
+
+        // ------------------------------------------------------------------
+        // ANTI-SPAM & USER CONTROL CHECKS
+        // ------------------------------------------------------------------
+        const stats = getUserStats();
+        if (!stats[senderPhone]) {
+          stats[senderPhone] = {
+            count: 0,
+            name: pushName,
+            firstSeen: new Date().toISOString(),
+            history: [],
+            dailyCount: 0,
+            dailyDate: new Date().toISOString().slice(0, 10),
+            isVip: false,
+            isBanned: false,
+            duplicateCount: 0,
+            lastRequestedUrl: "",
+          };
+        }
+        const userRecord = stats[senderPhone];
+        checkAndResetDaily(userRecord);
+
+        // A. CHECK IF USER IS CURRENTLY BANNED
+        if (userRecord.isBanned) {
+          logger.warn(`🚫 Ignoring request from BANNED user ${senderPhone} (${pushName})`);
+          const banNotice = 
+`🚫 *[FilmFeed System - Account BANNED]*
+━━━━━━━━━━━━━━━━━━━━
+👤 *User Phone:* +${senderPhone} (${mentionTag})
+⚠️ *තත්ත්වය:* ඔබගේ WhatsApp අංකය FilmFeed පද්ධතියෙන් BAN කර ඇත.
+📌 *හේතුව (Reason):* ${userRecord.banReason || "Duplicate spam requests for the same movie"}
+
+_නැවත සේවාව ලබා ගැනීමට අවශ්‍ය නම් කරුණාකර Admin (+94760372547) අමතන්න._
+━━━━━━━━━━━━━━━━━━━━`;
+
+          await waSocket.sendMessage(replyTarget, { text: banNotice, mentions: mentionsList });
+          continue;
+        }
+
+        // B. CHECK DUPLICATE MOVIE REQUEST (SAME USER + SAME NUMBER + SAME MOVIE)
+        const cleanUrl = movieUrl.trim().toLowerCase().replace(/\/+$/, "");
+        const prevUrl = (userRecord.lastRequestedUrl || "").trim().toLowerCase().replace(/\/+$/, "");
+
+        if (prevUrl && prevUrl === cleanUrl) {
+          userRecord.duplicateCount = (userRecord.duplicateCount || 1) + 1;
+          userRecord.lastRequestedAt = Date.now();
+
+          if (userRecord.duplicateCount >= 2) {
+            // BAN the user immediately!
+            userRecord.isBanned = true;
+            userRecord.bannedAt = new Date().toISOString();
+            userRecord.banReason = "එකම චිත්‍රපටය නැවත නැවතත් (Duplicate Spam Request) ඉල්ලුම් කිරීම";
+            saveUserStats(stats);
+
+            logger.warn(`🚨 User ${senderPhone} (${pushName}) BANNED for repeated requests of ${movieUrl}`);
+
+            const banMessage = 
+`🚫 *[FilmFeed System - Account BANNED]*
+━━━━━━━━━━━━━━━━━━━━
+👤 *User:* ${mentionTag} (+${senderPhone})
+⚠️ *හේතුව (Ban Reason):*
+ඔබ එකම චිත්‍රපටය නැවත නැවතත් (Duplicate Spam Request) ඉල්ලුම් කිරීම හේතුවෙන් පද්ධතියේ ආරක්ෂාව සඳහා ඔබගේ WhatsApp අංකය ස්වයංක්‍රීයව BAN කරන ලදී!
+
+📌 *තත්ත්වය:* ඔබගේ අංකයෙන් ඉදිරියට කිසිදු චිත්‍රපටයක් ලබාගත නොහැක.
+💡 *විසඳුම:* නැවත සක්‍රීය කර ගැනීමට අවශ්‍ය නම් කරුණාකර FilmFeed Admin (+94760372547) අමතන්න.
+━━━━━━━━━━━━━━━━━━━━`;
+
+            await waSocket.sendMessage(replyTarget, { text: banMessage, mentions: mentionsList });
+            continue;
+          }
+        } else {
+          userRecord.duplicateCount = 1;
+          userRecord.lastRequestedUrl = cleanUrl;
+          userRecord.lastRequestedAt = Date.now();
+        }
+
+        // C. CHECK DAILY 6-MOVIE LIMIT FOR NON-VIP
+        const isVipUser = Boolean(
+          userRecord.isVip ||
+          text.includes("👑 VIP Member") ||
+          token.toUpperCase().includes("VIP")
+        );
+
+        if (!isVipUser && userRecord.dailyCount >= 6) {
+          logger.info(`User ${senderPhone} reached daily limit of 6 movies.`);
+          const limitMessage = 
+`⚠️ *[FilmFeed 4K • දෛනික සීමාව ඉක්මවා ඇත (Daily Limit Exceeded)]*
+━━━━━━━━━━━━━━━━━━━━
+ආයුබෝවන් *${pushName}* (${mentionTag})!
+
+📌 *දෛනික නොමිලේ සීමාව (Daily Free Limit):*
+ඔබ අද දිනට හිමි නොමිලේ ලබාගත හැකි චිත්‍රපට 6 ක උපරිම සීමාව (*6/6 Movies*) සම්පූර්ණ කර ඇත.
+
+📊 *අද දින ඔබ ලබාගත් ප්‍රමාණය:* 6 / 6 චිත්‍රපට
+⏳ *නැවත Reset වන වේලාව:* හෙට උදෑසන 12:00 AM (මධ්‍යම රාත්‍රිය)
+
+👑 *අසීමිතව (Unlimited) චිත්‍රපට ලබා ගැනීමට අවශ්‍යද?*
+ඔබට අපගේ *VIP සාමාජිකත්වය (VIP Membership)* සක්‍රීය කරගත හැක:
+
+✨ *VIP සාමාජිකත්වයේ විශේෂ වරප්‍රසාද:*
+• 🎬 දිනකට කැමති තරම් ඕනෑම චිත්‍රපට සංඛ්‍යාවක් (Unlimited Daily Movies)
+• 📦 Full TV Series Season Packs එකවර ලබා ගැනීම
+• ⚡ High-Speed Ultra VIP Queue ප්‍රමුඛතාවය (පෝලිම් නැත)
+• 🚫 කිසිදු සීමාවකින් තොර වීම
+
+👉 *VIP සක්‍රීය කරගැනීමට පිවිසෙන්න:*
+https://web-umber-six-e1un7z6257.vercel.app
+
+හෝ Admin අමතන්න: +94 76 037 2547
+━━━━━━━━━━━━━━━━━━━━`;
+
+          await waSocket.sendMessage(replyTarget, {
+            text: limitMessage,
+            mentions: mentionsList,
+          });
+          continue;
+        }
+
         const userStats = incrementUserRequest(senderPhone, pushName);
         const { count, badge } = userStats;
 
