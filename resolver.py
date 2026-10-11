@@ -644,34 +644,87 @@ def main():
     if args.download_output:
         import re, os
         file_id = None
+        folder_id = None
+        g_res = {}
+
         m_id = re.search(r"/(?:file/d/|uc\?id=)([a-zA-Z0-9_-]+)", args.url)
         if m_id:
             file_id = m_id.group(1)
         else:
+            m_f = re.search(r"/folders/([a-zA-Z0-9_-]+)", args.url)
+            if m_f:
+                folder_id = m_f.group(1)
+            else:
+                try:
+                    from gdrive_resolver import resolve_gdrive_movie
+                    g_res = resolve_gdrive_movie(args.url, args.quality) or {}
+                    file_id = g_res.get("gdrive_id") or g_res.get("file_id")
+                    folder_id = g_res.get("folder_id")
+                    if not file_id and g_res.get("direct_url"):
+                        m_id = re.search(r"/(?:file/d/|uc\?id=)([a-zA-Z0-9_-]+)", g_res["direct_url"])
+                        if m_id:
+                            file_id = m_id.group(1)
+                        else:
+                            m_f = re.search(r"/folders/([a-zA-Z0-9_-]+)", g_res["direct_url"])
+                            if m_f:
+                                folder_id = m_f.group(1)
+                except Exception:
+                    pass
+
+        # Handle Folder download via gdown
+        if folder_id:
             try:
-                from gdrive_resolver import resolve_gdrive_movie
-                g_res = resolve_gdrive_movie(args.url, args.quality)
-                file_id = g_res.get("gdrive_id") or g_res.get("file_id")
-                if not file_id and g_res.get("direct_url"):
-                    m_id = re.search(r"/(?:file/d/|uc\?id=)([a-zA-Z0-9_-]+)", g_res["direct_url"])
-                    if m_id:
-                        file_id = m_id.group(1)
-            except Exception:
+                import gdown, shutil
+                temp_dir = args.download_output + "_folder"
+                os.makedirs(temp_dir, exist_ok=True)
+                folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
+                gdown.download_folder(url=folder_url, output=temp_dir, quiet=True)
+                files = []
+                for root, _, fnames in os.walk(temp_dir):
+                    for fn in fnames:
+                        fp = os.path.join(root, fn)
+                        files.append((os.path.getsize(fp), fp))
+                if files:
+                    files.sort(reverse=True)
+                    largest_file = files[0][1]
+                    shutil.move(largest_file, args.download_output)
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    print(json.dumps({"success": True, "path": args.download_output, "size": os.path.getsize(args.download_output)}))
+                    return
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception as dl_err:
+                print(json.dumps({"success": False, "error": f"Folder download error: {str(dl_err)}"}))
+                return
+
+        # Direct file ID download via gdown
+        if file_id:
+            try:
+                import gdown
+                res = gdown.download(id=file_id, output=args.download_output, quiet=False)
+                if res and os.path.exists(args.download_output) and os.path.getsize(args.download_output) > 1000000:
+                    print(json.dumps({"success": True, "path": args.download_output, "size": os.path.getsize(args.download_output)}))
+                    return
+            except Exception as dl_err:
                 pass
 
-        if not file_id:
-            print(json.dumps({"success": False, "error": "Could not identify Google Drive file ID from URL"}))
-            return
+        # Fallback: stream direct_url
+        if g_res and g_res.get("direct_url") and g_res["direct_url"].startswith("http"):
+            try:
+                import urllib.request
+                req = urllib.request.Request(g_res["direct_url"], headers={"User-Agent": UA})
+                with urllib.request.urlopen(req, timeout=120) as resp, open(args.download_output, "wb") as out_f:
+                    while True:
+                        chunk = resp.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        out_f.write(chunk)
+                if os.path.exists(args.download_output) and os.path.getsize(args.download_output) > 100000:
+                    print(json.dumps({"success": True, "path": args.download_output, "size": os.path.getsize(args.download_output)}))
+                    return
+            except Exception as s_err:
+                pass
 
-        try:
-            import gdown
-            res = gdown.download(id=file_id, output=args.download_output, quiet=False)
-            if res and os.path.exists(args.download_output) and os.path.getsize(args.download_output) > 1000000:
-                print(json.dumps({"success": True, "path": args.download_output, "size": os.path.getsize(args.download_output)}))
-            else:
-                print(json.dumps({"success": False, "error": "Google Drive download failed or produced 0MB"}))
-        except Exception as dl_err:
-            print(json.dumps({"success": False, "error": str(dl_err)}))
+        print(json.dumps({"success": False, "error": "Could not identify Google Drive file or folder from URL"}))
         return
 
     if args.episodes:
@@ -701,6 +754,8 @@ def main():
     # Handle Google Drive, Anime & Sinhala Dubbed Cartoons directly
     is_gdrive_or_anime = (
         "drive.google.com" in args.url
+        or "animekaizen" in args.url
+        or "cartoons" in args.url
         or "lakvision" in args.url
         or "slanimeclub" in args.url
         or "animeclub" in args.url
