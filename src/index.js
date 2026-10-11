@@ -134,6 +134,101 @@ function incrementUserRequest(userId, userName, movieTitle, quality) {
 }
 
 // --------------------------------------------------------------------------
+// Group Membership & Invite Manager
+// --------------------------------------------------------------------------
+const groupMetadataCache = new Map();
+const groupInviteCache = new Map();
+const pendingGroupRequests = new Map(); // cleanPhoneOrJid -> { taskItem, createdAt }
+
+async function getCachedGroupMetadata(sock, jid, forceRefresh = false) {
+  if (!sock) return null;
+  const cached = groupMetadataCache.get(jid);
+  if (!forceRefresh && cached && Date.now() - cached.timestamp < 3 * 60 * 1000) {
+    return cached.data;
+  }
+  try {
+    const data = await sock.groupMetadata(jid);
+    groupMetadataCache.set(jid, { data, timestamp: Date.now() });
+    return data;
+  } catch (err) {
+    logger.warn({ jid, err: err.message }, "Could not fetch group metadata");
+    return cached ? cached.data : null;
+  }
+}
+
+async function getGroupInviteLink(sock, jid) {
+  if (groupInviteCache.has(jid)) return groupInviteCache.get(jid);
+
+  const envKey = `INVITE_${jid.split("@")[0]}`;
+  if (process.env[envKey]) {
+    groupInviteCache.set(jid, process.env[envKey]);
+    return process.env[envKey];
+  }
+
+  if (sock) {
+    try {
+      const code = await sock.groupInviteCode(jid);
+      if (code) {
+        const link = `https://chat.whatsapp.com/${code}`;
+        groupInviteCache.set(jid, link);
+        return link;
+      }
+    } catch (err) {
+      logger.warn({ jid, err: err.message }, "Could not fetch group invite code");
+    }
+  }
+  return null;
+}
+
+async function checkUserGroups(sock, cleanPhone, userJid, userLid, forceRefresh = false) {
+  if (!sock) return [];
+  const matched = [];
+  for (const jid of TARGET_GROUP_JIDS) {
+    const meta = await getCachedGroupMetadata(sock, jid, forceRefresh);
+    if (!meta || !meta.participants) continue;
+
+    const inGroup = meta.participants.some((p) => {
+      const pId = p.id || "";
+      const pLid = p.lid || "";
+      const pPhone = pId.split("@")[0].replace(/:\d+/, "");
+
+      if (userJid && pId === userJid) return true;
+      if (userLid && (pLid === userLid || pId === userLid)) return true;
+      if (cleanPhone && cleanPhone.length >= 9 && cleanPhone.length <= 13 && pPhone === cleanPhone) return true;
+      return false;
+    });
+
+    if (inGroup) {
+      matched.push({
+        jid,
+        subject: meta.subject || "FilmFeed Cinema Group",
+      });
+    }
+  }
+  return matched;
+}
+
+async function resolveRealPhoneFromGroups(sock, userLid) {
+  if (!sock || !userLid) return null;
+  for (const jid of TARGET_GROUP_JIDS) {
+    const meta = await getCachedGroupMetadata(sock, jid, false);
+    if (!meta || !meta.participants) continue;
+
+    for (const p of meta.participants) {
+      const pId = p.id || "";
+      const pLid = p.lid || "";
+      if (userLid && (pLid === userLid || pId === userLid)) {
+        const phone = pId.split("@")[0].replace(/:\d+/, "");
+        if (phone && phone.length >= 9 && phone.length <= 13) {
+          return phone;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+// --------------------------------------------------------------------------
 // 1. HTTP Server for Health Checks & Web QR Display
 // --------------------------------------------------------------------------
 const server = http.createServer((req, res) => {
@@ -486,21 +581,34 @@ async function processQueue() {
     `[Queue Engine] Processing task for ${pushName}: ${movieUrl} | Type=${isSeriesSeason ? `Series S${seasonNumber}` : "Movie"} | Remaining in queue: ${requestQueue.length}`
   );
 
-  // Helper function to broadcast message to all active groups
-  const broadcastToGroups = async (payload) => {
+  // Helper function to broadcast message to target groups (with optional heart reaction)
+  const broadcastToGroups = async (payload, shouldReact = true) => {
+    const groupsToSend = (currentTask.targetGroups && currentTask.targetGroups.length > 0)
+      ? currentTask.targetGroups
+      : TARGET_GROUP_JIDS;
+
     let sentCount = 0;
     let lastError = null;
-    for (const jid of TARGET_GROUP_JIDS) {
+    for (const jid of groupsToSend) {
       try {
-        await waSocket.sendMessage(jid, payload);
+        const sent = await waSocket.sendMessage(jid, payload);
         sentCount++;
+        if (shouldReact && sent?.key) {
+          try {
+            await waSocket.sendMessage(jid, {
+              react: { text: "❤️", key: sent.key },
+            });
+          } catch (rErr) {
+            logger.warn({ rErr, jid }, "Failed to react ❤️ to group message");
+          }
+        }
       } catch (err) {
         lastError = err;
         logger.error({ err, jid }, `Failed sending to group ${jid}: ${err.message}`);
       }
     }
-    if (sentCount === 0 && TARGET_GROUP_JIDS.length > 0) {
-      throw lastError || new Error("WhatsApp message delivery failed to all target groups");
+    if (sentCount === 0 && groupsToSend.length > 0) {
+      throw lastError || new Error("WhatsApp message delivery failed to target groups");
     }
   };
 
@@ -551,7 +659,7 @@ async function processQueue() {
 ━━━━━━━━━━━━━━━━━━━━
 📦 *Pack Type:* Complete Season Batch
 🔢 *Total Episodes:* ${totalEpisodes} Episodes
-👤 *Requested By:* ${mentionTag} (${pushName})
+👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
 🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
 🌟 *Quality:* ${quality}
 🔑 *Token:* ${token || "VIP_SEASON"}
@@ -826,7 +934,7 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
       const caption = 
 `🎬 *${title}*
 ━━━━━━━━━━━━━━━━━━━━
-👤 *Requested By:* ${mentionTag} (${pushName})
+👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
 🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
 🌟 *Quality:* ${resolvedQuality} ${movieData.size_text ? `(${movieData.size_text})` : `(${finalSizeMB}MB)`}
 🔑 *Token:* ${token || "DIRECT"}
@@ -859,7 +967,7 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
         caption: 
 `🎬 *${title}* (${resolvedQuality})
 ━━━━━━━━━━━━━━━━━━━━
-👤 *Requested By:* ${mentionTag}
+👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
 🎯 *User Stats:* ${count} වන සාර්ථක නිකුතුව! [${badge}]
 ⚡ *Status:* Group Broadcast Completed
 ━━━━━━━━━━━━━━━━━━━━
@@ -1086,19 +1194,48 @@ async function startBot() {
       try {
         const remoteJid = msg.key.remoteJid || "";
         const fromMe = Boolean(msg.key.fromMe);
-        const senderPhone = (msg.key.participant || remoteJid || "").split("@")[0].replace(/:\d+/, "");
-        const pushName = msg.pushName || senderPhone || "Movie Fan";
+        const isGroup = remoteJid.endsWith("@g.us");
+        const participant = msg.key.participant || "";
 
-        const rawJid = msg.key.participant || (remoteJid.endsWith("@s.whatsapp.net") ? remoteJid : null);
-        // Normalize to pure phone number (strips :device suffix such as :1 or :12)
-        const cleanPhone = rawJid
-          ? rawJid.replace(/:\d+/, "").split("@")[0]
-          : senderPhone;
+        let requesterPhone = "";
+        let requesterLid = "";
+        let requesterJid = "";
+
+        if (isGroup) {
+          if (participant.endsWith("@s.whatsapp.net")) {
+            requesterPhone = participant.split("@")[0].replace(/:\d+/, "");
+            requesterJid = `${requesterPhone}@s.whatsapp.net`;
+          } else if (participant.endsWith("@lid")) {
+            requesterLid = participant.replace(/:\d+/, "");
+          }
+        } else {
+          if (remoteJid.endsWith("@s.whatsapp.net")) {
+            requesterPhone = remoteJid.split("@")[0].replace(/:\d+/, "");
+            requesterJid = `${requesterPhone}@s.whatsapp.net`;
+          } else if (remoteJid.endsWith("@lid")) {
+            requesterLid = remoteJid.replace(/:\d+/, "");
+          }
+        }
+
+        // If user reached via LID, resolve their real phone from group participants
+        if (requesterLid && !requesterPhone) {
+          const resolved = await resolveRealPhoneFromGroups(waSocket, requesterLid);
+          if (resolved) {
+            requesterPhone = resolved;
+            requesterJid = `${requesterPhone}@s.whatsapp.net`;
+          }
+        }
+
+        const rawPhone = requesterPhone || (remoteJid.includes("@") ? remoteJid.split("@")[0].replace(/:\d+/, "") : "");
+        const isRealPhone = rawPhone && rawPhone.length >= 9 && rawPhone.length <= 13 && !rawPhone.startsWith("47485");
+        const cleanPhone = isRealPhone ? rawPhone : "";
         const cleanJid = cleanPhone ? `${cleanPhone}@s.whatsapp.net` : null;
+        const senderPhone = cleanPhone || (requesterLid ? requesterLid.split("@")[0] : rawPhone);
 
-        const requesterJid = cleanJid;
-        const mentionTag = cleanPhone ? `@${cleanPhone}` : pushName;
-        const mentionsList = cleanJid ? [cleanJid] : [];
+        const pushName = msg.pushName || (cleanPhone ? `+${cleanPhone}` : "Movie Fan");
+        const mentionTag = cleanPhone ? `@${cleanPhone}` : `@${pushName}`;
+        const mentionDisplay = cleanPhone ? `@${cleanPhone} (${pushName})` : `@${pushName}`;
+        const mentionsList = [requesterJid, requesterLid, cleanJid, (isGroup ? participant : remoteJid)].filter(Boolean);
 
         // Unwrap potential layers: ephemeral, viewOnce, document captions
         let innerMsg = msg.message;
@@ -1171,6 +1308,66 @@ async function startBot() {
               }
             }
           }
+        }
+
+        // ------------------------------------------------------------------
+        // Check for Group Join Verification Command: !done / done / verify
+        // ------------------------------------------------------------------
+        const lowerTrimmed = text.trim().toLowerCase();
+        if (["!done", "done", ".done", "/done", "verify", "!verify", "join", "!join"].includes(lowerTrimmed)) {
+          const pendingKey = cleanPhone || requesterLid || senderPhone;
+          const pending = pendingGroupRequests.get(pendingKey);
+          if (!pending) {
+            await waSocket.sendMessage(remoteJid, {
+              text: `👋 ආයුබෝවන් *${pushName}*!\nඔබට දැනට Pending වූ Movie Request එකක් නොමැත.\nවෙබ් අඩවියෙන් හෝ *!req <movie_url>* මඟින් ඔබට අවශ්‍ය චිත්‍රපටය Request කරන්න. 🎬`,
+            });
+            continue;
+          }
+
+          // Force-refresh to check if user has joined any of our target groups
+          const userGroups = await checkUserGroups(waSocket, cleanPhone, requesterJid, requesterLid, true);
+          if (userGroups.length === 0) {
+            const inviteLinks = [];
+            for (const jid of TARGET_GROUP_JIDS) {
+              const link = await getGroupInviteLink(waSocket, jid);
+              const meta = await getCachedGroupMetadata(waSocket, jid);
+              inviteLinks.push({ title: meta?.subject || "FilmFeed Cinema Group", link });
+            }
+            const linksText = inviteLinks
+              .filter((x) => x.link)
+              .map((x) => `🔗 *${x.title}:*\n👉 ${x.link}`)
+              .join("\n\n");
+
+            await waSocket.sendMessage(remoteJid, {
+              text: `❌ *[FilmFeed 4K] තහවුරු කරගත නොහැකි විය!*\n\n*${pushName}*, ඔබ තවමත් අපගේ කිසිදු WhatsApp සමූහයකට (Group) Join වී නොමැති බව පෙනේ.\n\nකරුණාකර පහත Link එකෙන් Group එකට Join වී නැවත *!done* ලෙස එවන්න:\n\n${linksText || "Admin අමතන්න: +94 76 037 2547"}`,
+            });
+            continue;
+          }
+
+          // User is verified!
+          const taskItem = pending.taskItem;
+          taskItem.targetGroups = userGroups.map((g) => g.jid);
+          taskItem.mentionTag = mentionTag;
+          taskItem.mentionDisplay = mentionDisplay;
+          taskItem.mentionsList = mentionsList;
+          pendingGroupRequests.delete(pendingKey);
+
+          const groupNames = userGroups.map((g) => `*${g.subject}*`).join(", ");
+          await waSocket.sendMessage(remoteJid, {
+            text: `✅ *[FilmFeed 4K • තහවුරු කිරීම සාර්ථකයි!]*\n\nස්තූතියි *${pushName}*! ඔබ ${groupNames} සමූහය හා සම්බන්ධ වී ඇති බව තහවුරු විය. 🎉\n\n🚀 ඔබ ඉල්ලූ *${taskItem.isSeriesSeason ? `TV Series (Season ${taskItem.seasonNumber})` : "චිත්‍රපටය"}* දැන් බාගත කිරීම ආරම්භ වේ!\n📦 චිත්‍රපටය ඔබ සිටින Group එකට පමණක් Upload වනු ඇත. 🍿`,
+          });
+
+          const isBusy = isProcessingQueue || requestQueue.length > 0;
+          const queuePosition = requestQueue.length + (isProcessingQueue ? 1 : 0);
+
+          if (isBusy) {
+            requestQueue.push(taskItem);
+            logger.info(`Task added to queue at #${queuePosition} for ${pushName} after group verification`);
+          } else {
+            requestQueue.push(taskItem);
+            processQueue();
+          }
+          continue;
         }
 
         let commandFound = false;
@@ -1358,16 +1555,15 @@ https://web-umber-six-e1un7z6257.vercel.app
         const userStats = incrementUserRequest(senderPhone, pushName);
         const { count, badge } = userStats;
 
-        // Instant Acknowledgment Message
-        try {
-          await waSocket.sendMessage(replyTarget, {
-            text: `📥 *[FilmFeed Auto-Bot]*\n\n*${pushName}*, ඔබගේ ඉල්ලීම පද්ධතියට ලැබුණි! 🎬\n\n📌 *Quality:* ${quality}\n⏳ බාගත කිරීම සඳහා පෝලිමට එක් කරන ලදී...`,
-            mentions: mentionsList,
-          });
-        } catch (_) {}
-
-        const isBusy = isProcessingQueue || requestQueue.length > 0;
-        const queuePosition = requestQueue.length + (isProcessingQueue ? 1 : 0);
+        // ------------------------------------------------------------------
+        // Check User Group Membership
+        // ------------------------------------------------------------------
+        let userGroups = [];
+        if (isGroup) {
+          userGroups = [{ jid: remoteJid, subject: "Current Group" }];
+        } else {
+          userGroups = await checkUserGroups(waSocket, cleanPhone, requesterJid, requesterLid, false);
+        }
 
         const taskItem = {
           isSeriesSeason,
@@ -1379,10 +1575,62 @@ https://web-umber-six-e1un7z6257.vercel.app
           requesterJid,
           pushName,
           mentionTag,
+          mentionDisplay,
           mentionsList,
           userStats,
+          targetGroups: userGroups.map((g) => g.jid),
           createdAt: Date.now(),
         };
+
+        if (userGroups.length === 0) {
+          // User is NOT in ANY group! Store pending and prompt with invite links
+          const pendingKey = cleanPhone || requesterLid || senderPhone;
+          pendingGroupRequests.set(pendingKey, { taskItem, createdAt: Date.now() });
+
+          const inviteLinks = [];
+          for (const jid of TARGET_GROUP_JIDS) {
+            const link = await getGroupInviteLink(waSocket, jid);
+            const meta = await getCachedGroupMetadata(waSocket, jid);
+            inviteLinks.push({ title: meta?.subject || "FilmFeed Cinema Group", link });
+          }
+          const linksText = inviteLinks
+            .filter((x) => x.link)
+            .map((x) => `🔗 *${x.title}:*\n👉 ${x.link}`)
+            .join("\n\n");
+
+          const joinRequiredMessage =
+`⚠️ *[FilmFeed 4K • Group Membership Required]*
+
+ආයුබෝවන් *${pushName}*! 🎬
+ඔබ ඉල්ලූ චිත්‍රපටය ලබා ගැනීමට පෙර ඔබ අපගේ නිල WhatsApp සමූහයන්ගෙන් (Groups) එකකට සම්බන්ධ වී සිටිය යුතුය.
+
+📥 *චිත්‍රපට හා TV Series Upload කරනු ලබන්නේ අපගේ Groups වලට පමණි!*
+
+කරුණාකර පහත Group Link එකෙන් අපගේ සමූහයට එකතු වන්න:
+${linksText || "Admin අමතන්න: +94 76 037 2547"}
+
+━━━━━━━━━━━━━━━━━━━━
+✅ *Join වූ පසු කුමක් කළ යුතුද?*
+Group එකට Join වී අවසන් වූ පසු, මෙම චැට් එකට *!done* හෝ *done* ලෙස Reply කරන්න (නැතහොත් Movie Request එක නැවත එවන්න).
+එවිට ඔබ Group එකේ සිටින බව තහවුරු කරගෙන ඔබ සිටින Group එකට චිත්‍රපටය Auto-Upload වනු ඇත! 🍿`;
+
+          await waSocket.sendMessage(replyTarget, {
+            text: joinRequiredMessage,
+            mentions: mentionsList,
+          });
+          continue;
+        }
+
+        // Instant Acknowledgment Message
+        try {
+          await waSocket.sendMessage(replyTarget, {
+            text: `📥 *[FilmFeed Auto-Bot]*\n\n*${pushName}*, ඔබගේ ඉල්ලීම පද්ධතියට ලැබුණි! 🎬\n\n📌 *Quality:* ${quality}\n⏳ බාගත කිරීම සඳහා පෝලිමට එක් කරන ලදී...`,
+            mentions: mentionsList,
+          });
+        } catch (_) {}
+
+        const isBusy = isProcessingQueue || requestQueue.length > 0;
+        const queuePosition = requestQueue.length + (isProcessingQueue ? 1 : 0);
 
         if (isBusy) {
           requestQueue.push(taskItem);
