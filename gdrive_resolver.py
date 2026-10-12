@@ -54,8 +54,14 @@ def find_all_files(names):
 def get_cartoons_file():
     return find_file(["cartoons.json"])
 
+def get_anime_movies_file():
+    return find_file(["animeclub_movies.json", "animekaizen_movies.json", "anime_movies.json"])
+
 def get_anime_movies_files():
     return find_all_files(["animeclub_movies.json", "animekaizen_movies.json", "anime_movies.json"])
+
+def get_anime_series_file():
+    return find_file(["animeclub_series.json", "animekaizen_series.json", "anime_series.json"])
 
 def get_anime_series_files():
     return find_all_files(["animeclub_series.json", "animekaizen_series.json", "anime_series.json"])
@@ -142,66 +148,72 @@ def resolve_cartoons_direct_url(post_url, post_id=None):
     return None, "Unable to resolve download link"
 
 def get_anime_series_episodes(url):
-    sf = get_anime_series_file()
-    if not sf:
+    files = get_anime_series_files()
+    if not files:
+        single = get_anime_series_file()
+        if single:
+            files = [single]
+    if not files:
         return None
-    try:
-        with open(sf, "r", encoding="utf-8") as f:
-            data = json.load(f)
 
-        clean_url = url.strip().rstrip("/")
-        series_list = data if isinstance(data, list) else data.get("series", [])
+    clean_url = url.strip().rstrip("/")
+    for sf in files:
+        try:
+            with open(sf, "r", encoding="utf-8") as f:
+                data = json.load(f)
 
-        for s in series_list:
-            s_url = (s.get("url") or "").strip().rstrip("/")
-            if s_url == clean_url or clean_url in s_url or s_url in clean_url:
-                title = s.get("title", "Anime Series").replace(" | සිංහල උපසිරැසි සමඟ", "").strip()
-                poster = s.get("backdrop") or s.get("poster") or ""
+            series_list = data if isinstance(data, list) else data.get("series", [])
 
-                eps = []
-                cards = s.get("download_cards") or []
-                if isinstance(cards, dict):
-                    cards = [cards]
+            for s in series_list:
+                s_url = (s.get("url") or "").strip().rstrip("/")
+                if s_url == clean_url or clean_url in s_url or s_url in clean_url:
+                    title = s.get("title", "Anime Series").replace(" | සිංහල උපසිරැසි සමඟ", "").strip()
+                    poster = s.get("backdrop") or s.get("poster") or ""
 
-                ep_idx = 1
-                for card in cards:
-                    card_title = card.get("card_title") or f"Episode {ep_idx}"
-                    links = card.get("links") or []
-                    for link in links:
-                        link_url = link.get("url") or ""
-                        if not link_url or "group" in link_url.lower():
-                            continue
-                        label = link.get("label") or card_title
-                        eps.append({
-                            "season": 1,
-                            "episode": ep_idx,
-                            "title": f"{title} - {label}",
-                            "url": link_url,
-                        })
-                        ep_idx += 1
+                    eps = []
+                    cards = s.get("download_cards") or []
+                    if isinstance(cards, dict):
+                        cards = [cards]
 
-                # If no cards, check download_links
-                if not eps and s.get("download_links"):
-                    for i, dl in enumerate(s.get("download_links", [])):
-                        dl_url = dl.get("url") or ""
-                        if dl_url and "group" not in dl_url.lower():
+                    ep_idx = 1
+                    for card in cards:
+                        card_title = card.get("card_title") or f"Episode {ep_idx}"
+                        links = card.get("links") or []
+                        for link in links:
+                            link_url = link.get("url") or ""
+                            if not link_url or "group" in link_url.lower():
+                                continue
+                            label = link.get("label") or card_title
                             eps.append({
                                 "season": 1,
-                                "episode": i + 1,
-                                "title": f"{title} - {dl.get('label', f'Ep {i+1}')}",
-                                "url": dl_url,
+                                "episode": ep_idx,
+                                "title": f"{title} - {label}",
+                                "url": link_url,
                             })
+                            ep_idx += 1
 
-                if eps:
-                    return {
-                        "success": True,
-                        "title": title,
-                        "poster": poster,
-                        "backdrop": s.get("backdrop") or poster,
-                        "episodes": eps,
-                    }
-    except Exception:
-        pass
+                    # If no cards, check download_links
+                    if not eps and s.get("download_links"):
+                        for i, dl in enumerate(s.get("download_links", [])):
+                            dl_url = dl.get("url") or ""
+                            if dl_url and "group" not in dl_url.lower():
+                                eps.append({
+                                    "season": 1,
+                                    "episode": i + 1,
+                                    "title": f"{title} - {dl.get('label', f'Ep {i+1}')}",
+                                    "url": dl_url,
+                                })
+
+                    if eps:
+                        return {
+                            "success": True,
+                            "title": title,
+                            "poster": poster,
+                            "backdrop": s.get("backdrop") or poster,
+                            "episodes": eps,
+                        }
+        except Exception:
+            continue
     return None
 
 def load_cartoons_map():
@@ -223,27 +235,39 @@ def load_cartoons_map():
         return {}
 
 def load_anime_movies_map():
-    af = get_anime_movies_file()
-    if not af:
+    files = get_anime_movies_files()
+    if not files:
+        single = get_anime_movies_file()
+        if single:
+            files = [single]
+    if not files:
         return {}
-    try:
-        with open(af, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        items = data if isinstance(data, list) else data.get("movies", [])
-        out = {}
-        for m in items:
-            if m.get("url"):
-                out[m["url"].strip().rstrip("/")] = m
-            for link in m.get("download_links", []):
-                if link.get("url"):
-                    out[link["url"].strip().rstrip("/")] = m
-            for card in m.get("download_cards", []):
-                for link in card.get("links", []):
+    out = {}
+    for af in files:
+        try:
+            with open(af, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            items = data if isinstance(data, list) else (data.get("movies", []) or data.get("series", []))
+            for m in items:
+                if m.get("url"):
+                    out[m["url"].strip().rstrip("/")] = m
+                for link in m.get("download_links", []):
                     if link.get("url"):
                         out[link["url"].strip().rstrip("/")] = m
-        return out
-    except Exception:
-        return {}
+                for card in m.get("download_cards", []):
+                    for link in card.get("links", []):
+                        if link.get("url"):
+                            out[link["url"].strip().rstrip("/")] = m
+                for link in m.get("links", []):
+                    if link.get("url"):
+                        out[link["url"].strip().rstrip("/")] = m
+                    if link.get("href"):
+                        out[link["href"].strip().rstrip("/")] = m
+                    if link.get("resolved"):
+                        out[link["resolved"].strip().rstrip("/")] = m
+        except Exception:
+            continue
+    return out
 
 def resolve_gdrive_movie(url, requested_quality=None):
     clean_url = url.strip().rstrip("/")
@@ -260,17 +284,40 @@ def resolve_gdrive_movie(url, requested_quality=None):
     is_cartoon = False
     direct_drive_url = None
 
-    # A. If Anime Movie found in AnimeKaizen JSON
+    # A. If Anime Movie / Series found in Anime JSONs
     if anime_meta:
         is_anime = True
         links = anime_meta.get("download_links") or []
         if not links and anime_meta.get("download_cards"):
             for c in anime_meta["download_cards"]:
                 links.extend(c.get("links", []))
+        if not links and anime_meta.get("links"):
+            for l in anime_meta["links"]:
+                target_url = l.get("resolved") or l.get("href") or l.get("url")
+                if target_url:
+                    links.append({
+                        "url": target_url,
+                        "label": l.get("quality") or l.get("source") or "1080p",
+                        "quality": l.get("quality"),
+                        "text": l.get("source") or l.get("quality"),
+                    })
 
         # Filter out Google Groups
         valid_links = [l for l in links if "group" not in (l.get("url") or "").lower()]
-        chosen = valid_links[0] if valid_links else (links[0] if links else None)
+
+        # If requested_quality specified (e.g. "720p", "480p", "1080p"), find match
+        chosen = None
+        if requested_quality and valid_links:
+            req_q = str(requested_quality).lower().strip()
+            for l in valid_links:
+                lbl = (l.get("label") or l.get("text") or l.get("quality") or "").lower()
+                if req_q in lbl:
+                    chosen = l
+                    break
+        if not chosen:
+            # Prefer Google Drive / direct over Telegram
+            gdrive_first = [l for l in valid_links if "t.me" not in (l.get("url") or "").lower()]
+            chosen = gdrive_first[0] if gdrive_first else (valid_links[0] if valid_links else (links[0] if links else None))
 
         if chosen and chosen.get("url"):
             open_url = chosen["url"]
@@ -278,7 +325,7 @@ def resolve_gdrive_movie(url, requested_quality=None):
                 direct_drive_url = resolve_animekaizen_open_url(open_url)
             else:
                 direct_drive_url = open_url
-            chosen_quality = chosen.get("label") or "1080p"
+            chosen_quality = chosen.get("label") or chosen.get("text") or chosen.get("quality") or "1080p"
 
     # B. If direct AnimeKaizen open link was sent
     elif "animekaizen.org/open" in clean_url:
@@ -317,6 +364,23 @@ def resolve_gdrive_movie(url, requested_quality=None):
 
     if not direct_drive_url and not file_id:
         return {"success": False, "error": "Could not identify Google Drive or Anime file link from URL"}
+
+    # If Telegram bot URL (e.g. SL Anime Club Telegram releases)
+    if direct_drive_url and ("t.me" in direct_drive_url or "telegram" in direct_drive_url):
+        title = (anime_meta.get("title") if anime_meta else "Anime Release").replace(" | සිංහල උපසිරැසි සමඟ", "").strip()
+        poster = (anime_meta.get("poster") or anime_meta.get("backdrop") or "") if anime_meta else ""
+        return {
+            "success": True,
+            "title": title,
+            "poster": poster,
+            "backdrop": poster,
+            "description": (anime_meta.get("description") if anime_meta else "High-speed Anime Telegram Release."),
+            "quality": chosen_quality,
+            "size_text": "Telegram Media",
+            "direct_url": direct_drive_url,
+            "is_anime": True,
+            "is_telegram": True,
+        }
 
     # Extract Drive ID or Folder ID
     if direct_drive_url:
