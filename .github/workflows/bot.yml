@@ -1,15 +1,13 @@
 name: FilmFeed WhatsApp Bot 24/7
 
 on:
-  push:
-    branches: [ main, master ]
   workflow_dispatch:
   schedule:
     - cron: '30 */4 * * *'
 
 concurrency:
   group: whatsapp-bot-instance
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   run-bot:
