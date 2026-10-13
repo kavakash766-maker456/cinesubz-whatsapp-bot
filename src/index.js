@@ -1186,6 +1186,8 @@ async function startBot() {
   });
 
   sock.ev.on("messages.upsert", async (m) => {
+    // Only process new incoming messages — skip history sync replays on startup
+    if (m.type !== "notify") return;
     if (!m.messages || m.messages.length === 0) return;
 
     for (const msg of m.messages) {
@@ -1194,6 +1196,10 @@ async function startBot() {
       try {
         const remoteJid = msg.key.remoteJid || "";
         const fromMe = Boolean(msg.key.fromMe);
+
+        // Skip messages sent by the bot itself (except admin commands from bot's own number)
+        if (fromMe && !remoteJid.endsWith("@g.us")) continue;
+
         const isGroup = remoteJid.endsWith("@g.us");
         const participant = msg.key.participant || "";
 
@@ -1227,10 +1233,14 @@ async function startBot() {
         }
 
         const rawPhone = requesterPhone || (remoteJid.includes("@") ? remoteJid.split("@")[0].replace(/:\d+/, "") : "");
-        const isRealPhone = rawPhone && rawPhone.length >= 9 && rawPhone.length <= 13 && !rawPhone.startsWith("47485");
+        // Only exclude the bot's own device LID (exact match), not any user phone starting with those digits
+        const BOT_OWN_LID_PREFIX = BOT_PHONE.replace(/^94/, "47485"); // 94760372547 -> 47485... (linked device format)
+        const isOwnDevice = rawPhone === BOT_OWN_LID_PREFIX || rawPhone === BOT_PHONE;
+        const isRealPhone = rawPhone && rawPhone.length >= 9 && rawPhone.length <= 15 && !isOwnDevice;
         const cleanPhone = isRealPhone ? rawPhone : "";
         const cleanJid = cleanPhone ? `${cleanPhone}@s.whatsapp.net` : null;
-        const senderPhone = cleanPhone || (requesterLid ? requesterLid.split("@")[0] : rawPhone);
+        // Use cleanPhone as stats key; fall back to requesterLid only if no phone resolved at all
+        const senderPhone = cleanPhone || (requesterLid ? requesterLid.split("@")[0].replace(/:\d+/, "") : rawPhone);
 
         const pushName = msg.pushName || (cleanPhone ? `+${cleanPhone}` : "Movie Fan");
         const mentionTag = cleanPhone ? `@${cleanPhone}` : `@${pushName}`;
@@ -1253,11 +1263,12 @@ async function startBot() {
 
         const text = rawText.trim();
 
+        // Log every incoming message for debugging
         if (text) {
-          console.log(`📩 [Msg Received] from: ${pushName} (${remoteJid}) | fromMe: ${fromMe}:\n${text}`);
+          console.log(`📩 [Msg Received] from: ${pushName} (${senderPhone || requesterLid}) | jid: ${remoteJid} | fromMe: ${fromMe}:\n${text}`);
 
           // Admin Management Commands
-          const isAdmin = cleanPhone === "94760372547" || cleanPhone === BOT_PHONE || fromMe;
+          const isAdmin = cleanPhone === "94760372547" || cleanPhone === BOT_PHONE || (fromMe && !isGroup);
           if (isAdmin && text.startsWith("!")) {
             const parts = text.split(/\s+/);
             const adminCmd = parts[0].toLowerCase();
@@ -1369,6 +1380,9 @@ async function startBot() {
           }
           continue;
         }
+
+        // Skip bot's own messages from command processing
+        if (fromMe) continue;
 
         let commandFound = false;
         let isSeriesSeason = false;
