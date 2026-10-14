@@ -772,8 +772,108 @@ def main():
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
 
+    # Handle Baiscopes direct download URLs
+    # 1. Cloudflare worker direct mp4: drive2.baiscopeslk.workers.dev
+    # 2. Telegram invite links: t.me/+xxx  (bot handles natively)
+    # 3. Baiscopes intermediate redirect: baiscopes.lk/links/CODE/
+    is_baiscopes = (
+        "baiscopeslk.workers.dev" in args.url
+        or "baiscopes.lk/links/" in args.url
+        or ("t.me" in args.url and "baiscopes" in args.url.lower())
+    )
+
+    if is_baiscopes:
+        result = resolve_baiscopes_direct(args.url, args.quality)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
     result = resolve_direct_link(args.url, args.quality)
     print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def resolve_baiscopes_direct(url: str, quality: str = None) -> dict:
+    """Resolve a Baiscopes.lk direct download URL to a streamable/downloadable link."""
+
+    # Case 1: Already a Cloudflare worker direct mp4 URL — pass through
+    if "baiscopeslk.workers.dev" in url or url.endswith(".mp4"):
+        return {
+            "success": True,
+            "direct_url": url,
+            "title": url.split("/")[-1].replace("%20", " ").replace("Baiscopes.lk%20-%20", "").split(".")[0],
+            "quality": quality or "HD",
+            "poster": None,
+            "description": "Baiscopes.lk Direct Download",
+            "is_baiscopes": True,
+        }
+
+    # Case 2: Telegram link — return as-is, bot's telegram downloader handles it
+    if "t.me" in url:
+        return {
+            "success": True,
+            "direct_url": url,
+            "title": "Baiscopes Telegram Release",
+            "quality": quality or "HD",
+            "poster": None,
+            "description": "Baiscopes.lk via Telegram",
+            "is_telegram": True,
+            "is_baiscopes": True,
+        }
+
+    # Case 3: Intermediate link (baiscopes.lk/links/CODE/) — follow redirect to get real URL
+    if "baiscopes.lk/links/" in url:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA})
+            # Follow redirects manually to capture final URL
+            opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler())
+            with opener.open(req, timeout=20) as resp:
+                final_url = resp.url
+                # Read page content to find direct link
+                html = resp.read().decode("utf-8", errors="ignore")
+
+            # Try to extract direct download link from page
+            # Common pattern: window.location = "url" or meta refresh or <a href>
+            patterns = [
+                r'window\.location\s*=\s*["\']([^"\']+)["\']',
+                r'window\.location\.href\s*=\s*["\']([^"\']+)["\']',
+                r'<meta[^>]+url=([^\s"\'>;]+)',
+                r'href=["\']([^"\']*\.mp4[^"\']*)["\']',
+                r'href=["\']([^"\']*workers\.dev[^"\']*)["\']',
+                r'href=["\']([^"\']*drive\.google[^"\']*)["\']',
+                r'href=["\']([^"\']*t\.me[^"\']*)["\']',
+            ]
+            for pat in patterns:
+                m = re.search(pat, html, re.IGNORECASE)
+                if m:
+                    direct = m.group(1).strip()
+                    if direct.startswith("http"):
+                        return {
+                            "success": True,
+                            "direct_url": direct,
+                            "title": "Baiscopes Release",
+                            "quality": quality or "HD",
+                            "poster": None,
+                            "description": "Baiscopes.lk Download",
+                            "is_baiscopes": True,
+                            "is_telegram": "t.me" in direct,
+                        }
+
+            # If redirect led to final URL that's downloadable
+            if final_url and final_url != url:
+                return {
+                    "success": True,
+                    "direct_url": final_url,
+                    "title": "Baiscopes Release",
+                    "quality": quality or "HD",
+                    "poster": None,
+                    "description": "Baiscopes.lk Download",
+                    "is_baiscopes": True,
+                }
+        except Exception as e:
+            pass
+
+        return {"success": False, "error": f"Could not resolve Baiscopes link: {url}"}
+
+    return {"success": False, "error": f"Unknown Baiscopes URL format: {url}"}
 
 
 if __name__ == "__main__":
