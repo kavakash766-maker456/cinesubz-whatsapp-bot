@@ -552,6 +552,10 @@ def resolve_direct_link(
             ]
 
             title = "Movie Download"
+            poster = ""
+            backdrop = ""
+            description = ""
+            year = None
             raw_target = got.get("url") or ""
             if raw_target:
                 fname = urllib.parse.unquote(raw_target.split("/")[-1])
@@ -559,14 +563,38 @@ def resolve_direct_link(
                 fname = re.sub(r"\.(mp4|mkv|avi)$", "", fname, flags=re.I).strip()
                 if fname:
                     title = fname
+                # Query CineSubz for title to retrieve official poster, TMDB backdrop, and description
+                m_search = re.search(r"^([a-zA-Z0-9\s]+?)(?:\s*\(\d{4}\)|\s+\d{4}|\s+WEB|\s+Hindi|\s+Telugu|\s+Tamil|\s+Sinhala)", title)
+                search_q = m_search.group(1).strip() if m_search else title.split()[0]
+                if search_q and len(search_q) >= 3:
+                    try:
+                        s_body, _, _ = http_get(f"https://cinesubz.lk/?s={urllib.parse.quote(search_q)}")
+                        s_root = parse_html(s_body.decode("utf-8", "replace"))
+                        found_link = None
+                        for a in s_root.find_all(tag="a"):
+                            href = a.attrs.get("href", "")
+                            if "/movies/" in href and not href.endswith("/movies/"):
+                                found_link = href
+                                break
+                        if found_link:
+                            meta_m = scrape_movie(found_link)
+                            if meta_m.get("details", {}).get("title"):
+                                title = meta_m["details"]["title"]
+                            year = meta_m.get("details", {}).get("year")
+                            poster = meta_m.get("banner", {}).get("poster") or ""
+                            backdrop = meta_m.get("banner", {}).get("backdrop") or ""
+                            description = meta_m.get("description") or ""
+                    except Exception:
+                        pass
 
             if file_urls:
                 return {
                     "success": True,
                     "title": title,
-                    "poster": "",
-                    "backdrop": "",
-                    "description": "",
+                    "year": year,
+                    "poster": poster,
+                    "backdrop": backdrop,
+                    "description": description,
                     "quality": requested_quality or "720p",
                     "size_text": "",
                     "direct_url": file_urls[0],
@@ -576,9 +604,10 @@ def resolve_direct_link(
                 return {
                     "success": True,
                     "title": title,
-                    "poster": "",
-                    "backdrop": "",
-                    "description": "",
+                    "year": year,
+                    "poster": poster,
+                    "backdrop": backdrop,
+                    "description": description,
                     "quality": requested_quality or "720p",
                     "size_text": "",
                     "direct_url": tg_cand[0],

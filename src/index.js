@@ -811,7 +811,7 @@ async function processQueue() {
       }
 
       const title = movieData.title || "Movie";
-      const posterUrl = movieData.poster || movieData.backdrop;
+      const posterUrl = movieData.backdrop || movieData.poster;
       const directUrl = movieData.direct_url;
       const resolvedQuality = movieData.quality || quality;
 
@@ -986,9 +986,17 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
 
 🍿 _චිත්‍රපටය පහතින් Document එකක් ලෙස ලැබෙනු ඇත!_`;
 
-      if (posterUrl) {
+      const effectivePoster = posterUrl || movieData.backdrop || movieData.poster;
+      const posterBuffer = await getPosterThumbnail(effectivePoster);
+      if (posterBuffer) {
         await broadcastToGroups({
-          image: { url: posterUrl },
+          image: posterBuffer,
+          caption: caption,
+          mentions: mentionsList,
+        });
+      } else if (effectivePoster) {
+        await broadcastToGroups({
+          image: { url: effectivePoster },
           caption: caption,
           mentions: mentionsList,
         });
