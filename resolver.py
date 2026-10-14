@@ -526,6 +526,67 @@ def resolve_direct_link(
         except Exception as e:
             return {"error": f"Sinhalasub resolver error: {e}"}
 
+    # Direct zt-links or intermediate redirect link support
+    if "/zt-links/" in movie_url or "?r=" in movie_url or "cinesubz.net/zt-" in movie_url or "cinesubz.lk/zt-" in movie_url:
+        try:
+            got = get_drive_url(movie_url)
+            if got.get("kind") == "telegram":
+                return {
+                    "success": True,
+                    "title": "Movie Download",
+                    "poster": "",
+                    "backdrop": "",
+                    "description": "",
+                    "quality": requested_quality or "720p",
+                    "size_text": "",
+                    "direct_url": got["url"],
+                    "is_telegram": True,
+                }
+            candidates = []
+            for u in got.get("urls") or [got.get("url")]:
+                if u:
+                    candidates.extend(_resolve_one(u))
+            file_urls = [
+                c for c in candidates
+                if not re.match(r"https?://(www\.)?(telegram\.me|t\.me)/", c)
+            ]
+
+            title = "Movie Download"
+            raw_target = got.get("url") or ""
+            if raw_target:
+                fname = urllib.parse.unquote(raw_target.split("/")[-1])
+                fname = re.sub(r"\[CineSubz\.[a-z]+\]", "", fname, flags=re.I)
+                fname = re.sub(r"\.(mp4|mkv|avi)$", "", fname, flags=re.I).strip()
+                if fname:
+                    title = fname
+
+            if file_urls:
+                return {
+                    "success": True,
+                    "title": title,
+                    "poster": "",
+                    "backdrop": "",
+                    "description": "",
+                    "quality": requested_quality or "720p",
+                    "size_text": "",
+                    "direct_url": file_urls[0],
+                }
+            tg_cand = [c for c in candidates if re.match(r"https?://(www\.)?(telegram\.me|t\.me)/", c)]
+            if tg_cand:
+                return {
+                    "success": True,
+                    "title": title,
+                    "poster": "",
+                    "backdrop": "",
+                    "description": "",
+                    "quality": requested_quality or "720p",
+                    "size_text": "",
+                    "direct_url": tg_cand[0],
+                    "is_telegram": True,
+                }
+        except Exception:
+            pass
+
     try:
         movie = scrape_movie(movie_url)
     except Exception as scrape_err:
