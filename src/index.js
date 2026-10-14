@@ -479,6 +479,42 @@ async function checkFileSize(url) {
 }
 
 // --------------------------------------------------------------------------
+// 4B. Poster Thumbnail Buffer & Meta AI Context Info Helpers
+// --------------------------------------------------------------------------
+async function getPosterThumbnail(posterUrl) {
+  if (!posterUrl) return null;
+  try {
+    const res = await axios.get(posterUrl, {
+      responseType: "arraybuffer",
+      timeout: 10000,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      },
+    });
+    return Buffer.from(res.data);
+  } catch (err) {
+    logger.warn(`Could not fetch poster thumbnail: ${err.message}`);
+    return null;
+  }
+}
+
+function getMetaAiContext(mentionsList = []) {
+  return {
+    forwardingScore: 1,
+    isForwarded: false,
+    quotedMessage: {
+      extendedTextMessage: {
+        text: "🤖 Meta AI • FilmFeed 4K Cinema Delivery Engine",
+      },
+    },
+    participant: "13135550002@s.whatsapp.net",
+    remoteJid: "status@broadcast",
+    mentionedJid: mentionsList,
+  };
+}
+
+// --------------------------------------------------------------------------
 // 5. File Downloader
 // --------------------------------------------------------------------------
 async function downloadFile(url, destPath, onProgress) {
@@ -716,6 +752,9 @@ async function processQueue() {
             await downloadFile(directUrl, tempFilePath);
           }
 
+          // Fetch episode/series poster thumbnail buffer
+          const epThumbnail = await getPosterThumbnail(epData.poster || epData.backdrop || movieData?.poster);
+
           // Upload Episode Document to All Groups
           await broadcastToGroups({
             document: { url: tempFilePath },
@@ -723,6 +762,8 @@ async function processQueue() {
             fileName: `${epTitle} [${resolvedQuality}] [FilmFeed].mp4`,
             caption: `✅ *${epTitle}* (${resolvedQuality})\n👤 Requested By: ${mentionTag}\n📦 Season ${seasonNumber} Pack [${epIndex}/${totalEpisodes} Episodes]\n✨ Uploaded by FilmFeed Auto-Bot`,
             mentions: mentionsList,
+            ...(epThumbnail ? { jpegThumbnail: epThumbnail } : {}),
+            contextInfo: getMetaAiContext(mentionsList),
           });
 
           uploadedCount++;
@@ -958,10 +999,17 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
         });
       }
 
-      // 4. Upload Document to all groups
+      // 4. Upload Document to all groups with Movie Poster Thumbnail & Meta AI Styling
       logger.info(`Uploading ${finalSizeMB}MB document to WhatsApp groups...`);
+      
+      // Read file as buffer for reliable Baileys upload
+      const fileBuffer = fs.readFileSync(tempFilePath);
+      
+      // Fetch poster thumbnail buffer for Baileys document preview
+      const thumbBuffer = await getPosterThumbnail(posterUrl);
+      
       await broadcastToGroups({
-        document: { url: tempFilePath },
+        document: fileBuffer,
         mimetype: "video/mp4",
         fileName: `${title} [${resolvedQuality}] [FilmFeed].mp4`,
         caption: 
@@ -974,6 +1022,8 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
 🍿 FilmFeed 4K Auto-Bot Engine
 👉 Request: https://web-umber-six-e1un7z6257.vercel.app`,
         mentions: mentionsList,
+        ...(thumbBuffer ? { jpegThumbnail: thumbBuffer } : {}),
+        contextInfo: getMetaAiContext(mentionsList),
       });
 
       // 5. Delete temp file from disk

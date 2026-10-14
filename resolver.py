@@ -581,9 +581,15 @@ def resolve_direct_link(
     got = get_drive_url(target_entry["zt_url"])
     if got["kind"] == "telegram":
         return {
-            "error": "Telegram link only",
-            "telegram_url": got["url"],
-            "movie": movie,
+            "success": True,
+            "title": movie["details"].get("title", "Movie"),
+            "poster": movie["details"].get("poster", ""),
+            "backdrop": movie["details"].get("backdrop", ""),
+            "description": movie["details"].get("description", ""),
+            "quality": target_entry.get("quality") or requested_quality or "720p",
+            "size_text": target_entry.get("size_text", ""),
+            "direct_url": got["url"],
+            "is_telegram": True,
         }
     if got["kind"] != "direct":
         return {"error": "Failed to map zt link", "movie": movie}
@@ -598,6 +604,19 @@ def resolve_direct_link(
         if not re.match(r"https?://(www\.)?(telegram\.me|t\.me)/", c)
     ]
     if not file_urls:
+        tg_cand = [c for c in candidates if re.match(r"https?://(www\.)?(telegram\.me|t\.me)/", c)]
+        if tg_cand:
+            return {
+                "success": True,
+                "title": movie["details"].get("title", "Movie"),
+                "poster": movie["details"].get("poster", ""),
+                "backdrop": movie["details"].get("backdrop", ""),
+                "description": movie["details"].get("description", ""),
+                "quality": target_entry.get("quality") or requested_quality or "720p",
+                "size_text": target_entry.get("size_text", ""),
+                "direct_url": tg_cand[0],
+                "is_telegram": True,
+            }
         return {"error": "No direct file URL resolved", "movie": movie}
 
     direct_url = file_urls[0]
