@@ -551,8 +551,8 @@ def resolve_direct_link(
     if not downloads:
         return {"error": "No download links found on movie page", "movie": movie}
 
-    # Filter/sort by requested quality if specified
-    target_entry = None
+    # Filter/sort by requested quality if specified, but fall back to others if it fails
+    ordered_entries = []
     if requested_quality:
         rq = requested_quality.lower()
         for d in downloads:
@@ -560,74 +560,82 @@ def resolve_direct_link(
             q = (d.get("quality") or "").lower()
             lbl = (d.get("label") or "").lower()
             if rq in meta or rq in q or rq in lbl:
-                target_entry = d
-                break
-
-    if not target_entry and downloads:
-        target_entry = downloads[0]
-
-    got = get_drive_url(target_entry["zt_url"])
-    if got["kind"] == "telegram":
-        return {
-            "success": True,
-            "title": movie["details"].get("title", "Movie"),
-            "poster": movie["details"].get("poster", ""),
-            "backdrop": movie["details"].get("backdrop", ""),
-            "description": movie["details"].get("description", ""),
-            "quality": target_entry.get("quality") or requested_quality or "720p",
-            "size_text": target_entry.get("size_text", ""),
-            "direct_url": got["url"],
-            "is_telegram": True,
-        }
-    if got["kind"] != "direct":
-        return {"error": "Failed to map zt link", "movie": movie}
-
-    candidates = []
-    for u in got.get("urls") or [got["url"]]:
-        candidates.extend(_resolve_one(u))
-
-    file_urls = [
-        c
-        for c in candidates
-        if not re.match(r"https?://(www\.)?(telegram\.me|t\.me)/", c)
-    ]
-    if not file_urls:
-        tg_cand = [c for c in candidates if re.match(r"https?://(www\.)?(telegram\.me|t\.me)/", c)]
-        if tg_cand:
-            return {
-                "success": True,
-                "title": movie["details"].get("title", "Movie"),
-                "poster": movie["details"].get("poster", ""),
-                "backdrop": movie["details"].get("backdrop", ""),
-                "description": movie["details"].get("description", ""),
-                "quality": target_entry.get("quality") or requested_quality or "720p",
-                "size_text": target_entry.get("size_text", ""),
-                "direct_url": tg_cand[0],
-                "is_telegram": True,
-            }
-        return {"error": "No direct file URL resolved", "movie": movie}
-
-    direct_url = file_urls[0]
+                ordered_entries.append(d)
+        for d in downloads:
+            if d not in ordered_entries:
+                ordered_entries.append(d)
+    else:
+        ordered_entries = list(downloads)
 
     title = movie["details"].get("title", "Movie")
-    # Nicer episode title: "Lanterns: 1×1" -> "Lanterns S01E01"
     ep_m = re.search(r"(\d+)[x\u00d7](\d+)", title)
     if ep_m:
         show = re.sub(r"\s*[:\-]\s*\d+[x\u00d7]\d+.*$", "", title).strip()
         if show:
             title = "%s S%02dE%02d" % (show, int(ep_m.group(1)), int(ep_m.group(2)))
 
-    return {
-        "success": True,
-        "title": title,
-        "year": movie["details"].get("year"),
-        "poster": movie["banner"].get("poster"),
-        "backdrop": movie["banner"].get("backdrop"),
-        "description": movie["description"],
-        "quality": target_entry.get("quality") or requested_quality,
-        "size_text": target_entry.get("size_text"),
-        "direct_url": direct_url,
-    }
+    last_error = "No direct file URL resolved"
+    for entry in ordered_entries:
+        try:
+            got = get_drive_url(entry["zt_url"])
+            if got.get("kind") == "telegram":
+                return {
+                    "success": True,
+                    "title": title,
+                    "poster": movie["banner"].get("poster") or movie["details"].get("poster", ""),
+                    "backdrop": movie["banner"].get("backdrop") or movie["details"].get("backdrop", ""),
+                    "description": movie.get("description") or movie["details"].get("description", ""),
+                    "quality": entry.get("quality") or requested_quality or "720p",
+                    "size_text": entry.get("size_text", ""),
+                    "direct_url": got["url"],
+                    "is_telegram": True,
+                }
+            if got.get("kind") != "direct":
+                last_error = "Failed to map zt link"
+                continue
+
+            candidates = []
+            for u in got.get("urls") or [got.get("url")]:
+                if u:
+                    candidates.extend(_resolve_one(u))
+
+            file_urls = [
+                c
+                for c in candidates
+                if not re.match(r"https?://(www\.)?(telegram\.me|t\.me)/", c)
+            ]
+            if file_urls:
+                return {
+                    "success": True,
+                    "title": title,
+                    "year": movie["details"].get("year"),
+                    "poster": movie["banner"].get("poster") or movie["details"].get("poster", ""),
+                    "backdrop": movie["banner"].get("backdrop") or movie["details"].get("backdrop", ""),
+                    "description": movie.get("description") or movie["details"].get("description", ""),
+                    "quality": entry.get("quality") or requested_quality,
+                    "size_text": entry.get("size_text"),
+                    "direct_url": file_urls[0],
+                }
+
+            tg_cand = [c for c in candidates if re.match(r"https?://(www\.)?(telegram\.me|t\.me)/", c)]
+            if tg_cand:
+                return {
+                    "success": True,
+                    "title": title,
+                    "poster": movie["banner"].get("poster") or movie["details"].get("poster", ""),
+                    "backdrop": movie["banner"].get("backdrop") or movie["details"].get("backdrop", ""),
+                    "description": movie.get("description") or movie["details"].get("description", ""),
+                    "quality": entry.get("quality") or requested_quality or "720p",
+                    "size_text": entry.get("size_text", ""),
+                    "direct_url": tg_cand[0],
+                    "is_telegram": True,
+                }
+        except Exception as e:
+            last_error = str(e)
+            continue
+
+    return {"error": last_error, "movie": movie}
+
 
 
 def main():
