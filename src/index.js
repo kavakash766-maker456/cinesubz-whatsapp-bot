@@ -1123,11 +1123,28 @@ async function startBot() {
       latestQR = qr;
       isConnected = false;
       const qrUrl = "https://api.qrserver.com/v1/create-qr-code/?size=350x350&data=" + encodeURIComponent(qr);
-      console.log("\n==================================================");
-      console.log("📲 SCAN THE QR CODE BELOW WITH WHATSAPP (0760372547):");
-      console.log("==================================================");
+
+      // Print very clearly in GitHub Actions log
+      console.log("\n");
+      console.log("##################################################");
+      console.log("##################################################");
+      console.log("##                                              ##");
+      console.log("##   📲 WHATSAPP QR CODE - SCAN NOW!           ##");
+      console.log("##                                              ##");
+      console.log("##################################################");
+      console.log("##################################################");
+      console.log("");
+      console.log("👇 OPEN THIS LINK IN YOUR BROWSER TO SCAN:");
+      console.log("");
+      console.log("🔗 " + qrUrl);
+      console.log("");
+      console.log("📱 WhatsApp → Settings → Linked Devices → Link a Device");
+      console.log("");
+      console.log("##################################################");
+      console.log("\n");
+
+      // Also print terminal QR as fallback
       qrcode.generate(qr, { small: true });
-      console.log("\n👉 Web QR Link: " + qrUrl + "\n");
 
       // Auto-publish QR link to Gist for instant 1-click access
       const ghToken = process.env.GH_PAT || process.env.GITHUB_TOKEN;
