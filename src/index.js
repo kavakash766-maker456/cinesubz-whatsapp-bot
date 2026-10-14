@@ -1175,10 +1175,15 @@ async function startBot() {
 
       if (isLoggedOut) {
         logger.warn("🚨 Session was logged out/revoked by WhatsApp (Code 401). Purging dead session from vault and starting fresh QR...");
-        try {
-          fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-        } catch (_) {}
+        // Wipe ALL local auth files so next startBot() goes straight to QR
+        try { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); } catch (_) {}
+        try { fs.mkdirSync(AUTH_DIR, { recursive: true }); } catch (_) {}
+        // Clear vault so restore() returns false on next startup
         await cloudSession.clearVault();
+        // Reset socket reference
+        waSocket = null;
+        isConnected = false;
+        logger.warn("🔄 Starting fresh bot instance for QR scan...");
         setTimeout(startBot, 2000);
         return;
       }
