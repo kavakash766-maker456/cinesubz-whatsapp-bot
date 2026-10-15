@@ -237,9 +237,21 @@ def _opener(cookie_jar=None):
 
 
 def http_get(url, opener=None, headers=None, timeout=TIMEOUT):
+    # Normalize cinesubz.net / cinesubz.co to cinesubz.lk for fast direct access
+    clean_url = re.sub(r"https?://(www\.)?cinesubz\.(net|co)/", "https://cinesubz.lk/", url)
+    try:
+        import requests
+        h = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml,*/*"}
+        if headers:
+            h.update(headers)
+        r = requests.get(clean_url, headers=h, timeout=min(timeout, 15))
+        return r.content, dict(r.headers), str(r.url)
+    except Exception:
+        pass
+
     h = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml,*/*"}
     h.update(headers or {})
-    req = urllib.request.Request(url, headers=h)
+    req = urllib.request.Request(clean_url, headers=h)
     op = opener or _opener()
     with op.open(req, timeout=timeout) as r:
         return r.read(), dict(r.headers), r.url
@@ -570,6 +582,7 @@ def make_thumbnail_b64(image_url: str) -> str:
 def resolve_direct_link(
     movie_url: str, requested_quality: str = None, _depth: int = 0
 ):
+    movie_url = re.sub(r"https?://(www\.)?cinesubz\.(net|co)/", "https://cinesubz.lk/", movie_url)
     if "sinhalasub.lk" in movie_url:
         try:
             from sinhalasub_resolver import resolve_sinhalasub_movie

@@ -1519,6 +1519,9 @@ async function startBot() {
 
         if (!commandFound || !movieUrl) continue;
 
+        // Normalize domain to cinesubz.lk for fast direct connection without Cloudflare delays
+        movieUrl = movieUrl.replace(/cinesubz\.(net|co)/g, "cinesubz.lk");
+
         logger.info(`🎯 Accepted FilmFeed command from ${pushName} (${remoteJid}): URL=${movieUrl} | Q=${quality}`);
 
         const replyTarget = remoteJid;
