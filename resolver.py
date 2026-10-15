@@ -365,6 +365,32 @@ def scrape_movie(url: str, log=sys.stderr.write):
             }
         )
 
+    # Fallback: scan for any links pointing to zt-links if items was empty
+    if not entries:
+        for a in root.find_all(tag="a"):
+            href = a.attrs.get("href", "")
+            if "/zt-links/" in href or "/zt-" in href:
+                text = a.text().strip()
+                parent_text = a.parent.text().strip() if a.parent else text
+                m = re.search(r"([\d.]+)\s*(GB|MB|TB|KB)", parent_text, re.I)
+                size_bytes = None
+                if m:
+                    mult = {"KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
+                    size_bytes = int(float(m.group(1)) * mult[m.group(2).upper()])
+                m_q = re.search(r"(1080p|720p|480p|360p|2160p|4K)", parent_text, re.I)
+                q_str = m_q.group(1) if m_q else "HD"
+                entries.append(
+                    {
+                        "label": text or "Direct Download",
+                        "meta": parent_text,
+                        "quality": q_str,
+                        "size_text": (m.group(0) if m else None),
+                        "size_bytes": size_bytes,
+                        "language": "Sinhala Sub",
+                        "zt_url": urllib.parse.urljoin(final_url, href),
+                    }
+                )
+
     # TV series pages carry no download links themselves; they list episodes
     # (<a class="episode-link" href=".../episodes/show-1x2/" data-season data-episode>)
     episodes = []
@@ -501,7 +527,7 @@ def _resolve_one(drive_url: str):
                     "Origin": host,
                 },
             )
-            with op.open(req, timeout=TIMEOUT) as r:
+            with op.open(req, timeout=12) as r:
                 raw = r.read()
         except Exception:
             continue
@@ -513,6 +539,9 @@ def _resolve_one(drive_url: str):
         final, _ = unwrap_url(blob, candidates)
         if final and final not in found:
             found.append(final)
+            # Break early once we have found a high-speed direct file download link
+            if any("pixeldrain" in u or "kdrive" in u or "supercloud" in u for u in found):
+                break
     return found
 
 
@@ -522,7 +551,9 @@ def make_thumbnail_b64(image_url: str) -> str:
     try:
         from PIL import Image
         import io, base64
-        req = urllib.request.Request(image_url, headers={"User-Agent": UA})
+        # Downscale TMDB original URLs to w300 to fetch in milliseconds instead of downloading 5MB
+        fast_url = re.sub(r"/t/p/(original|w\d+)/", "/t/p/w300/", image_url)
+        req = urllib.request.Request(fast_url, headers={"User-Agent": UA})
         with urllib.request.urlopen(req, timeout=5) as r:
             data = r.read()
         im = Image.open(io.BytesIO(data))
@@ -547,7 +578,9 @@ def resolve_direct_link(
             return {"error": f"Sinhalasub resolver error: {e}"}
 
     # Direct zt-links or intermediate redirect link support
-    if "/zt-links/" in movie_url or "?r=" in movie_url or "cinesubz.net/zt-" in movie_url or "cinesubz.lk/zt-" in movie_url:
+    is_zt = "/zt-links/" in movie_url or "?r=" in movie_url or "cinesubz.net/zt-" in movie_url or "cinesubz.lk/zt-" in movie_url
+    if is_zt:
+        found_link = None
         try:
             got = get_drive_url(movie_url)
             if got.get("kind") == "telegram":
@@ -583,14 +616,13 @@ def resolve_direct_link(
                 fname = re.sub(r"\.(mp4|mkv|avi)$", "", fname, flags=re.I).strip()
                 if fname:
                     title = fname
-                # Query CineSubz for title to retrieve official poster, TMDB backdrop, and description
+                # Query CineSubz for title to retrieve official poster, TMDB backdrop, and parent movie page
                 m_search = re.search(r"^([a-zA-Z0-9\s]+?)(?:\s*\(\d{4}\)|\s+\d{4}|\s+WEB|\s+Hindi|\s+Telugu|\s+Tamil|\s+Sinhala)", title)
                 search_q = m_search.group(1).strip() if m_search else title.split()[0]
                 if search_q and len(search_q) >= 3:
                     try:
                         s_body, _, _ = http_get(f"https://cinesubz.lk/?s={urllib.parse.quote(search_q)}")
                         s_root = parse_html(s_body.decode("utf-8", "replace"))
-                        found_link = None
                         for a in s_root.find_all(tag="a"):
                             href = a.attrs.get("href", "")
                             if "/movies/" in href and not href.endswith("/movies/"):
@@ -606,6 +638,16 @@ def resolve_direct_link(
                             description = meta_m.get("description") or ""
                     except Exception:
                         pass
+
+            # If user explicitly requested a quality that differs from current zt filename (e.g. 720p requested on 480p link),
+            # resolve directly through parent movie page so user gets the exact requested quality!
+            if found_link and requested_quality and _depth == 0:
+                cur_q = "480p" if "480p" in title.lower() else "720p" if "720p" in title.lower() else "1080p" if "1080p" in title.lower() else ""
+                req_q = requested_quality.lower()
+                if cur_q and req_q not in cur_q:
+                    alt_res = resolve_direct_link(found_link, requested_quality, _depth=_depth + 1)
+                    if alt_res.get("success"):
+                        return alt_res
 
             if file_urls:
                 thumb = make_thumbnail_b64(backdrop or poster or "")
@@ -637,8 +679,20 @@ def resolve_direct_link(
                     "direct_url": tg_cand[0],
                     "is_telegram": True,
                 }
-        except Exception:
-            pass
+
+            # If direct decryption on zt link was empty, try parent movie page
+            if found_link and _depth == 0:
+                alt_res = resolve_direct_link(found_link, requested_quality, _depth=_depth + 1)
+                if alt_res.get("success"):
+                    return alt_res
+        except Exception as e:
+            if found_link and _depth == 0:
+                alt_res = resolve_direct_link(found_link, requested_quality, _depth=_depth + 1)
+                if alt_res.get("success"):
+                    return alt_res
+            return {"error": f"Failed to decrypt CineSubz link: {e}"}
+
+        return {"error": f"Could not extract direct stream link from: {movie_url}"}
 
     try:
         movie = scrape_movie(movie_url)
