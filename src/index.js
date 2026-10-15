@@ -485,46 +485,27 @@ async function getPosterThumbnail(posterUrl, thumbnailB64 = null) {
   if (thumbnailB64) {
     try {
       const buf = Buffer.from(thumbnailB64, "base64");
-      if (buf.length > 500 && buf.length < 45000) {
+      if (buf.length > 500 && buf.length < 35000) {
         return buf;
       }
-    } catch (e) {}
+    } catch (_) {}
   }
   if (!posterUrl) return null;
   try {
     const res = await axios.get(posterUrl, {
       responseType: "arraybuffer",
-      timeout: 10000,
+      timeout: 8000,
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
       },
     });
     const rawBuf = Buffer.from(res.data);
-    // WhatsApp strictly drops thumbnails larger than ~35KB
     if (rawBuf.length < 32000) {
       return rawBuf;
     }
-    // Resize with Pillow
-    try {
-      const pythonCmd = process.platform === "win32" ? "python" : "python3";
-      const pyScript = "import sys, io, base64; from PIL import Image; im = Image.open(sys.stdin.buffer); im.thumbnail((250, 250)); im = im.convert('RGB'); out = io.BytesIO(); im.save(out, format='JPEG', quality=75, optimize=True); sys.stdout.write(base64.b64encode(out.getvalue()).decode('ascii'))";
-      const resizedB64 = execFileSync(pythonCmd, ["-c", pyScript], {
-        input: rawBuf,
-        maxBuffer: 10 * 1024 * 1024,
-        timeout: 5000,
-      }).toString().trim();
-      if (resizedB64) {
-        const resizedBuf = Buffer.from(resizedB64, "base64");
-        logger.info(`Resized poster thumbnail from ${Math.round(rawBuf.length / 1024)}KB to ${Math.round(resizedBuf.length / 1024)}KB for WhatsApp`);
-        return resizedBuf;
-      }
-    } catch (resizeErr) {
-      logger.warn(`Could not resize thumbnail with PIL: ${resizeErr.message}`);
-    }
-    return rawBuf;
+    return null;
   } catch (err) {
-    logger.warn(`Could not fetch poster thumbnail: ${err.message}`);
     return null;
   }
 }
@@ -773,12 +754,12 @@ async function processQueue() {
             await downloadFile(directUrl, tempFilePath);
           }
 
-          // Fetch episode/series poster thumbnail buffer (resized under 30KB)
+          const fileBuffer = fs.readFileSync(tempFilePath);
           const epThumbnail = await getPosterThumbnail(epData.poster || epData.backdrop || movieData?.poster, epData.thumbnail_b64);
 
           // Upload Episode Document to All Groups
           await broadcastToGroups({
-            document: { url: tempFilePath },
+            document: fileBuffer,
             mimetype: "video/mp4",
             fileName: `${epTitle} [${resolvedQuality}] [FilmFeed].mp4`,
             caption: `✅ *${epTitle}* (${resolvedQuality})\n👤 Requested By: ${mentionTag}\n📦 Season ${seasonNumber} Pack [${epIndex}/${totalEpisodes} Episodes]\n✨ Uploaded by FilmFeed Auto-Bot`,
@@ -1008,14 +989,7 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
 🍿 _චිත්‍රපටය පහතින් Document එකක් ලෙස ලැබෙනු ඇත!_`;
 
       const effectivePoster = posterUrl || movieData.backdrop || movieData.poster;
-      const posterBuffer = await getPosterThumbnail(effectivePoster);
-      if (posterBuffer) {
-        await broadcastToGroups({
-          image: posterBuffer,
-          caption: caption,
-          mentions: mentionsList,
-        });
-      } else if (effectivePoster) {
+      if (effectivePoster) {
         await broadcastToGroups({
           image: { url: effectivePoster },
           caption: caption,
@@ -1031,11 +1005,11 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
       // 4. Upload Document to all groups with Movie Poster Thumbnail & Meta AI Styling
       logger.info(`Uploading ${finalSizeMB}MB document to WhatsApp groups...`);
       
-      // Fetch poster thumbnail buffer for Baileys document preview (resized under 30KB)
+      const fileBuffer = fs.readFileSync(tempFilePath);
       const thumbBuffer = await getPosterThumbnail(effectivePoster, movieData?.thumbnail_b64);
       
       await broadcastToGroups({
-        document: { url: tempFilePath },
+        document: fileBuffer,
         mimetype: "video/mp4",
         fileName: `${title} [${resolvedQuality}] [FilmFeed].mp4`,
         caption: 
