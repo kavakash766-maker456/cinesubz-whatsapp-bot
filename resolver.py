@@ -516,6 +516,26 @@ def _resolve_one(drive_url: str):
     return found
 
 
+def make_thumbnail_b64(image_url: str) -> str:
+    if not image_url or not image_url.startswith("http"):
+        return ""
+    try:
+        from PIL import Image
+        import io, base64
+        req = urllib.request.Request(image_url, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = r.read()
+        im = Image.open(io.BytesIO(data))
+        im.thumbnail((250, 250))
+        if im.mode != "RGB":
+            im = im.convert("RGB")
+        out = io.BytesIO()
+        im.save(out, format="JPEG", quality=75, optimize=True)
+        return base64.b64encode(out.getvalue()).decode("ascii")
+    except Exception:
+        return ""
+
+
 def resolve_direct_link(
     movie_url: str, requested_quality: str = None, _depth: int = 0
 ):
@@ -588,12 +608,14 @@ def resolve_direct_link(
                         pass
 
             if file_urls:
+                thumb = make_thumbnail_b64(backdrop or poster or "")
                 return {
                     "success": True,
                     "title": title,
                     "year": year,
                     "poster": poster,
                     "backdrop": backdrop,
+                    "thumbnail_b64": thumb,
                     "description": description,
                     "quality": requested_quality or "720p",
                     "size_text": "",
@@ -601,12 +623,14 @@ def resolve_direct_link(
                 }
             tg_cand = [c for c in candidates if re.match(r"https?://(www\.)?(telegram\.me|t\.me)/", c)]
             if tg_cand:
+                thumb = make_thumbnail_b64(backdrop or poster or "")
                 return {
                     "success": True,
                     "title": title,
                     "year": year,
                     "poster": poster,
                     "backdrop": backdrop,
+                    "thumbnail_b64": thumb,
                     "description": description,
                     "quality": requested_quality or "720p",
                     "size_text": "",
@@ -695,12 +719,14 @@ def resolve_direct_link(
                 if not re.match(r"https?://(www\.)?(telegram\.me|t\.me)/", c)
             ]
             if file_urls:
+                thumb = make_thumbnail_b64(movie["banner"].get("backdrop") or movie["banner"].get("poster") or movie["details"].get("poster", ""))
                 return {
                     "success": True,
                     "title": title,
                     "year": movie["details"].get("year"),
                     "poster": movie["banner"].get("poster") or movie["details"].get("poster", ""),
                     "backdrop": movie["banner"].get("backdrop") or movie["details"].get("backdrop", ""),
+                    "thumbnail_b64": thumb,
                     "description": movie.get("description") or movie["details"].get("description", ""),
                     "quality": entry.get("quality") or requested_quality,
                     "size_text": entry.get("size_text"),
@@ -709,11 +735,13 @@ def resolve_direct_link(
 
             tg_cand = [c for c in candidates if re.match(r"https?://(www\.)?(telegram\.me|t\.me)/", c)]
             if tg_cand:
+                thumb = make_thumbnail_b64(movie["banner"].get("backdrop") or movie["banner"].get("poster") or movie["details"].get("poster", ""))
                 return {
                     "success": True,
                     "title": title,
                     "poster": movie["banner"].get("poster") or movie["details"].get("poster", ""),
                     "backdrop": movie["banner"].get("backdrop") or movie["details"].get("backdrop", ""),
+                    "thumbnail_b64": thumb,
                     "description": movie.get("description") or movie["details"].get("description", ""),
                     "quality": entry.get("quality") or requested_quality or "720p",
                     "size_text": entry.get("size_text", ""),
@@ -853,15 +881,18 @@ def main():
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return
 
-    # Handle Google Drive, Anime & Sinhala Dubbed Cartoons directly
+    # Handle Google Drive, Anime & Sinhala Dubbed Cartoons directly (only if not a CineSubz URL)
+    is_cinesubz = "cinesubz" in args.url or "/zt-links/" in args.url or "/episodes/" in args.url
     is_gdrive_or_anime = (
-        "drive.google.com" in args.url
-        or "animekaizen" in args.url
-        or "cartoons" in args.url
-        or "lakvision" in args.url
-        or "slanimeclub" in args.url
-        or "animeclub" in args.url
-        or "anime" in args.url
+        not is_cinesubz
+        and (
+            "drive.google.com" in args.url
+            or "animekaizen" in args.url
+            or "cartoons" in args.url
+            or "lakvision" in args.url
+            or "slanimeclub" in args.url
+            or "animeclub" in args.url
+        )
     )
 
     if is_gdrive_or_anime:
@@ -875,6 +906,8 @@ def main():
 
         result = resolve_gdrive_movie(args.url, args.quality)
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
     result = resolve_direct_link(args.url, args.quality)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

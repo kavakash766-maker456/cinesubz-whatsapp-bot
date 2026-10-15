@@ -12,7 +12,7 @@ const qrcode = require("qrcode-terminal");
 const http = require("http");
 const path = require("path");
 const fs = require("fs");
-const { execFile } = require("child_process");
+const { execFile, execFileSync } = require("child_process");
 const axios = require("axios");
 const CloudSession = require("./cloud_session");
 
@@ -481,7 +481,15 @@ async function checkFileSize(url) {
 // --------------------------------------------------------------------------
 // 4B. Poster Thumbnail Buffer & Meta AI Context Info Helpers
 // --------------------------------------------------------------------------
-async function getPosterThumbnail(posterUrl) {
+async function getPosterThumbnail(posterUrl, thumbnailB64 = null) {
+  if (thumbnailB64) {
+    try {
+      const buf = Buffer.from(thumbnailB64, "base64");
+      if (buf.length > 500 && buf.length < 45000) {
+        return buf;
+      }
+    } catch (e) {}
+  }
   if (!posterUrl) return null;
   try {
     const res = await axios.get(posterUrl, {
@@ -492,7 +500,29 @@ async function getPosterThumbnail(posterUrl) {
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
       },
     });
-    return Buffer.from(res.data);
+    const rawBuf = Buffer.from(res.data);
+    // WhatsApp strictly drops thumbnails larger than ~35KB
+    if (rawBuf.length < 32000) {
+      return rawBuf;
+    }
+    // Resize with Pillow
+    try {
+      const pythonCmd = process.platform === "win32" ? "python" : "python3";
+      const pyScript = "import sys, io, base64; from PIL import Image; im = Image.open(sys.stdin.buffer); im.thumbnail((250, 250)); im = im.convert('RGB'); out = io.BytesIO(); im.save(out, format='JPEG', quality=75, optimize=True); sys.stdout.write(base64.b64encode(out.getvalue()).decode('ascii'))";
+      const resizedB64 = execFileSync(pythonCmd, ["-c", pyScript], {
+        input: rawBuf,
+        maxBuffer: 10 * 1024 * 1024,
+        timeout: 5000,
+      }).toString().trim();
+      if (resizedB64) {
+        const resizedBuf = Buffer.from(resizedB64, "base64");
+        logger.info(`Resized poster thumbnail from ${Math.round(rawBuf.length / 1024)}KB to ${Math.round(resizedBuf.length / 1024)}KB for WhatsApp`);
+        return resizedBuf;
+      }
+    } catch (resizeErr) {
+      logger.warn(`Could not resize thumbnail with PIL: ${resizeErr.message}`);
+    }
+    return rawBuf;
   } catch (err) {
     logger.warn(`Could not fetch poster thumbnail: ${err.message}`);
     return null;
@@ -617,8 +647,8 @@ async function processQueue() {
     `[Queue Engine] Processing task for ${pushName}: ${movieUrl} | Type=${isSeriesSeason ? `Series S${seasonNumber}` : "Movie"} | Remaining in queue: ${requestQueue.length}`
   );
 
-  // Helper function to broadcast message to target groups (with optional heart reaction)
-  const broadcastToGroups = async (payload, shouldReact = true) => {
+  // Helper function to broadcast message to target groups
+  const broadcastToGroups = async (payload) => {
     const groupsToSend = (currentTask.targetGroups && currentTask.targetGroups.length > 0)
       ? currentTask.targetGroups
       : TARGET_GROUP_JIDS;
@@ -627,17 +657,8 @@ async function processQueue() {
     let lastError = null;
     for (const jid of groupsToSend) {
       try {
-        const sent = await waSocket.sendMessage(jid, payload);
+        await waSocket.sendMessage(jid, payload);
         sentCount++;
-        if (shouldReact && sent?.key) {
-          try {
-            await waSocket.sendMessage(jid, {
-              react: { text: "❤️", key: sent.key },
-            });
-          } catch (rErr) {
-            logger.warn({ rErr, jid }, "Failed to react ❤️ to group message");
-          }
-        }
       } catch (err) {
         lastError = err;
         logger.error({ err, jid }, `Failed sending to group ${jid}: ${err.message}`);
@@ -752,8 +773,8 @@ async function processQueue() {
             await downloadFile(directUrl, tempFilePath);
           }
 
-          // Fetch episode/series poster thumbnail buffer
-          const epThumbnail = await getPosterThumbnail(epData.poster || epData.backdrop || movieData?.poster);
+          // Fetch episode/series poster thumbnail buffer (resized under 30KB)
+          const epThumbnail = await getPosterThumbnail(epData.poster || epData.backdrop || movieData?.poster, epData.thumbnail_b64);
 
           // Upload Episode Document to All Groups
           await broadcastToGroups({
@@ -1010,14 +1031,11 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
       // 4. Upload Document to all groups with Movie Poster Thumbnail & Meta AI Styling
       logger.info(`Uploading ${finalSizeMB}MB document to WhatsApp groups...`);
       
-      // Read file as buffer for reliable Baileys upload
-      const fileBuffer = fs.readFileSync(tempFilePath);
-      
-      // Fetch poster thumbnail buffer for Baileys document preview
-      const thumbBuffer = await getPosterThumbnail(posterUrl);
+      // Fetch poster thumbnail buffer for Baileys document preview (resized under 30KB)
+      const thumbBuffer = await getPosterThumbnail(effectivePoster, movieData?.thumbnail_b64);
       
       await broadcastToGroups({
-        document: fileBuffer,
+        document: { url: tempFilePath },
         mimetype: "video/mp4",
         fileName: `${title} [${resolvedQuality}] [FilmFeed].mp4`,
         caption: 
@@ -1039,11 +1057,13 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
         fs.unlinkSync(tempFilePath);
       }
 
-      // 6. Delete intermediate status messages from user's chat
-      for (const k of statusTrackerKeys) {
-        try {
-          await waSocket.sendMessage(replyTarget, { delete: k });
-        } catch (_) {}
+      // 6. Delete intermediate status messages from user's chat (never in groups to prevent ghost bubbles)
+      if (replyTarget && !replyTarget.endsWith("@g.us")) {
+        for (const k of statusTrackerKeys) {
+          try {
+            await waSocket.sendMessage(replyTarget, { delete: k });
+          } catch (_) {}
+        }
       }
 
       // 7. Record movie in user's history and send final summary
