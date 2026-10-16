@@ -812,9 +812,11 @@ async function processQueue() {
         logger.info(`[Game Engine] (${partNumber}/${totalParts}) [Batch: ${startPartNum}-${endPartNum}] Downloading ${partFileName} for ${directTarget}...`);
 
         let partDownloadSuccess = false;
-        const candidateUrls = [partObj.fuckingfast_url, partObj.url, partObj.filekeeper_url, partObj.datanodes_url]
+        const candidateUrls = [partObj.fuckingfast_url, partObj.url]
           .filter(Boolean)
+          .filter(u => u.includes("fuckingfast"))
           .filter((v, i, a) => a.indexOf(v) === i);
+        if (candidateUrls.length === 0 && partObj.url) candidateUrls.push(partObj.url);
 
         for (const candidateUrl of candidateUrls) {
           try {
@@ -899,12 +901,10 @@ async function processQueue() {
           }
 
           try {
-            const docPayload = fileSizeMB > 300 
-              ? { url: tempPartPath } 
-              : fs.readFileSync(tempPartPath);
+            const fileBuffer = fs.readFileSync(tempPartPath);
 
             await waSocket.sendMessage(directTarget, {
-              document: docPayload,
+              document: fileBuffer,
               mimetype: "application/x-rar-compressed",
               fileName: partFileName,
               caption:
