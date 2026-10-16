@@ -518,7 +518,8 @@ async def run(args):
         return
 
     # Save direct links to txt regardless
-    links_file = dest.parent / f"{re.sub(r'[<>:\"/\\|?*]', '_', game_name)[:50]}_direct_links.txt"
+    clean_game_name = re.sub(r'[<>:"/\\|?*]', '_', game_name)[:50]
+    links_file = dest.parent / f"{clean_game_name}_direct_links.txt"
     links_file.parent.mkdir(parents=True, exist_ok=True)
     with open(links_file, "w", encoding="utf-8") as f:
         f.write("\n".join(d for _, d in resolved))
