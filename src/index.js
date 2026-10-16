@@ -807,153 +807,46 @@ async function processQueue() {
         const partObj = gameData.parts[pIdx] || {};
         const partNumber = pNum;
         const partFileName = partObj.filename || `${gameTitle}.part${partNumber}.rar`;
-        const tempPartPath = path.join(__dirname, `../temp_game_${Date.now()}_part${partNumber}.rar`);
 
-        logger.info(`[Game Engine] (${partNumber}/${totalParts}) [Batch: ${startPartNum}-${endPartNum}] Downloading ${partFileName} for ${directTarget}...`);
+        const ffUrl = partObj.fuckingfast_url || partObj.url;
+        logger.info(`[Game Engine] (${partNumber}/${totalParts}) [Batch: ${startPartNum}-${endPartNum}] Resolving 1-click direct link for ${ffUrl}...`);
 
-        let partDownloadSuccess = false;
-        const candidateUrls = [partObj.fuckingfast_url, partObj.url]
-          .filter(Boolean)
-          .filter(u => u.includes("fuckingfast"))
-          .filter((v, i, a) => a.indexOf(v) === i);
-        if (candidateUrls.length === 0 && partObj.url) candidateUrls.push(partObj.url);
-
-        for (const candidateUrl of candidateUrls) {
-          try {
-            logger.info(`[Game Engine] (${partNumber}/${totalParts}) Trying mirror: ${candidateUrl}`);
-            await downloadGamePart(candidateUrl, tempPartPath);
-            partDownloadSuccess = fs.existsSync(tempPartPath) && fs.statSync(tempPartPath).size > 100000;
-            if (partDownloadSuccess) {
-              logger.info(`[Game Engine] Part ${partNumber} successfully downloaded from ${candidateUrl}`);
-              break;
-            }
-          } catch (dlErr) {
-            logger.warn(`Download error for part ${partNumber} from ${candidateUrl}: ${dlErr.message}`);
-          }
-        }
-
-        if (!partDownloadSuccess) {
-          for (const candidateUrl of candidateUrls) {
-            try {
-              logger.info(`[Game Engine] Part ${partNumber} fallback: Resolving direct link for ${candidateUrl}...`);
-              const directUrl = await new Promise((res) => {
-                const pythonCmd = process.platform === "win32" ? "python" : "python3";
-                execFile(pythonCmd, [path.join(__dirname, "../downloader.py"), "--resolve-only", candidateUrl], { timeout: 35000 }, (err, stdout) => {
-                  if (!err && stdout) {
-                    const lines = stdout.trim().split("\n");
-                    for (let i = lines.length - 1; i >= 0; i--) {
-                      try {
-                        const p = JSON.parse(lines[i].trim());
-                        if (p.direct_url) return res(p.direct_url);
-                      } catch (_) {}
-                    }
-                  }
-                  res(null);
-                });
-              });
-
-              if (directUrl) {
-                await downloadFile(directUrl, tempPartPath);
-                partDownloadSuccess = fs.existsSync(tempPartPath) && fs.statSync(tempPartPath).size > 100000;
-                if (partDownloadSuccess) {
-                  logger.info(`[Game Engine] Part ${partNumber} downloaded via directUrl fallback!`);
-                  break;
+        let directSignedUrl = null;
+        try {
+          const pythonCmd = process.platform === "win32" ? "python" : "python3";
+          directSignedUrl = await new Promise((res) => {
+            execFile(pythonCmd, [path.join(__dirname, "../downloader.py"), "--resolve-only", ffUrl], { timeout: 30000 }, (err, stdout) => {
+              if (!err && stdout) {
+                const lines = stdout.trim().split("\n");
+                for (let i = lines.length - 1; i >= 0; i--) {
+                  try {
+                    const p = JSON.parse(lines[i].trim());
+                    if (p.direct_url) return res(p.direct_url);
+                  } catch (_) {}
                 }
               }
-            } catch (e2) {
-              logger.error(`Fallback download error for part ${partNumber}: ${e2.message}`);
-            }
-          }
+              res(null);
+            });
+          });
+        } catch (rErr) {
+          logger.warn(`Direct resolution error for part ${partNumber}: ${rErr.message}`);
         }
 
-        if (partDownloadSuccess) {
-          const fileSizeBytes = fs.statSync(tempPartPath).size;
-          const fileSizeMB = Math.round(fileSizeBytes / 1024 / 1024);
+        const downloadLink = directSignedUrl || ffUrl;
 
-          // WhatsApp MMS servers strictly enforce a 1.95GB limit and return HTTP 413 on ~2000MB files
-          if (fileSizeMB > 1950) {
-            logger.warn(`[Game Engine] Part ${partNumber} size (${fileSizeMB}MB) exceeds WhatsApp 1.95GB limit. Sending direct mirror link.`);
-            let directSignedLink = partObj.url;
-            try {
-              const pythonCmd = process.platform === "win32" ? "python" : "python3";
-              const resUrl = await new Promise((res) => {
-                execFile(pythonCmd, [path.join(__dirname, "../downloader.py"), "--resolve-only", partObj.url], { timeout: 35000 }, (err, stdout) => {
-                  if (!err && stdout) {
-                    const lines = stdout.trim().split("\n");
-                    for (let i = lines.length - 1; i >= 0; i--) {
-                      try {
-                        const p = JSON.parse(lines[i].trim());
-                        if (p.direct_url) return res(p.direct_url);
-                      } catch (_) {}
-                    }
-                  }
-                  res(null);
-                });
-              });
-              if (resUrl) directSignedLink = resUrl;
-            } catch (_) {}
-
-            await waSocket.sendMessage(directTarget, {
-              text: `⚠️ *[FilmFeed Games - Part ${partNumber}/${totalParts}]* (${fileSizeMB}MB)\n${partFileName}\n\n📌 මෙම Part එක (${fileSizeMB}MB) WhatsApp හි උපරිම සීමාව වන 1.95GB ට වඩා විශාල බැවින් WhatsApp මඟින් යැවිය නොහැක. පහත 1-Click Direct Download ලින්ක් එකෙන් කෙලින්ම බාගත කරගන්න:\n🔗 1-Click Direct Link: ${directSignedLink}`,
-            });
-            if (fs.existsSync(tempPartPath)) fs.unlinkSync(tempPartPath);
-            continue;
-          }
-
-          try {
-            const fileBuffer = fs.readFileSync(tempPartPath);
-
-            await waSocket.sendMessage(directTarget, {
-              document: fileBuffer,
-              mimetype: "application/x-rar-compressed",
-              fileName: partFileName,
-              caption:
-`🎮 *${gameTitle}* [Part ${partNumber}/${totalParts}] (${fileSizeMB}MB)
+        await waSocket.sendMessage(directTarget, {
+          text:
+`🎮 *${gameTitle}* [Part ${partNumber}/${totalParts}]
 ━━━━━━━━━━━━━━━━━━━━
 📦 *Archive:* ${partFileName}
-⚡ *Status:* Part ${partNumber} of ${totalParts} Delivered Directly
+⚡ *1-Click Direct Download:*
+👉 ${downloadLink}
 ━━━━━━━━━━━━━━━━━━━━
-🍿 FilmFeed Games 4K Engine`,
-              contextInfo: getMetaAiContext(),
-            });
+💡 මෙම Link එක Click කළ සැනින්ම Browser එකෙන් හෝ IDM මඟින් Ads සහ Captcha නොමැතිව උපරිම වේගයෙන් Download වේ! 🚀`,
+        });
 
-            deliveredCount++;
-            logger.info(`[Game Engine] Successfully delivered part ${partNumber}/${totalParts} to ${directTarget}`);
-          } catch (uploadErr) {
-            logger.error(`[Game Engine] Failed uploading part ${partNumber} to WhatsApp: ${uploadErr.message}`);
-            await waSocket.sendMessage(directTarget, {
-              text: `⚠️ *[FilmFeed Games - Part ${partNumber}/${totalParts}]* (${fileSizeMB}MB)\n${partFileName}\n\n📌 Upload Error: WhatsApp සර්වර් මඟින් ගොනුව ප්‍රතික්ෂේප විය (${uploadErr.message}). පහතින් Direct Download කරගන්න:\n🔗 Direct Cloud Mirror: ${partObj.url}`,
-            });
-          } finally {
-            if (fs.existsSync(tempPartPath)) {
-              fs.unlinkSync(tempPartPath);
-            }
-          }
-        } else {
-          let directSignedLink = partObj.url;
-          try {
-            const pythonCmd = process.platform === "win32" ? "python" : "python3";
-            const resUrl = await new Promise((res) => {
-              execFile(pythonCmd, [path.join(__dirname, "../downloader.py"), "--resolve-only", partObj.url], { timeout: 35000 }, (err, stdout) => {
-                if (!err && stdout) {
-                  const lines = stdout.trim().split("\n");
-                  for (let i = lines.length - 1; i >= 0; i--) {
-                    try {
-                      const p = JSON.parse(lines[i].trim());
-                      if (p.direct_url) return res(p.direct_url);
-                    } catch (_) {}
-                  }
-                }
-                res(null);
-              });
-            });
-            if (resUrl) directSignedLink = resUrl;
-          } catch (_) {}
-
-          await waSocket.sendMessage(directTarget, {
-            text: `⚠️ *[FilmFeed Games - Part ${partNumber}/${totalParts}]*\n${partFileName}\n🔗 1-Click Direct Link: ${directSignedLink}`,
-          });
-        }
+        deliveredCount++;
+        await new Promise((r) => setTimeout(r, 800));
       }
 
       // 3. Final summary to user's private chat with next-batch link
