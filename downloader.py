@@ -36,8 +36,16 @@ except ImportError:
     _missing.append("playwright")
 try:
     from playwright_stealth import stealth_async
+    async def apply_stealth(page):
+        await stealth_async(page)
 except ImportError:
-    _missing.append("playwright-stealth")
+    try:
+        from playwright_stealth.stealth import Stealth
+        _stealth_obj = Stealth()
+        async def apply_stealth(page):
+            await _stealth_obj.apply_stealth_async(page)
+    except Exception:
+        _missing.append("playwright-stealth")
 try:
     import aiohttp
     import aiofiles
@@ -109,7 +117,7 @@ async def resolve_one(ff_url: str, browser_ctx) -> Optional[str]:
     """
     page = await browser_ctx.new_page()
     try:
-        await stealth_async(page)
+        await apply_stealth(page)
         direct: list[str] = []
 
         # Intercept network responses for the HX-Redirect header or direct RAR redirect
