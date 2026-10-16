@@ -29,7 +29,7 @@ const TEMP_DIR = path.join(__dirname, "../temp");
 const STATS_FILE = path.join(AUTH_DIR, "user_stats.json");
 const SELF_URL = process.env.SELF_URL || process.env.RENDER_EXTERNAL_URL || process.env.KOYEB_APP_URL || null;
 
-const MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024; // 2.0 GB WhatsApp Document Limit
+const MAX_FILE_SIZE_BYTES = 1950 * 1024 * 1024; // 1.95 GB Safe WhatsApp Document Limit (MMS rejects >= 2GB with HTTP 413)
 
 if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
@@ -865,28 +865,50 @@ async function processQueue() {
         }
 
         if (partDownloadSuccess) {
-          const fileSizeMB = Math.round(fs.statSync(tempPartPath).size / 1024 / 1024);
-          const partBuffer = fs.readFileSync(tempPartPath);
+          const fileSizeBytes = fs.statSync(tempPartPath).size;
+          const fileSizeMB = Math.round(fileSizeBytes / 1024 / 1024);
 
-          await waSocket.sendMessage(directTarget, {
-            document: partBuffer,
-            mimetype: "application/x-rar-compressed",
-            fileName: partFileName,
-            caption:
+          // WhatsApp MMS servers strictly enforce a 1.95GB limit and return HTTP 413 on ~2000MB files
+          if (fileSizeMB > 1950) {
+            logger.warn(`[Game Engine] Part ${partNumber} size (${fileSizeMB}MB) exceeds WhatsApp 1.95GB limit. Sending direct mirror link.`);
+            await waSocket.sendMessage(directTarget, {
+              text: `⚠️ *[FilmFeed Games - Part ${partNumber}/${totalParts}]* (${fileSizeMB}MB)\n${partFileName}\n\n📌 මෙම Part එක (${fileSizeMB}MB) WhatsApp හි උපරිම සීමාව වන 1.95GB ට වඩා විශාල බැවින් WhatsApp මඟින් යැවිය නොහැක. කරුණාකර පහත Direct Mirror ලින්ක් එකෙන් PC එකට බාගත කරගන්න:\n🔗 Direct Cloud Mirror: ${partObj.url}`,
+            });
+            if (fs.existsSync(tempPartPath)) fs.unlinkSync(tempPartPath);
+            continue;
+          }
+
+          try {
+            const docPayload = fileSizeMB > 300 
+              ? { url: tempPartPath } 
+              : fs.readFileSync(tempPartPath);
+
+            await waSocket.sendMessage(directTarget, {
+              document: docPayload,
+              mimetype: "application/x-rar-compressed",
+              fileName: partFileName,
+              caption:
 `🎮 *${gameTitle}* [Part ${partNumber}/${totalParts}] (${fileSizeMB}MB)
 ━━━━━━━━━━━━━━━━━━━━
 📦 *Archive:* ${partFileName}
 ⚡ *Status:* Part ${partNumber} of ${totalParts} Delivered Directly
 ━━━━━━━━━━━━━━━━━━━━
 🍿 FilmFeed Games 4K Engine`,
-            contextInfo: getMetaAiContext(),
-          });
+              contextInfo: getMetaAiContext(),
+            });
 
-          deliveredCount++;
-          if (fs.existsSync(tempPartPath)) {
-            fs.unlinkSync(tempPartPath);
+            deliveredCount++;
+            logger.info(`[Game Engine] Successfully delivered part ${partNumber}/${totalParts} to ${directTarget}`);
+          } catch (uploadErr) {
+            logger.error(`[Game Engine] Failed uploading part ${partNumber} to WhatsApp: ${uploadErr.message}`);
+            await waSocket.sendMessage(directTarget, {
+              text: `⚠️ *[FilmFeed Games - Part ${partNumber}/${totalParts}]* (${fileSizeMB}MB)\n${partFileName}\n\n📌 Upload Error: WhatsApp සර්වර් මඟින් ගොනුව ප්‍රතික්ෂේප විය (${uploadErr.message}). පහතින් Direct Download කරගන්න:\n🔗 Direct Cloud Mirror: ${partObj.url}`,
+            });
+          } finally {
+            if (fs.existsSync(tempPartPath)) {
+              fs.unlinkSync(tempPartPath);
+            }
           }
-          logger.info(`[Game Engine] Successfully delivered part ${partNumber}/${totalParts} to ${directTarget}`);
         } else {
           await waSocket.sendMessage(directTarget, {
             text: `⚠️ *[FilmFeed Games - Part ${partNumber}/${totalParts}]*\n${partFileName}\nDirect Cloud Mirror: ${partObj.url}`,
