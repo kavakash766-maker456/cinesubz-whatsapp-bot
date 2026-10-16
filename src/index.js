@@ -871,8 +871,28 @@ async function processQueue() {
           // WhatsApp MMS servers strictly enforce a 1.95GB limit and return HTTP 413 on ~2000MB files
           if (fileSizeMB > 1950) {
             logger.warn(`[Game Engine] Part ${partNumber} size (${fileSizeMB}MB) exceeds WhatsApp 1.95GB limit. Sending direct mirror link.`);
+            let directSignedLink = partObj.url;
+            try {
+              const pythonCmd = process.platform === "win32" ? "python" : "python3";
+              const resUrl = await new Promise((res) => {
+                execFile(pythonCmd, [path.join(__dirname, "../downloader.py"), "--resolve-only", partObj.url], { timeout: 35000 }, (err, stdout) => {
+                  if (!err && stdout) {
+                    const lines = stdout.trim().split("\n");
+                    for (let i = lines.length - 1; i >= 0; i--) {
+                      try {
+                        const p = JSON.parse(lines[i].trim());
+                        if (p.direct_url) return res(p.direct_url);
+                      } catch (_) {}
+                    }
+                  }
+                  res(null);
+                });
+              });
+              if (resUrl) directSignedLink = resUrl;
+            } catch (_) {}
+
             await waSocket.sendMessage(directTarget, {
-              text: `⚠️ *[FilmFeed Games - Part ${partNumber}/${totalParts}]* (${fileSizeMB}MB)\n${partFileName}\n\n📌 මෙම Part එක (${fileSizeMB}MB) WhatsApp හි උපරිම සීමාව වන 1.95GB ට වඩා විශාල බැවින් WhatsApp මඟින් යැවිය නොහැක. කරුණාකර පහත Direct Mirror ලින්ක් එකෙන් PC එකට බාගත කරගන්න:\n🔗 Direct Cloud Mirror: ${partObj.url}`,
+              text: `⚠️ *[FilmFeed Games - Part ${partNumber}/${totalParts}]* (${fileSizeMB}MB)\n${partFileName}\n\n📌 මෙම Part එක (${fileSizeMB}MB) WhatsApp හි උපරිම සීමාව වන 1.95GB ට වඩා විශාල බැවින් WhatsApp මඟින් යැවිය නොහැක. පහත 1-Click Direct Download ලින්ක් එකෙන් කෙලින්ම බාගත කරගන්න:\n🔗 1-Click Direct Link: ${directSignedLink}`,
             });
             if (fs.existsSync(tempPartPath)) fs.unlinkSync(tempPartPath);
             continue;
@@ -910,8 +930,28 @@ async function processQueue() {
             }
           }
         } else {
+          let directSignedLink = partObj.url;
+          try {
+            const pythonCmd = process.platform === "win32" ? "python" : "python3";
+            const resUrl = await new Promise((res) => {
+              execFile(pythonCmd, [path.join(__dirname, "../downloader.py"), "--resolve-only", partObj.url], { timeout: 35000 }, (err, stdout) => {
+                if (!err && stdout) {
+                  const lines = stdout.trim().split("\n");
+                  for (let i = lines.length - 1; i >= 0; i--) {
+                    try {
+                      const p = JSON.parse(lines[i].trim());
+                      if (p.direct_url) return res(p.direct_url);
+                    } catch (_) {}
+                  }
+                }
+                res(null);
+              });
+            });
+            if (resUrl) directSignedLink = resUrl;
+          } catch (_) {}
+
           await waSocket.sendMessage(directTarget, {
-            text: `⚠️ *[FilmFeed Games - Part ${partNumber}/${totalParts}]*\n${partFileName}\nDirect Cloud Mirror: ${partObj.url}`,
+            text: `⚠️ *[FilmFeed Games - Part ${partNumber}/${totalParts}]*\n${partFileName}\n🔗 1-Click Direct Link: ${directSignedLink}`,
           });
         }
       }

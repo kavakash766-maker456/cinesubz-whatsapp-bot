@@ -89,6 +89,8 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
                   "Chrome/124.0.0.0 Safari/537.36",
+    "Referer": "https://fuckingfast.co/",
+    "Accept": "*/*",
 }
 CHUNK = 512 * 1024   # 512 KB read chunks
 CONNECTIONS = 4      # parallel downloads
@@ -137,15 +139,21 @@ def resolve_fuckingfast_direct(ff_url: str) -> Optional[str]:
         return None
     code = code_match.group(1)
 
-    for attempt in range(1, 4):
+    headers_get = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Upgrade-Insecure-Requests": "1",
+    }
+
+    for attempt in range(1, 5):
         try:
             s = cffi_requests.Session(impersonate="chrome124")
-            r1 = s.get(f"https://fuckingfast.co/{code}", timeout=15)
-            if r1.status_code != 200:
-                time.sleep(1)
-                continue
+            s.get(f"https://fuckingfast.co/{code}", headers=headers_get, timeout=15)
+            # Realistic user interaction delay before click
+            time.sleep(1.8 + attempt * 0.5)
 
-            headers = {
+            headers_post = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                 "Accept": "*/*",
                 "Accept-Language": "en-US,en;q=0.9",
@@ -161,7 +169,7 @@ def resolve_fuckingfast_direct(ff_url: str) -> Optional[str]:
                 "Sec-Fetch-Mode": "cors",
                 "Sec-Fetch-Site": "same-origin",
             }
-            r2 = s.post(f"https://fuckingfast.co/f/{code}/go", headers=headers, data="", timeout=15)
+            r2 = s.post(f"https://fuckingfast.co/f/{code}/go", headers=headers_post, data="", timeout=15)
             direct_url = r2.headers.get("hx-redirect") or r2.headers.get("location")
             if direct_url and "dl." in direct_url:
                 return direct_url
@@ -170,9 +178,10 @@ def resolve_fuckingfast_direct(ff_url: str) -> Optional[str]:
                 if m:
                     return m.group(1)
         except Exception as e:
-            console.print(f"[yellow]  curl_cffi direct resolver notice (attempt {attempt}/3): {e}[/yellow]")
+            console.print(f"[yellow]  curl_cffi direct resolver notice (attempt {attempt}/4): {e}[/yellow]")
             time.sleep(1)
     return None
+
 
 
 def resolve_filekeeper_direct(fk_url: str) -> Optional[str]:
