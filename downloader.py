@@ -30,10 +30,13 @@ if sys.platform == "win32":
 
 # ── dependency check ─────────────────────────────────────────────────────────
 _missing = []
+HAS_PLAYWRIGHT = False
 try:
     from playwright.async_api import async_playwright
+    HAS_PLAYWRIGHT = True
 except ImportError:
-    _missing.append("playwright")
+    pass
+
 try:
     from playwright_stealth import stealth_async
     async def apply_stealth(page):
@@ -45,12 +48,23 @@ except ImportError:
         async def apply_stealth(page):
             await _stealth_obj.apply_stealth_async(page)
     except Exception:
-        _missing.append("playwright-stealth")
+        pass
+
+try:
+    from curl_cffi import requests as cffi_requests
+    HAS_CURL_CFFI = True
+except ImportError:
+    HAS_CURL_CFFI = False
+
+if not HAS_CURL_CFFI and not HAS_PLAYWRIGHT:
+    _missing.append("curl_cffi")
+
 try:
     import aiohttp
     import aiofiles
 except ImportError:
     _missing.append("aiohttp aiofiles")
+
 try:
     from rich.console import Console
     from rich.progress import (Progress, SpinnerColumn, BarColumn,
@@ -59,17 +73,17 @@ try:
     from rich.panel import Panel
     from rich.table import Table
     from rich import box
+    console = Console(highlight=False)
 except ImportError:
-    _missing.append("rich")
+    class DummyConsole:
+        def print(self, *a, **kw):
+            print(*a)
+    console = DummyConsole()
 
 if _missing:
     print("Missing dependencies. Run:")
     print(f"  pip install {' '.join(_missing)}")
-    if "playwright" in " ".join(_missing):
-        print("  playwright install chromium")
     sys.exit(1)
-
-console = Console(highlight=False)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -109,6 +123,54 @@ async def get_ff_links_from_page(game_url: str) -> tuple[str, list[str]]:
 
 
 # ─────────────────────────── RESOLVE FF → DIRECT URL ─────────────────────────
+
+def resolve_fuckingfast_direct(ff_url: str) -> Optional[str]:
+    """
+    Resolve a fuckingfast.co link directly to signed dl.fuckingfast.co URL using curl_cffi.
+    Bypasses Cloudflare Turnstile in ~800ms without needing a headless browser.
+    """
+    if not HAS_CURL_CFFI:
+        return None
+    try:
+        clean_url = ff_url.split("#")[0].strip()
+        code_match = re.search(r"fuckingfast\.co/([a-zA-Z0-9_-]+)", clean_url)
+        if not code_match:
+            return None
+        code = code_match.group(1)
+
+        s = cffi_requests.Session(impersonate="chrome124")
+        r1 = s.get(f"https://fuckingfast.co/{code}", timeout=15)
+        if r1.status_code != 200:
+            return None
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "HX-Request": "true",
+            "HX-Current-URL": f"https://fuckingfast.co/{code}",
+            "Origin": "https://fuckingfast.co",
+            "Referer": f"https://fuckingfast.co/{code}",
+            "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+        }
+        r2 = s.post(f"https://fuckingfast.co/f/{code}/go", headers=headers, data="", timeout=15)
+        direct_url = r2.headers.get("hx-redirect") or r2.headers.get("location")
+        if direct_url and "dl." in direct_url:
+            return direct_url
+        if r2.text:
+            m = re.search(r'(https://dl\.fuckingfast\.co/[^\s"\'<>]+)', r2.text)
+            if m:
+                return m.group(1)
+    except Exception as e:
+        console.print(f"[yellow]  curl_cffi direct resolver notice: {e}[/yellow]")
+    return None
+
 
 async def resolve_one(ff_url: str, browser_ctx) -> Optional[str]:
     """
@@ -188,32 +250,39 @@ async def resolve_one(ff_url: str, browser_ctx) -> Optional[str]:
 
 
 async def resolve_batch(ff_urls: list[str]) -> list[Optional[str]]:
-    """Launch browser once, resolve all URLs sequentially (one session = one CF pass)."""
-    console.print("[bold cyan]  Launching stealth browser to resolve download links...[/bold cyan]")
+    """Resolve all URLs: fast curl_cffi first, Playwright fallback for remainder."""
+    results = [None] * len(ff_urls)
+    pending_indices = []
 
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled",
-                  "--no-sandbox", "--disable-dev-shm-usage"]
-        )
-        ctx = await browser.new_context(
-            viewport={"width": 1920, "height": 1080},
-            user_agent=HEADERS["User-Agent"],
-            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
-        )
+    for i, url in enumerate(ff_urls):
+        direct = resolve_fuckingfast_direct(url)
+        if direct:
+            console.print(f"  [{i+1}/{len(ff_urls)}] Fast Resolved: [green]{direct[:75]}...[/green]")
+            results[i] = direct
+        else:
+            pending_indices.append(i)
 
-        results = []
-        for i, url in enumerate(ff_urls, 1):
-            console.print(f"  [{i}/{len(ff_urls)}] Resolving: [dim]{url[:70]}[/dim]")
-            direct = await resolve_one(url, ctx)
-            if direct:
-                console.print(f"  [green]  => {direct[:80]}[/green]")
-            else:
-                console.print(f"  [red]  => FAILED[/red]")
-            results.append(direct)
-
-        await browser.close()
+    if pending_indices and HAS_PLAYWRIGHT:
+        console.print("[bold cyan]  Launching stealth browser for remaining links...[/bold cyan]")
+        try:
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(
+                    headless=True,
+                    args=["--disable-blink-features=AutomationControlled",
+                          "--no-sandbox", "--disable-dev-shm-usage"]
+                )
+                ctx = await browser.new_context(
+                    viewport={"width": 1920, "height": 1080},
+                    user_agent=HEADERS["User-Agent"],
+                    extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+                )
+                for idx in pending_indices:
+                    url = ff_urls[idx]
+                    console.print(f"  [{idx+1}/{len(ff_urls)}] Browser Resolving: [dim]{url[:70]}[/dim]")
+                    results[idx] = await resolve_one(url, ctx)
+                await browser.close()
+        except Exception as e:
+            console.print(f"[red]Browser batch resolver error: {e}[/red]")
 
     return results
 
@@ -371,37 +440,62 @@ async def run(args):
 
 
 async def download_single_part(ff_url: str, dest_path: Path):
-    """Programmatic mode: resolve 1 link via Playwright and stream directly to dest_path."""
+    """Programmatic mode: resolve link and stream directly to dest_path."""
     try:
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled",
-                      "--no-sandbox", "--disable-dev-shm-usage"]
-            )
-            ctx = await browser.new_context(
-                viewport={"width": 1920, "height": 1080},
-                user_agent=HEADERS["User-Agent"],
-                extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
-            )
-            direct_url = await resolve_one(ff_url, ctx)
-            await browser.close()
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        direct_url = resolve_fuckingfast_direct(ff_url)
+
+        if not direct_url and HAS_PLAYWRIGHT:
+            try:
+                async with async_playwright() as pw:
+                    browser = await pw.chromium.launch(
+                        headless=True,
+                        args=["--disable-blink-features=AutomationControlled",
+                              "--no-sandbox", "--disable-dev-shm-usage"]
+                    )
+                    ctx = await browser.new_context(
+                        viewport={"width": 1920, "height": 1080},
+                        user_agent=HEADERS["User-Agent"],
+                        extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+                    )
+                    direct_url = await resolve_one(ff_url, ctx)
+                    await browser.close()
+            except Exception as b_err:
+                console.print(f"[yellow]Browser fallback resolution failed: {b_err}[/yellow]")
 
         if not direct_url:
             print(json.dumps({"success": False, "error": f"Failed to resolve direct link for {ff_url}"}))
             return
 
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=7200)) as session:
-            async with session.get(direct_url, headers=HEADERS) as resp:
-                if resp.status not in (200, 206):
-                    print(json.dumps({"success": False, "error": f"HTTP {resp.status} streaming from {direct_url}"}))
-                    return
-                async with aiofiles.open(dest_path, "wb") as f:
-                    async for chunk in resp.content.iter_chunked(CHUNK):
-                        await f.write(chunk)
+        download_ok = False
 
-        if dest_path.exists() and dest_path.stat().st_size > 100000:
+        # Attempt 1: Fast asynchronous streaming via aiohttp
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=7200)) as session:
+                async with session.get(direct_url, headers=HEADERS) as resp:
+                    if resp.status in (200, 206):
+                        async with aiofiles.open(dest_path, "wb") as f:
+                            async for chunk in resp.content.iter_chunked(CHUNK):
+                                await f.write(chunk)
+                        download_ok = dest_path.exists() and dest_path.stat().st_size > 100000
+        except Exception as dl_err:
+            console.print(f"[yellow]aiohttp stream failed, trying curl_cffi stream: {dl_err}[/yellow]")
+
+        # Attempt 2: Fallback streaming via curl_cffi with Chrome TLS impersonation
+        if not download_ok and HAS_CURL_CFFI:
+            try:
+                s = cffi_requests.Session(impersonate="chrome124")
+                r = s.get(direct_url, headers=HEADERS, stream=True, timeout=7200)
+                if r.status_code in (200, 206):
+                    with open(dest_path, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=CHUNK):
+                            if chunk:
+                                f.write(chunk)
+                    download_ok = dest_path.exists() and dest_path.stat().st_size > 100000
+            except Exception as cffi_err:
+                console.print(f"[yellow]curl_cffi stream failed: {cffi_err}[/yellow]")
+
+        if download_ok:
             print(json.dumps({
                 "success": True,
                 "path": str(dest_path),
@@ -415,21 +509,26 @@ async def download_single_part(ff_url: str, dest_path: Path):
 
 
 async def resolve_single_link(ff_url: str):
-    """Programmatic mode: resolve 1 link via Playwright and output JSON direct_url."""
+    """Programmatic mode: resolve 1 link and output JSON direct_url."""
     try:
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled",
-                      "--no-sandbox", "--disable-dev-shm-usage"]
-            )
-            ctx = await browser.new_context(
-                viewport={"width": 1920, "height": 1080},
-                user_agent=HEADERS["User-Agent"],
-                extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
-            )
-            direct_url = await resolve_one(ff_url, ctx)
-            await browser.close()
+        direct_url = resolve_fuckingfast_direct(ff_url)
+        if not direct_url and HAS_PLAYWRIGHT:
+            try:
+                async with async_playwright() as pw:
+                    browser = await pw.chromium.launch(
+                        headless=True,
+                        args=["--disable-blink-features=AutomationControlled",
+                              "--no-sandbox", "--disable-dev-shm-usage"]
+                    )
+                    ctx = await browser.new_context(
+                        viewport={"width": 1920, "height": 1080},
+                        user_agent=HEADERS["User-Agent"],
+                        extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+                    )
+                    direct_url = await resolve_one(ff_url, ctx)
+                    await browser.close()
+            except Exception as b_err:
+                console.print(f"[yellow]Browser fallback resolution failed: {b_err}[/yellow]")
 
         if direct_url:
             print(json.dumps({"success": True, "direct_url": direct_url}))

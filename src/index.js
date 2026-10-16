@@ -790,8 +790,30 @@ async function processQueue() {
 
         if (!partDownloadSuccess) {
           try {
-            await downloadFile(partObj.url, tempPartPath);
-            partDownloadSuccess = fs.existsSync(tempPartPath) && fs.statSync(tempPartPath).size > 100000;
+            logger.info(`[Game Engine] Part ${partNumber} fallback: Resolving direct link...`);
+            const directUrl = await new Promise((res) => {
+              const pythonCmd = process.platform === "win32" ? "python" : "python3";
+              execFile(pythonCmd, [path.join(__dirname, "../downloader.py"), "--resolve-only", partObj.url], { timeout: 30000 }, (err, stdout) => {
+                if (!err && stdout) {
+                  const lines = stdout.trim().split("\n");
+                  for (let i = lines.length - 1; i >= 0; i--) {
+                    try {
+                      const p = JSON.parse(lines[i].trim());
+                      if (p.direct_url) return res(p.direct_url);
+                    } catch (_) {}
+                  }
+                }
+                res(null);
+              });
+            });
+
+            if (directUrl) {
+              await downloadFile(directUrl, tempPartPath);
+              partDownloadSuccess = fs.existsSync(tempPartPath) && fs.statSync(tempPartPath).size > 100000;
+            } else {
+              await downloadFile(partObj.url, tempPartPath);
+              partDownloadSuccess = fs.existsSync(tempPartPath) && fs.statSync(tempPartPath).size > 100000;
+            }
           } catch (e2) {
             logger.error(`Fallback download error for part ${partNumber}: ${e2.message}`);
           }
