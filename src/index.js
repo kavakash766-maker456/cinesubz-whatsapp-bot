@@ -781,41 +781,55 @@ async function processQueue() {
         logger.info(`[Game Engine] (${partNumber}/${totalParts}) Downloading ${partFileName} for ${directTarget}...`);
 
         let partDownloadSuccess = false;
-        try {
-          await downloadGamePart(partObj.url, tempPartPath);
-          partDownloadSuccess = fs.existsSync(tempPartPath) && fs.statSync(tempPartPath).size > 100000;
-        } catch (dlErr) {
-          logger.warn(`Playwright downloader error for part ${partNumber}: ${dlErr.message}`);
+        const candidateUrls = [partObj.url, partObj.filekeeper_url, partObj.fuckingfast_url, partObj.datanodes_url]
+          .filter(Boolean)
+          .filter((v, i, a) => a.indexOf(v) === i);
+
+        for (const candidateUrl of candidateUrls) {
+          try {
+            logger.info(`[Game Engine] (${partNumber}/${totalParts}) Trying mirror: ${candidateUrl}`);
+            await downloadGamePart(candidateUrl, tempPartPath);
+            partDownloadSuccess = fs.existsSync(tempPartPath) && fs.statSync(tempPartPath).size > 100000;
+            if (partDownloadSuccess) {
+              logger.info(`[Game Engine] Part ${partNumber} successfully downloaded from ${candidateUrl}`);
+              break;
+            }
+          } catch (dlErr) {
+            logger.warn(`Download error for part ${partNumber} from ${candidateUrl}: ${dlErr.message}`);
+          }
         }
 
         if (!partDownloadSuccess) {
-          try {
-            logger.info(`[Game Engine] Part ${partNumber} fallback: Resolving direct link...`);
-            const directUrl = await new Promise((res) => {
-              const pythonCmd = process.platform === "win32" ? "python" : "python3";
-              execFile(pythonCmd, [path.join(__dirname, "../downloader.py"), "--resolve-only", partObj.url], { timeout: 30000 }, (err, stdout) => {
-                if (!err && stdout) {
-                  const lines = stdout.trim().split("\n");
-                  for (let i = lines.length - 1; i >= 0; i--) {
-                    try {
-                      const p = JSON.parse(lines[i].trim());
-                      if (p.direct_url) return res(p.direct_url);
-                    } catch (_) {}
+          for (const candidateUrl of candidateUrls) {
+            try {
+              logger.info(`[Game Engine] Part ${partNumber} fallback: Resolving direct link for ${candidateUrl}...`);
+              const directUrl = await new Promise((res) => {
+                const pythonCmd = process.platform === "win32" ? "python" : "python3";
+                execFile(pythonCmd, [path.join(__dirname, "../downloader.py"), "--resolve-only", candidateUrl], { timeout: 35000 }, (err, stdout) => {
+                  if (!err && stdout) {
+                    const lines = stdout.trim().split("\n");
+                    for (let i = lines.length - 1; i >= 0; i--) {
+                      try {
+                        const p = JSON.parse(lines[i].trim());
+                        if (p.direct_url) return res(p.direct_url);
+                      } catch (_) {}
+                    }
                   }
-                }
-                res(null);
+                  res(null);
+                });
               });
-            });
 
-            if (directUrl) {
-              await downloadFile(directUrl, tempPartPath);
-              partDownloadSuccess = fs.existsSync(tempPartPath) && fs.statSync(tempPartPath).size > 100000;
-            } else {
-              await downloadFile(partObj.url, tempPartPath);
-              partDownloadSuccess = fs.existsSync(tempPartPath) && fs.statSync(tempPartPath).size > 100000;
+              if (directUrl) {
+                await downloadFile(directUrl, tempPartPath);
+                partDownloadSuccess = fs.existsSync(tempPartPath) && fs.statSync(tempPartPath).size > 100000;
+                if (partDownloadSuccess) {
+                  logger.info(`[Game Engine] Part ${partNumber} downloaded via directUrl fallback!`);
+                  break;
+                }
+              }
+            } catch (e2) {
+              logger.error(`Fallback download error for part ${partNumber}: ${e2.message}`);
             }
-          } catch (e2) {
-            logger.error(`Fallback download error for part ${partNumber}: ${e2.message}`);
           }
         }
 

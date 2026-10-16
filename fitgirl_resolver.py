@@ -77,15 +77,15 @@ def parse_game_post(post: dict) -> Optional[dict]:
     dn_core = filter_core(dn_links)
     fk_core = filter_core(fk_links)
 
-    # Build part list based on available mirrors
-    chosen_mirror = "fuckingfast"
-    chosen_links = ff_core
+    # Prefer filekeeper as primary mirror because it does not use Cloudflare Turnstile blocks
+    chosen_mirror = "filekeeper"
+    chosen_links = fk_core
+    if not chosen_links or len(chosen_links) == 0:
+        chosen_mirror = "fuckingfast"
+        chosen_links = ff_core
     if not chosen_links or len(chosen_links) == 0:
         chosen_mirror = "datanodes"
         chosen_links = dn_core
-    if not chosen_links or len(chosen_links) == 0:
-        chosen_mirror = "filekeeper"
-        chosen_links = fk_core
 
     parts = []
     for idx, l in enumerate(chosen_links, start=1):
@@ -101,6 +101,9 @@ def parse_game_post(post: dict) -> Optional[dict]:
             "part": idx,
             "filename": filename,
             "url": l,
+            "filekeeper_url": fk_core[idx - 1] if idx <= len(fk_core) else None,
+            "fuckingfast_url": ff_core[idx - 1] if idx <= len(ff_core) else None,
+            "datanodes_url": dn_core[idx - 1] if idx <= len(dn_core) else None,
         })
 
     return {

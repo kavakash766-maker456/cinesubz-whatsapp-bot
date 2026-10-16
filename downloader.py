@@ -172,6 +172,80 @@ def resolve_fuckingfast_direct(ff_url: str) -> Optional[str]:
     return None
 
 
+def resolve_filekeeper_direct(fk_url: str) -> Optional[str]:
+    """
+    Resolve a filekeeper.net link directly to signed download URL.
+    Bypasses countdown, posts form, and extracts 302 redirect location.
+    """
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+
+        clean_url = fk_url.split("#")[0].strip()
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Referer": clean_url,
+        }
+        s = requests.Session()
+        r1 = s.get(clean_url, headers=headers, timeout=20)
+        if r1.status_code != 200:
+            return None
+
+        soup = BeautifulSoup(r1.text, "html.parser")
+        el = soup.find(id="download-countdown")
+        if not el:
+            return None
+
+        code = el.get("data-code")
+        rand = el.get("data-rand") or ""
+        referer = el.get("data-referer") or ""
+        method = el.get("data-method") or "Free download"
+        countdown = int(el.get("data-countdown") or "5")
+
+        if countdown > 0:
+            time.sleep(countdown)
+
+        data = {
+            "op": "download2",
+            "id": code,
+            "rand": rand,
+            "referer": referer,
+            "method_free": method,
+            "down_direct": "1",
+        }
+        r2 = s.post(clean_url, data=data, headers=headers, allow_redirects=False, timeout=20)
+        direct_url = r2.headers.get("Location")
+        if direct_url and direct_url.startswith("http"):
+            return direct_url
+
+        if r2.status_code == 200:
+            soup2 = BeautifulSoup(r2.text, "html.parser")
+            for a in soup2.find_all("a", href=True):
+                if any(ext in a["href"].lower() for ext in [".rar", "/download/"]):
+                    return a["href"]
+    except Exception as e:
+        console.print(f"[yellow]  FileKeeper resolver notice: {e}[/yellow]")
+    return None
+
+
+def resolve_direct_url(url: str) -> Optional[str]:
+    """Auto-detect host (FileKeeper, FuckingFast, Direct) and resolve to direct signed download URL."""
+    if not url:
+        return None
+    url_lower = url.lower()
+    if "filekeeper" in url_lower:
+        direct = resolve_filekeeper_direct(url)
+        if direct:
+            return direct
+    if "fuckingfast" in url_lower:
+        direct = resolve_fuckingfast_direct(url)
+        if direct:
+            return direct
+    if any(ext in url_lower for ext in [".rar", "/download/", "dl."]) and not any(h in url_lower for h in ["fuckingfast.co/", "filekeeper.net/"]):
+        return url
+    return None
+
+
 async def resolve_one(ff_url: str, browser_ctx) -> Optional[str]:
     """
     Open a fuckingfast.co share page, handle Cloudflare + HTMX two-click flow,
@@ -255,7 +329,7 @@ async def resolve_batch(ff_urls: list[str]) -> list[Optional[str]]:
     pending_indices = []
 
     for i, url in enumerate(ff_urls):
-        direct = resolve_fuckingfast_direct(url)
+        direct = resolve_direct_url(url)
         if direct:
             console.print(f"  [{i+1}/{len(ff_urls)}] Fast Resolved: [green]{direct[:75]}...[/green]")
             results[i] = direct
@@ -443,9 +517,9 @@ async def download_single_part(ff_url: str, dest_path: Path):
     """Programmatic mode: resolve link and stream directly to dest_path."""
     try:
         dest_path.parent.mkdir(parents=True, exist_ok=True)
-        direct_url = resolve_fuckingfast_direct(ff_url)
+        direct_url = resolve_direct_url(ff_url)
 
-        if not direct_url and HAS_PLAYWRIGHT:
+        if not direct_url and "fuckingfast" in ff_url and HAS_PLAYWRIGHT:
             try:
                 async with async_playwright() as pw:
                     browser = await pw.chromium.launch(
@@ -479,9 +553,23 @@ async def download_single_part(ff_url: str, dest_path: Path):
                                 await f.write(chunk)
                         download_ok = dest_path.exists() and dest_path.stat().st_size > 100000
         except Exception as dl_err:
-            console.print(f"[yellow]aiohttp stream failed, trying curl_cffi stream: {dl_err}[/yellow]")
+            console.print(f"[yellow]aiohttp stream failed, trying fallback stream: {dl_err}[/yellow]")
 
-        # Attempt 2: Fallback streaming via curl_cffi with Chrome TLS impersonation
+        # Attempt 2: Fallback streaming via requests
+        if not download_ok:
+            try:
+                import requests
+                with requests.get(direct_url, headers=HEADERS, stream=True, timeout=7200) as r:
+                    if r.status_code in (200, 206):
+                        with open(dest_path, "wb") as f:
+                            for chunk in r.iter_content(chunk_size=CHUNK):
+                                if chunk:
+                                    f.write(chunk)
+                        download_ok = dest_path.exists() and dest_path.stat().st_size > 100000
+            except Exception as r_err:
+                console.print(f"[yellow]requests stream failed: {r_err}[/yellow]")
+
+        # Attempt 3: Fallback streaming via curl_cffi with Chrome TLS impersonation
         if not download_ok and HAS_CURL_CFFI:
             try:
                 s = cffi_requests.Session(impersonate="chrome124")
@@ -511,8 +599,8 @@ async def download_single_part(ff_url: str, dest_path: Path):
 async def resolve_single_link(ff_url: str):
     """Programmatic mode: resolve 1 link and output JSON direct_url."""
     try:
-        direct_url = resolve_fuckingfast_direct(ff_url)
-        if not direct_url and HAS_PLAYWRIGHT:
+        direct_url = resolve_direct_url(ff_url)
+        if not direct_url and "fuckingfast" in ff_url and HAS_PLAYWRIGHT:
             try:
                 async with async_playwright() as pw:
                     browser = await pw.chromium.launch(
