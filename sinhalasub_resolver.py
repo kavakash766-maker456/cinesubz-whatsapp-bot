@@ -4,13 +4,15 @@ SinhalaSub.LK Resolver & Fallback Engine for FilmFeed Bot
 Provides direct high-speed mp4 resolution and search fallback when CineSubz is unavailable.
 """
 
+import io
 import json
 import re
 import sys
 import time
+import base64
 import urllib.parse
-import urllib.request
 from bs4 import BeautifulSoup
+import requests
 
 BASE = "https://sinhalasub.lk"
 UA = (
@@ -19,22 +21,47 @@ UA = (
 )
 FINAL_LINK_RE = re.compile(r"var\s+zluFinalLink\s*=\s*['\"](.*?)['\"]\s*;")
 
+session = requests.Session()
+session.headers.update({
+    "User-Agent": UA,
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": BASE + "/",
+})
 
-def http_get(url: str, tries: int = 3, timeout: int = 20) -> str:
-    headers = {
-        "User-Agent": UA,
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": BASE + "/",
-    }
+
+def http_get(url: str, tries: int = 3, timeout: int = 15) -> str:
     for attempt in range(1, tries + 1):
         try:
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.read().decode("utf-8", errors="replace")
-        except Exception as exc:
+            resp = session.get(url, timeout=timeout)
+            if resp.status_code == 200:
+                return resp.text
+        except Exception:
             if attempt == tries:
                 return ""
-            time.sleep(1.0 * attempt)
+            time.sleep(0.5 * attempt)
+    return ""
+
+
+def make_thumbnail_b64(image_url: str) -> str:
+    if not image_url or not image_url.startswith("http"):
+        return ""
+    try:
+        from PIL import Image
+        fast_url = re.sub(r"/t/p/(original|w\d+)/", "/t/p/w300/", image_url)
+        r = session.get(fast_url, timeout=8)
+        if r.status_code != 200:
+            return ""
+        im = Image.open(io.BytesIO(r.content))
+        im.thumbnail((250, 250))
+        if im.mode != "RGB":
+            im = im.convert("RGB")
+        out = io.BytesIO()
+        im.save(out, format="JPEG", quality=75, optimize=True)
+        raw = out.getvalue()
+        if len(raw) < 32768:
+            return base64.b64encode(raw).decode("ascii")
+    except Exception:
+        pass
     return ""
 
 
@@ -52,28 +79,25 @@ def search_sinhalasub(query: str) -> list:
     results = []
     seen = set()
     
-    for a in soup.select("a[href*='/movies/']"):
-        href = (a.get("href") or "").strip()
-        m = re.match(r"https?://sinhalasub\.lk/movies/([a-z0-9\-]{4,})/?", href)
-        if not m:
+    for item in soup.select(".display-item, .item-box, article, .item"):
+        a = item.find("a", href=True)
+        if not a:
             continue
-        slug = m.group(1)
-        if slug in seen:
+        href = a["href"].strip()
+        if not re.search(r"/(movies|tvshows)/", href) or href.endswith(("/movies/", "/tvshows/")):
             continue
-        seen.add(slug)
+        if href in seen:
+            continue
+        seen.add(href)
         
-        title = (a.get("title") or "").strip()
-        if not title:
-            h3 = a.find(["h3", "span"])
-            title = h3.get_text(" ", strip=True) if h3 else slug
-            
-        img = a.find("img")
-        poster = (img.get("src") or img.get("data-original") or "").strip() if img else ""
+        h3 = item.find("h3") or item.find(".title")
+        title = h3.get_text(" ", strip=True) if h3 else (a.get("title") or "Movie")
+        img = item.find("img")
+        poster = (img.get("data-src") or img.get("data-original") or img.get("src") or "").strip() if img else ""
         results.append({
             "title": title,
             "url": href,
             "poster": poster,
-            "slug": slug
         })
     return results
 
@@ -101,6 +125,7 @@ def resolve_sinhalasub_movie(movie_url: str, requested_quality: str = None) -> d
             
     # Scale poster to TMDB HD
     poster = re.sub(r"/t/p/w\d+/", "/t/p/w780/", poster)
+    backdrop = poster
     
     year = ""
     for p in soup.select(".details-info p"):
@@ -164,8 +189,11 @@ def resolve_sinhalasub_movie(movie_url: str, requested_quality: str = None) -> d
     direct_url = m.group(1).strip()
     if "pixeldrain.com/u/" in direct_url:
         direct_url = direct_url.replace("pixeldrain.com/u/", "pixeldrain.com/api/file/")
+    if "pixeldrain.com/api/file/" in direct_url and "?download" not in direct_url:
+        direct_url += "?download"
         
     resolved_quality = target_row["quality"] or requested_quality or "720p"
+    thumb_b64 = make_thumbnail_b64(backdrop or poster)
     
     return {
         "success": True,
@@ -173,6 +201,8 @@ def resolve_sinhalasub_movie(movie_url: str, requested_quality: str = None) -> d
         "title": title,
         "year": year,
         "poster": poster,
+        "backdrop": backdrop,
+        "thumbnail_b64": thumb_b64,
         "description": description,
         "quality": resolved_quality,
         "size_text": target_row["size_label"],

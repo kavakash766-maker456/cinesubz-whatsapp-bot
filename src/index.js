@@ -1493,7 +1493,7 @@ async function startBot() {
             line.match(/^[!/.]?(?:req_season|season)\s+([^\s|]+)(?:\s*\|\s*[Ss]?(\d+))?(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i) ||
             line.match(/^[!/.]?req(?:uest)?\s+([^\s|]+)\s*\|\s*[Ss](\d+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
 
-          if (sMatch && (sMatch[1].startsWith("http") || sMatch[1].includes("cinesubz") || sMatch[1].includes("sinhalasub") || sMatch[1].includes("anime") || sMatch[1].includes("cartoons"))) {
+          if (sMatch && (sMatch[1].startsWith("http") || sMatch[1].includes("cinesubz") || sMatch[1].includes("sinhalasub") || sMatch[1].includes("baiscopes") || sMatch[1].includes("anime") || sMatch[1].includes("cartoons"))) {
             commandFound = true;
             isSeriesSeason = true;
             movieUrl = sMatch[1].trim();
@@ -1518,9 +1518,9 @@ async function startBot() {
           }
         }
 
-        // 2. Fallback: Search anywhere for a CineSubz, SinhalaSub, Anime or Cartoons URL if no formal command was triggered
+        // 2. Fallback: Search anywhere for a CineSubz, SinhalaSub, Baiscopes, Anime or Cartoons URL if no formal command was triggered
         if (!commandFound) {
-          const urlMatch = text.match(/(https?:\/\/[^\s|]*(?:cinesubz|sinhalasub|animekaizen|cartoons)[^\s|\n]*)/i);
+          const urlMatch = text.match(/(https?:\/\/[^\s|]*(?:cinesubz|sinhalasub|baiscopes|animekaizen|cartoons)[^\s|\n]*)/i);
           if (urlMatch) {
             commandFound = true;
             movieUrl = urlMatch[1].trim();

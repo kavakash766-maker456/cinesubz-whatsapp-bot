@@ -727,9 +727,21 @@ def resolve_direct_link(
             result["series_title"] = movie["details"].get("title")
             result["series_url"] = movie_url
             result["episode_count"] = len(episodes)
-        return result
-
     if not downloads:
+        if _depth == 0:
+            clean_name = movie.get("details", {}).get("title") or movie_url.rstrip("/").split("/")[-1].replace("-", " ")
+            clean_name = re.sub(r"(sinhala\s*subtitles?|සිංහල\s*උපසිරැසි.*|\b(19\d\d|20\d\d)\b)", "", clean_name, flags=re.I).strip()
+            if clean_name:
+                try:
+                    from sinhalasub_resolver import search_sinhalasub, resolve_sinhalasub_movie
+                    sh_cands = search_sinhalasub(clean_name)
+                    if sh_cands:
+                        res = resolve_sinhalasub_movie(sh_cands[0]["url"], requested_quality)
+                        if res.get("success"):
+                            res["fallback_from"] = "CineSubz"
+                            return res
+                except Exception:
+                    pass
         return {"error": "No download links found on movie page", "movie": movie}
 
     # Filter/sort by requested quality if specified, but fall back to others if it fails
@@ -818,6 +830,21 @@ def resolve_direct_link(
         except Exception as e:
             last_error = str(e)
             continue
+
+    if _depth == 0:
+        clean_name = movie.get("details", {}).get("title") or movie_url.rstrip("/").split("/")[-1].replace("-", " ")
+        clean_name = re.sub(r"(sinhala\s*subtitles?|සිංහල\s*උපසිරැසි.*|\b(19\d\d|20\d\d)\b)", "", clean_name, flags=re.I).strip()
+        if clean_name:
+            try:
+                from sinhalasub_resolver import search_sinhalasub, resolve_sinhalasub_movie
+                sh_cands = search_sinhalasub(clean_name)
+                if sh_cands:
+                    res = resolve_sinhalasub_movie(sh_cands[0]["url"], requested_quality)
+                    if res.get("success"):
+                        res["fallback_from"] = "CineSubz"
+                        return res
+            except Exception:
+                pass
 
     return {"error": last_error, "movie": movie}
 
