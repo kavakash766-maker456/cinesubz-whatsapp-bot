@@ -77,7 +77,7 @@ def parse_game_post(post: dict) -> Optional[dict]:
     dn_core = filter_core(dn_links)
     fk_core = filter_core(fk_links)
 
-    # Prioritize fuckingfast as primary mirror because parts are consistently ~500MB
+    # Exclusively use fuckingfast whenever available (guaranteed ~500MB parts)
     chosen_mirror = "fuckingfast"
     chosen_links = ff_core
     if not chosen_links or len(chosen_links) == 0:
@@ -101,9 +101,7 @@ def parse_game_post(post: dict) -> Optional[dict]:
             "part": idx,
             "filename": filename,
             "url": l,
-            "filekeeper_url": fk_core[idx - 1] if idx <= len(fk_core) else None,
-            "fuckingfast_url": ff_core[idx - 1] if idx <= len(ff_core) else None,
-            "datanodes_url": dn_core[idx - 1] if idx <= len(dn_core) else None,
+            "fuckingfast_url": l if "fuckingfast" in l else (ff_core[idx - 1] if idx <= len(ff_core) else None),
         })
 
     return {
