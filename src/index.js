@@ -368,6 +368,26 @@ async function resolveSeriesEpisodes(seriesUrl) {
   });
 }
 
+async function resolveGameRepack(gameUrl) {
+  return new Promise((resolve, reject) => {
+    const resolverScript = path.join(__dirname, "../fitgirl_resolver.py");
+    const pythonCmd = process.platform === "win32" ? "python" : "python3";
+    execFile(pythonCmd, [resolverScript, gameUrl], { maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) {
+        logger.error({ err, stderr }, "FitGirl Game resolver error");
+        return reject(err);
+      }
+      try {
+        const data = JSON.parse(stdout);
+        resolve(data);
+      } catch (parseErr) {
+        logger.error({ stdout, stderr }, "Failed to parse FitGirl resolver JSON");
+        reject(parseErr);
+      }
+    });
+  });
+}
+
 async function downloadGDriveFile(url, destPath, quality = null) {
   return new Promise((resolve, reject) => {
     const resolverScript = path.join(__dirname, "../resolver.py");
@@ -610,6 +630,7 @@ async function processQueue() {
   currentProcessingItem = currentTask;
 
   const {
+    isGameRequest,
     isSeriesSeason,
     seasonNumber,
     movieUrl,
@@ -625,7 +646,7 @@ async function processQueue() {
   const { count, badge } = userStats;
 
   logger.info(
-    `[Queue Engine] Processing task for ${pushName}: ${movieUrl} | Type=${isSeriesSeason ? `Series S${seasonNumber}` : "Movie"} | Remaining in queue: ${requestQueue.length}`
+    `[Queue Engine] Processing task for ${pushName}: ${movieUrl} | Type=${isGameRequest ? "FitGirl PC Game" : isSeriesSeason ? `Series S${seasonNumber}` : "Movie"} | Remaining in queue: ${requestQueue.length}`
   );
 
   // Helper function to broadcast message to target groups
@@ -651,6 +672,154 @@ async function processQueue() {
   };
 
   try {
+    // ----------------------------------------------------------------------
+    // MODE C: PC GAME REPACK MULTIPART BATCH (FitGirl Repacks)
+    // ----------------------------------------------------------------------
+    if (isGameRequest) {
+      await waSocket.sendMessage(replyTarget, {
+        text: `🎮 *[FilmFeed Games 4K Engine]*\n\n*${pushName}*, ඔබ ඉල්ලූ Game Repack එක සැකසීම ආරම්භ විය!\nසියලුම Archive Parts (~500MB) පිළිවෙළින් බාගත වී Group එකට Upload කරනු ලැබේ. 🚀`,
+        mentions: mentionsList,
+      });
+
+      const gameData = await resolveGameRepack(movieUrl);
+      if (!gameData || !gameData.success || !gameData.parts || gameData.parts.length === 0) {
+        await waSocket.sendMessage(replyTarget, {
+          text: `❌ *[FilmFeed Games]* Game Repack එක සඳහා Download Parts සොයාගත නොහැකි විය: ${gameData?.error || "Unknown error"}`,
+          mentions: mentionsList,
+        });
+        isProcessingQueue = false;
+        currentProcessingItem = null;
+        processQueue();
+        return;
+      }
+
+      const gameTitle = gameData.title || "PC Game";
+      const posterUrl = gameData.poster;
+      const totalParts = gameData.total_parts || gameData.parts.length;
+
+      // 1. Send Game Overview Poster to WhatsApp Group
+      const gameCaption =
+`🎮 *${gameTitle}*
+━━━━━━━━━━━━━━━━━━━━
+📦 *Pack Type:* FitGirl Repack Archive
+🔢 *Total Parts:* ${totalParts} RAR Parts (~500MB each)
+💾 *Repack Size:* ${gameData.repack_size || "Full Repack"}
+💾 *Original Size:* ${gameData.original_size || "N/A"}
+👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
+🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
+🔑 *Token:* ${token || "VIP_GAME"}
+━━━━━━━━━━━━━━━━━━━━
+⚡ _Part 1 සිට Part ${totalParts} දක්වා පිළිවෙළින් බාගත වී මෙහි ලැබෙනු ඇත. සියලුම කොටස් ලැබෙන තුරු කරුණාකර රැඳී සිටින්න!_`;
+
+      if (posterUrl) {
+        await broadcastToGroups({
+          image: { url: posterUrl },
+          caption: gameCaption,
+          mentions: mentionsList,
+        });
+      } else {
+        await broadcastToGroups({
+          text: gameCaption,
+          mentions: mentionsList,
+        });
+      }
+
+      // 2. Deliver each part sequentially
+      let deliveredCount = 0;
+      for (let pIdx = 0; pIdx < gameData.parts.length; pIdx++) {
+        const partObj = gameData.parts[pIdx];
+        const partNumber = pIdx + 1;
+        const partFileName = partObj.filename || `${gameTitle}.part${partNumber}.rar`;
+        const tempPartPath = path.join(__dirname, `../temp_game_${Date.now()}_part${partNumber}.rar`);
+
+        logger.info(`[Game Engine] (${partNumber}/${totalParts}) Downloading ${partFileName}...`);
+
+        let partDownloadSuccess = false;
+        try {
+          await downloadWithFastDownloader(partObj.url, tempPartPath, () => {});
+          partDownloadSuccess = fs.existsSync(tempPartPath) && fs.statSync(tempPartPath).size > 10000;
+        } catch (dlErr) {
+          logger.warn(`Fast downloader error for part ${partNumber}: ${dlErr.message}`);
+        }
+
+        if (!partDownloadSuccess) {
+          try {
+            const resp = await axios({
+              url: partObj.url,
+              method: "GET",
+              responseType: "stream",
+              headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+              timeout: 60000,
+            });
+            await new Promise((res, rej) => {
+              const writer = fs.createWriteStream(tempPartPath);
+              resp.data.pipe(writer);
+              writer.on("finish", res);
+              writer.on("error", rej);
+            });
+            partDownloadSuccess = fs.existsSync(tempPartPath) && fs.statSync(tempPartPath).size > 10000;
+          } catch (e2) {
+            logger.error(`Standard stream error for part ${partNumber}: ${e2.message}`);
+          }
+        }
+
+        if (partDownloadSuccess) {
+          const fileSizeMB = Math.round(fs.statSync(tempPartPath).size / 1024 / 1024);
+          const partBuffer = fs.readFileSync(tempPartPath);
+
+          await broadcastToGroups({
+            document: partBuffer,
+            mimetype: "application/x-rar-compressed",
+            fileName: partFileName,
+            caption:
+`🎮 *${gameTitle}* [Part ${partNumber}/${totalParts}] (${fileSizeMB}MB)
+━━━━━━━━━━━━━━━━━━━━
+📦 *Archive:* ${partFileName}
+⚡ *Status:* Part ${partNumber} of ${totalParts} Delivered
+👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
+━━━━━━━━━━━━━━━━━━━━
+🍿 FilmFeed Games 4K Engine`,
+            mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
+          });
+
+          deliveredCount++;
+          if (fs.existsSync(tempPartPath)) {
+            fs.unlinkSync(tempPartPath);
+          }
+          logger.info(`[Game Engine] Successfully delivered part ${partNumber}/${totalParts}`);
+        } else {
+          await broadcastToGroups({
+            text: `⚠️ *[FilmFeed Games - Part ${partNumber}/${totalParts}]*\n${partFileName}\nDirect Mirror: ${partObj.url}`,
+            mentions: mentionsList,
+          });
+        }
+      }
+
+      // 3. Final summary
+      await broadcastToGroups({
+        text:
+`✅ *[FilmFeed Games - Repack Completed!]*
+━━━━━━━━━━━━━━━━━━━━
+🎮 *${gameTitle}*
+📦 Delivered: *${deliveredCount} / ${totalParts} Parts*
+💡 *Instructions:*
+1. Download all ${totalParts} RAR parts to the same folder.
+2. Right click *Part 1* -> Extract Here (WinRAR / 7-Zip).
+3. Run setup.exe to install and play!
+━━━━━━━━━━━━━━━━━━━━
+🍿 FilmFeed Games 4K Portal: https://github.com/kavakash766-maker456/fitgirl`,
+        mentions: mentionsList,
+      });
+
+      incrementUserRequest(requesterJid || replyTarget, pushName, gameTitle, "PC Game");
+
+      isProcessingQueue = false;
+      currentProcessingItem = null;
+      processQueue();
+      return;
+    }
+
     // ----------------------------------------------------------------------
     // MODE A: TV SERIES SEASON BATCH (Processes All Episodes Sequentially)
     // ----------------------------------------------------------------------
@@ -1475,6 +1644,7 @@ async function startBot() {
         if (fromMe) continue;
 
         let commandFound = false;
+        let isGameRequest = false;
         let isSeriesSeason = false;
         let seasonNumber = 1;
         let movieUrl = "";
@@ -1488,7 +1658,20 @@ async function startBot() {
           const line = rawLine.trim();
           if (!line) continue;
 
-          // 1A. Season Command: !req_season, /season, .season, or !req <url> | S1
+          // 1A. FitGirl Game Command: !req_game, /game, .game, or !req <fitgirl_url>
+          const gMatch =
+            line.match(/^[!/.]?(?:req_game|game)\s+(https?:\/\/[^\s|]+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i) ||
+            line.match(/^[!/.]?req(?:uest)?\s+(https?:\/\/[^\s|]*fitgirl[^\s|]*)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
+          if (gMatch) {
+            commandFound = true;
+            isGameRequest = true;
+            movieUrl = gMatch[1].trim();
+            quality = gMatch[2] ? gMatch[2].trim() : "Full Game";
+            token = gMatch[3] ? gMatch[3].trim() : "";
+            break;
+          }
+
+          // 1B. Season Command: !req_season, /season, .season, or !req <url> | S1
           const sMatch =
             line.match(/^[!/.]?(?:req_season|season)\s+([^\s|]+)(?:\s*\|\s*[Ss]?(\d+))?(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i) ||
             line.match(/^[!/.]?req(?:uest)?\s+([^\s|]+)\s*\|\s*[Ss](\d+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
@@ -1503,14 +1686,16 @@ async function startBot() {
             break;
           }
 
-          // 1B. Movie Command: !req <url> | <quality> | <token>
+          // 1C. Movie Command: !req <url> | <quality> | <token>
           const rMatch = line.match(/^[!/.]?req(?:uest)?\s+(https?:\/\/[^\s|]+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
           if (rMatch) {
             commandFound = true;
             movieUrl = rMatch[1].trim();
             quality = rMatch[2] ? rMatch[2].trim() : "720p";
             token = rMatch[3] ? rMatch[3].trim() : "";
-            if (movieUrl.includes("/tvshows/")) {
+            if (movieUrl.includes("fitgirl-repacks.site")) {
+              isGameRequest = true;
+            } else if (movieUrl.includes("/tvshows/")) {
               isSeriesSeason = true;
               seasonNumber = 1;
             }
@@ -1518,7 +1703,18 @@ async function startBot() {
           }
         }
 
-        // 2. Fallback: Search anywhere for a CineSubz, SinhalaSub, Baiscopes, Anime or Cartoons URL if no formal command was triggered
+        // 2. Fallback: Search anywhere for a FitGirl, CineSubz, SinhalaSub, Baiscopes, Anime or Cartoons URL if no formal command was triggered
+        if (!commandFound) {
+          const fgMatch = text.match(/(https?:\/\/[^\s|]*fitgirl-repacks\.site[^\s|\n]*)/i);
+          if (fgMatch) {
+            commandFound = true;
+            isGameRequest = true;
+            movieUrl = fgMatch[1].trim();
+            quality = "Full Game";
+            token = "DIRECT";
+          }
+        }
+
         if (!commandFound) {
           const urlMatch = text.match(/(https?:\/\/[^\s|]*(?:cinesubz|sinhalasub|baiscopes|animekaizen|cartoons)[^\s|\n]*)/i);
           if (urlMatch) {
@@ -1673,6 +1869,7 @@ https://web-umber-six-e1un7z6257.vercel.app
         }
 
         const taskItem = {
+          isGameRequest,
           isSeriesSeason,
           seasonNumber,
           movieUrl,
@@ -1750,7 +1947,7 @@ Group එකට Join වී අවසන් වූ පසු, මෙම චැ�
 දැනට වෙනත් චිත්‍රපටයක් බාගත වෙමින් පවතී.
 
 📊 *ඔබගේ පෝලිම් ස්ථානය (Queue Position):* *#${queuePosition}*
-📦 *ඉල්ලීම:* ${isSeriesSeason ? `TV Series (Season ${seasonNumber})` : "Movie"}
+📦 *ඉල්ලීම:* ${isGameRequest ? "FitGirl PC Game Repack" : isSeriesSeason ? `TV Series (Season ${seasonNumber})` : "Movie"}
 🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
 📺 *Quality:* ${quality}
 🔑 *Token:* ${token}
@@ -1769,7 +1966,7 @@ _කලින් ඉල්ලීම් අවසන් වූ සැණින්
 
 ආයුබෝවන් *${pushName}* (${mentionTag})!
 ඔබගේ *${count}* වන ඉල්ලීම ලැබුණා [${badge}].
-${isSeriesSeason ? `📺 *TV Series (Season ${seasonNumber}) Pack* සකස් කිරීම ආරම්භ විය...` : "🎬 Direct High-Speed ලින්ක් එක සකසා බාගත කිරීම ආරම්භ විය..."}
+${isGameRequest ? "🎮 *FitGirl PC Game Repack Parts* සකස් කිරීම ආරම්භ විය..." : isSeriesSeason ? `📺 *TV Series (Season ${seasonNumber}) Pack* සකස් කිරීම ආරම්භ විය...` : "🎬 Direct High-Speed ලින්ක් එක සකසා බාගත කිරීම ආරම්භ විය..."}
 
 📺 *Quality:* ${quality}
 🔑 *Token:* ${token}`;
