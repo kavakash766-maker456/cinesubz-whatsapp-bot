@@ -1486,8 +1486,27 @@ async function startBot() {
         const remoteJid = msg.key.remoteJid || "";
         const fromMe = Boolean(msg.key.fromMe);
 
-        // Skip messages sent by the bot itself (except admin commands from bot's own number)
-        if (fromMe && !remoteJid.endsWith("@g.us")) continue;
+        // Unwrap potential layers: ephemeral, viewOnce, document captions
+        let innerMsg = msg.message;
+        if (innerMsg?.ephemeralMessage?.message) innerMsg = innerMsg.ephemeralMessage.message;
+        if (innerMsg?.viewOnceMessage?.message) innerMsg = innerMsg.viewOnceMessage.message;
+        if (innerMsg?.viewOnceMessageV2?.message) innerMsg = innerMsg.viewOnceMessageV2.message;
+        if (innerMsg?.documentWithCaptionMessage?.message) innerMsg = innerMsg.documentWithCaptionMessage.message;
+
+        const rawText =
+          innerMsg?.conversation ||
+          innerMsg?.extendedTextMessage?.text ||
+          innerMsg?.imageMessage?.caption ||
+          innerMsg?.videoMessage?.caption ||
+          "";
+
+        const text = rawText.trim();
+        if (!text) continue;
+
+        const isCommandText = /^[!/.](?:req|game|vip|unvip|unban|ban|unlimit|reset|stats|done|verify)/i.test(text) || text.includes("!req");
+
+        // Skip bot's own automated messages (only allow commands sent from owner account)
+        if (fromMe && !isCommandText) continue;
 
         const isGroup = remoteJid.endsWith("@g.us");
         const participant = msg.key.participant || "";
@@ -1496,7 +1515,10 @@ async function startBot() {
         let requesterLid = "";
         let requesterJid = "";
 
-        if (isGroup) {
+        if (fromMe) {
+          requesterPhone = BOT_PHONE;
+          requesterJid = `${BOT_PHONE}@s.whatsapp.net`;
+        } else if (isGroup) {
           if (participant.endsWith("@s.whatsapp.net")) {
             requesterPhone = participant.split("@")[0].replace(/:\d+/, "");
             requesterJid = `${requesterPhone}@s.whatsapp.net`;
@@ -1522,90 +1544,85 @@ async function startBot() {
         }
 
         const rawPhone = requesterPhone || (remoteJid.includes("@") ? remoteJid.split("@")[0].replace(/:\d+/, "") : "");
-        // Only exclude the bot's own device LID (exact match), not any user phone starting with those digits
-        const BOT_OWN_LID_PREFIX = BOT_PHONE.replace(/^94/, "47485"); // 94760372547 -> 47485... (linked device format)
-        const isOwnDevice = rawPhone === BOT_OWN_LID_PREFIX || rawPhone === BOT_PHONE;
-        const isRealPhone = rawPhone && rawPhone.length >= 9 && rawPhone.length <= 15 && !isOwnDevice;
-        const cleanPhone = isRealPhone ? rawPhone : "";
+        const cleanPhone = (rawPhone && rawPhone.length >= 9 && rawPhone.length <= 15) ? rawPhone : (fromMe ? BOT_PHONE : "");
         const cleanJid = cleanPhone ? `${cleanPhone}@s.whatsapp.net` : null;
-        // Use cleanPhone as stats key; fall back to requesterLid only if no phone resolved at all
-        const senderPhone = cleanPhone || (requesterLid ? requesterLid.split("@")[0].replace(/:\d+/, "") : rawPhone);
+        const senderPhone = cleanPhone || (requesterLid ? requesterLid.split("@")[0].replace(/:\d+/, "") : rawPhone) || BOT_PHONE;
+
+        const isAdmin = fromMe || cleanPhone === "94760372547" || cleanPhone === BOT_PHONE || senderPhone === "94760372547" || senderPhone === BOT_PHONE;
 
         const pushName = msg.pushName || (cleanPhone ? `+${cleanPhone}` : "Movie Fan");
         const mentionTag = cleanPhone ? `@${cleanPhone}` : `@${pushName}`;
         const mentionDisplay = cleanPhone ? `@${cleanPhone} (${pushName})` : `@${pushName}`;
         const mentionsList = [requesterJid, requesterLid, cleanJid, (isGroup ? participant : remoteJid)].filter(Boolean);
 
-        // Unwrap potential layers: ephemeral, viewOnce, document captions
-        let innerMsg = msg.message;
-        if (innerMsg.ephemeralMessage?.message) innerMsg = innerMsg.ephemeralMessage.message;
-        if (innerMsg.viewOnceMessage?.message) innerMsg = innerMsg.viewOnceMessage.message;
-        if (innerMsg.viewOnceMessageV2?.message) innerMsg = innerMsg.viewOnceMessageV2.message;
-        if (innerMsg.documentWithCaptionMessage?.message) innerMsg = innerMsg.documentWithCaptionMessage.message;
-
-        const rawText =
-          innerMsg.conversation ||
-          innerMsg.extendedTextMessage?.text ||
-          innerMsg.imageMessage?.caption ||
-          innerMsg.videoMessage?.caption ||
-          "";
-
-        const text = rawText.trim();
-
         // Log every incoming message for debugging
-        if (text) {
-          console.log(`📩 [Msg Received] from: ${pushName} (${senderPhone || requesterLid}) | jid: ${remoteJid} | fromMe: ${fromMe}:\n${text}`);
+        console.log(`📩 [Msg Received] from: ${pushName} (${senderPhone}) | jid: ${remoteJid} | fromMe: ${fromMe} | isAdmin: ${isAdmin}:\n${text}`);
 
-          // Admin Management Commands
-          const isAdmin = cleanPhone === "94760372547" || cleanPhone === BOT_PHONE || (fromMe && !isGroup);
-          if (isAdmin && text.startsWith("!")) {
-            const parts = text.split(/\s+/);
-            const adminCmd = parts[0].toLowerCase();
-            const targetPhone = parts[1] ? parts[1].replace(/[^0-9]/g, "") : "";
+        // Admin Management Commands
+        if (isAdmin && text.startsWith("!")) {
+          const parts = text.split(/\s+/);
+          const adminCmd = parts[0].toLowerCase();
+          const targetPhone = parts[1] ? parts[1].replace(/[^0-9]/g, "") : (cleanPhone || BOT_PHONE);
 
-            if (adminCmd === "!unban" && targetPhone) {
-              const allStats = getUserStats();
-              if (allStats[targetPhone]) {
-                allStats[targetPhone].isBanned = false;
-                allStats[targetPhone].duplicateCount = 0;
-                saveUserStats(allStats);
-                await waSocket.sendMessage(remoteJid, { text: `✅ User +${targetPhone} has been UNBANNED successfully.` });
-                continue;
-              }
-            } else if (adminCmd === "!ban" && targetPhone) {
-              const allStats = getUserStats();
-              if (!allStats[targetPhone]) allStats[targetPhone] = { count: 0, name: "User", firstSeen: new Date().toISOString() };
-              allStats[targetPhone].isBanned = true;
-              allStats[targetPhone].bannedAt = new Date().toISOString();
-              allStats[targetPhone].banReason = parts.slice(2).join(" ") || "Manually banned by Admin";
+          if (adminCmd === "!unban" && targetPhone) {
+            const allStats = getUserStats();
+            if (allStats[targetPhone]) {
+              allStats[targetPhone].isBanned = false;
+              allStats[targetPhone].duplicateCount = 0;
               saveUserStats(allStats);
-              await waSocket.sendMessage(remoteJid, { text: `🚫 User +${targetPhone} has been BANNED.` });
+              await waSocket.sendMessage(remoteJid, { text: `✅ User +${targetPhone} has been UNBANNED successfully.` });
               continue;
-            } else if (adminCmd === "!vip" && targetPhone) {
-              const allStats = getUserStats();
-              if (!allStats[targetPhone]) allStats[targetPhone] = { count: 0, name: "User", firstSeen: new Date().toISOString() };
-              allStats[targetPhone].isVip = true;
+            }
+          } else if (adminCmd === "!ban" && targetPhone) {
+            const allStats = getUserStats();
+            if (!allStats[targetPhone]) allStats[targetPhone] = { count: 0, name: "User", firstSeen: new Date().toISOString() };
+            allStats[targetPhone].isBanned = true;
+            allStats[targetPhone].bannedAt = new Date().toISOString();
+            allStats[targetPhone].banReason = parts.slice(2).join(" ") || "Manually banned by Admin";
+            saveUserStats(allStats);
+            await waSocket.sendMessage(remoteJid, { text: `🚫 User +${targetPhone} has been BANNED.` });
+            continue;
+          } else if (adminCmd === "!vip") {
+            const allStats = getUserStats();
+            if (!allStats[targetPhone]) allStats[targetPhone] = { count: 0, name: "User", firstSeen: new Date().toISOString() };
+            allStats[targetPhone].isVip = true;
+            allStats[targetPhone].dailyCount = 0;
+            allStats[targetPhone].isBanned = false;
+            saveUserStats(allStats);
+            await waSocket.sendMessage(remoteJid, { text: `👑 VIP status ACTIVATED for +${targetPhone}. Unlimited requests enabled! 🚀` });
+            continue;
+          } else if (adminCmd === "!unvip") {
+            const allStats = getUserStats();
+            if (allStats[targetPhone]) {
+              allStats[targetPhone].isVip = false;
               saveUserStats(allStats);
-              await waSocket.sendMessage(remoteJid, { text: `👑 VIP status ACTIVATED for +${targetPhone}.` });
+              await waSocket.sendMessage(remoteJid, { text: `❌ VIP status REVOKED for +${targetPhone}.` });
               continue;
-            } else if (adminCmd === "!unvip" && targetPhone) {
-              const allStats = getUserStats();
-              if (allStats[targetPhone]) {
-                allStats[targetPhone].isVip = false;
-                saveUserStats(allStats);
-                await waSocket.sendMessage(remoteJid, { text: `❌ VIP status REVOKED for +${targetPhone}.` });
-                continue;
+            }
+          } else if (adminCmd === "!unlimit" || adminCmd === "!reset") {
+            const allStats = getUserStats();
+            if (parts[1]?.toLowerCase() === "all") {
+              for (const k of Object.keys(allStats)) {
+                allStats[k].dailyCount = 0;
               }
-            } else if (adminCmd === "!stats" && targetPhone) {
-              const allStats = getUserStats();
-              const u = allStats[targetPhone];
-              if (u) {
-                checkAndResetDaily(u);
-                await waSocket.sendMessage(remoteJid, {
-                  text: `📊 *[User Info: +${targetPhone}]*\nName: ${u.name}\nDaily: ${u.dailyCount}/6\nTotal: ${u.count}\nVIP: ${u.isVip ? "YES 👑" : "NO"}\nBanned: ${u.isBanned ? "YES 🚫" : "NO"}`,
-                });
-                continue;
-              }
+              saveUserStats(allStats);
+              await waSocket.sendMessage(remoteJid, { text: `🔄 All user daily limits have been RESET to 0/6!` });
+            } else {
+              if (!allStats[targetPhone]) allStats[targetPhone] = { count: 0, name: "User", firstSeen: new Date().toISOString() };
+              allStats[targetPhone].dailyCount = 0;
+              saveUserStats(allStats);
+              await waSocket.sendMessage(remoteJid, { text: `🔄 Daily limit for +${targetPhone} has been RESET to 0/6!` });
+            }
+            continue;
+          } else if (adminCmd === "!stats") {
+            const allStats = getUserStats();
+            const u = allStats[targetPhone];
+            if (u) {
+              checkAndResetDaily(u);
+              await waSocket.sendMessage(remoteJid, {
+                text: `📊 *[User Info: +${targetPhone}]*\nName: ${u.name}\nDaily: ${u.dailyCount}/6\nTotal: ${u.count}\nVIP: ${u.isVip ? "YES 👑" : "NO"}\nBanned: ${u.isBanned ? "YES 🚫" : "NO"}`,
+              });
+              continue;
             }
           }
         }
@@ -1670,8 +1687,8 @@ async function startBot() {
           continue;
         }
 
-        // Skip bot's own messages from command processing
-        if (fromMe) continue;
+        // Skip bot's own non-command messages
+        if (fromMe && !isCommandText) continue;
 
         let commandFound = false;
         let isGameRequest = false;
@@ -1789,8 +1806,22 @@ async function startBot() {
         const userRecord = stats[senderPhone];
         checkAndResetDaily(userRecord);
 
-        // A. CHECK IF USER IS CURRENTLY BANNED
-        if (userRecord.isBanned) {
+        // Auto-grant VIP and clear restrictions for Admin / Owner
+        if (isAdmin) {
+          userRecord.isVip = true;
+          userRecord.isBanned = false;
+          userRecord.duplicateCount = 0;
+          userRecord.dailyCount = 0;
+        }
+
+        // Auto-grant VIP if request message contains VIP markers
+        if (text.includes("👑 VIP Member") || text.includes("VIP") || token.toUpperCase().includes("VIP") || text.includes("👑")) {
+          userRecord.isVip = true;
+          saveUserStats(stats);
+        }
+
+        // A. CHECK IF USER IS CURRENTLY BANNED (Admins are NEVER banned)
+        if (!isAdmin && userRecord.isBanned) {
           logger.warn(`🚫 Ignoring request from BANNED user ${senderPhone} (${pushName})`);
           const banNotice = 
 `🚫 *[FilmFeed System - Account BANNED]*
@@ -1806,11 +1837,11 @@ _නැවත සේවාව ලබා ගැනීමට අවශ්‍ය �
           continue;
         }
 
-        // B. CHECK DUPLICATE MOVIE REQUEST (SAME USER + SAME NUMBER + SAME MOVIE)
+        // B. CHECK DUPLICATE MOVIE REQUEST (Admins & VIPs are NEVER blocked for duplicate requests)
         const cleanUrl = movieUrl.trim().toLowerCase().replace(/\/+$/, "");
         const prevUrl = (userRecord.lastRequestedUrl || "").trim().toLowerCase().replace(/\/+$/, "");
 
-        if (prevUrl && prevUrl === cleanUrl) {
+        if (!isAdmin && !userRecord.isVip && prevUrl && prevUrl === cleanUrl) {
           userRecord.duplicateCount = (userRecord.duplicateCount || 1) + 1;
           userRecord.lastRequestedAt = Date.now();
 
@@ -1843,10 +1874,12 @@ _නැවත සේවාව ලබා ගැනීමට අවශ්‍ය �
           userRecord.lastRequestedAt = Date.now();
         }
 
-        // C. CHECK DAILY 6-MOVIE LIMIT FOR NON-VIP
+        // C. CHECK DAILY 6-MOVIE LIMIT FOR NON-VIP (Admins & VIP are NEVER limited)
         const isVipUser = Boolean(
+          isAdmin ||
           userRecord.isVip ||
           text.includes("👑 VIP Member") ||
+          text.includes("VIP") ||
           token.toUpperCase().includes("VIP")
         );
 
@@ -1889,11 +1922,11 @@ https://web-umber-six-e1un7z6257.vercel.app
         const { count, badge } = userStats;
 
         // ------------------------------------------------------------------
-        // Check User Group Membership
+        // Check User Group Membership (Admin / Owner auto-approved)
         // ------------------------------------------------------------------
         let userGroups = [];
-        if (isGroup) {
-          userGroups = [{ jid: remoteJid, subject: "Current Group" }];
+        if (isAdmin || isGroup) {
+          userGroups = [{ jid: (isGroup ? remoteJid : TARGET_GROUP_JID), subject: "FilmFeed Cinema Group" }];
         } else {
           userGroups = await checkUserGroups(waSocket, cleanPhone, requesterJid, requesterLid, false);
         }
