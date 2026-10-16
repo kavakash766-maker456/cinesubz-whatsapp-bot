@@ -673,19 +673,32 @@ async function processQueue() {
 
   try {
     // ----------------------------------------------------------------------
-    // MODE C: PC GAME REPACK MULTIPART BATCH (FitGirl Repacks)
+    // MODE C: PC GAME REPACK MULTIPART BATCH (FitGirl Repacks - Private Delivery)
     // ----------------------------------------------------------------------
     if (isGameRequest) {
-      await waSocket.sendMessage(replyTarget, {
-        text: `🎮 *[FilmFeed Games 4K Engine]*\n\n*${pushName}*, ඔබ ඉල්ලූ Game Repack එක සැකසීම ආරම්භ විය!\nසියලුම Archive Parts (~500MB) පිළිවෙළින් බාගත වී Group එකට Upload කරනු ලැබේ. 🚀`,
-        mentions: mentionsList,
+      // Determine the user's private WhatsApp chat target
+      const directTarget = (replyTarget && !replyTarget.endsWith("@g.us"))
+        ? replyTarget
+        : (requesterJid || replyTarget);
+
+      // If requested from inside a group, send a polite notice in the group that delivery is in DM
+      if (replyTarget && replyTarget.endsWith("@g.us")) {
+        try {
+          await waSocket.sendMessage(replyTarget, {
+            text: `🎮 *[FilmFeed Games 4K]*\n\n*${pushName}* (${mentionTag}), ඔබ ඉල්ලූ Game Repack එක Group එක පිරීම වැළැක්වීම සඳහා ඔබගේ WhatsApp Inbox (Private Chat) වෙත කෙලින්ම ලැබෙනු ඇත! 📥`,
+            mentions: mentionsList,
+          });
+        } catch (_) {}
+      }
+
+      await waSocket.sendMessage(directTarget, {
+        text: `🎮 *[FilmFeed Games 4K Engine]*\n\n*${pushName}*, ඔබ ඉල්ලූ Game Repack එක සැකසීම ආරම්භ විය!\nසියලුම Archive Parts (~500MB) පිළිවෙළින් බාගත වී ඔබගේ මෙම Private Chat එකටම ලැබෙනු ඇත. 🚀`,
       });
 
       const gameData = await resolveGameRepack(movieUrl);
       if (!gameData || !gameData.success || !gameData.parts || gameData.parts.length === 0) {
-        await waSocket.sendMessage(replyTarget, {
+        await waSocket.sendMessage(directTarget, {
           text: `❌ *[FilmFeed Games]* Game Repack එක සඳහා Download Parts සොයාගත නොහැකි විය: ${gameData?.error || "Unknown error"}`,
-          mentions: mentionsList,
         });
         isProcessingQueue = false;
         currentProcessingItem = null;
@@ -697,11 +710,11 @@ async function processQueue() {
       const posterUrl = gameData.poster;
       const totalParts = gameData.total_parts || gameData.parts.length;
 
-      // 1. Send Game Overview Poster to WhatsApp Group
+      // 1. Send Game Overview Poster to User's Private Chat
       const gameCaption =
 `🎮 *${gameTitle}*
 ━━━━━━━━━━━━━━━━━━━━
-📦 *Pack Type:* FitGirl Repack Archive
+📦 *Pack Type:* FitGirl Repack Archive (Direct Private Delivery)
 🔢 *Total Parts:* ${totalParts} RAR Parts (~500MB each)
 💾 *Repack Size:* ${gameData.repack_size || "Full Repack"}
 💾 *Original Size:* ${gameData.original_size || "N/A"}
@@ -709,22 +722,20 @@ async function processQueue() {
 🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
 🔑 *Token:* ${token || "VIP_GAME"}
 ━━━━━━━━━━━━━━━━━━━━
-⚡ _Part 1 සිට Part ${totalParts} දක්වා පිළිවෙළින් බාගත වී මෙහි ලැබෙනු ඇත. සියලුම කොටස් ලැබෙන තුරු කරුණාකර රැඳී සිටින්න!_`;
+⚡ _Part 1 සිට Part ${totalParts} දක්වා පිළිවෙළින් බාගත වී මෙම Chat එකට ලැබෙනු ඇත. සියලුම කොටස් ලැබෙන තුරු කරුණාකර රැඳී සිටින්න!_`;
 
       if (posterUrl) {
-        await broadcastToGroups({
+        await waSocket.sendMessage(directTarget, {
           image: { url: posterUrl },
           caption: gameCaption,
-          mentions: mentionsList,
         });
       } else {
-        await broadcastToGroups({
+        await waSocket.sendMessage(directTarget, {
           text: gameCaption,
-          mentions: mentionsList,
         });
       }
 
-      // 2. Deliver each part sequentially
+      // 2. Deliver each part sequentially to the user's private chat
       let deliveredCount = 0;
       for (let pIdx = 0; pIdx < gameData.parts.length; pIdx++) {
         const partObj = gameData.parts[pIdx];
@@ -732,7 +743,7 @@ async function processQueue() {
         const partFileName = partObj.filename || `${gameTitle}.part${partNumber}.rar`;
         const tempPartPath = path.join(__dirname, `../temp_game_${Date.now()}_part${partNumber}.rar`);
 
-        logger.info(`[Game Engine] (${partNumber}/${totalParts}) Downloading ${partFileName}...`);
+        logger.info(`[Game Engine] (${partNumber}/${totalParts}) Downloading ${partFileName} for ${directTarget}...`);
 
         let partDownloadSuccess = false;
         try {
@@ -767,7 +778,7 @@ async function processQueue() {
           const fileSizeMB = Math.round(fs.statSync(tempPartPath).size / 1024 / 1024);
           const partBuffer = fs.readFileSync(tempPartPath);
 
-          await broadcastToGroups({
+          await waSocket.sendMessage(directTarget, {
             document: partBuffer,
             mimetype: "application/x-rar-compressed",
             fileName: partFileName,
@@ -775,41 +786,37 @@ async function processQueue() {
 `🎮 *${gameTitle}* [Part ${partNumber}/${totalParts}] (${fileSizeMB}MB)
 ━━━━━━━━━━━━━━━━━━━━
 📦 *Archive:* ${partFileName}
-⚡ *Status:* Part ${partNumber} of ${totalParts} Delivered
-👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
+⚡ *Status:* Part ${partNumber} of ${totalParts} Delivered Directly
 ━━━━━━━━━━━━━━━━━━━━
 🍿 FilmFeed Games 4K Engine`,
-            mentions: mentionsList,
-            contextInfo: getMetaAiContext(mentionsList),
+            contextInfo: getMetaAiContext(),
           });
 
           deliveredCount++;
           if (fs.existsSync(tempPartPath)) {
             fs.unlinkSync(tempPartPath);
           }
-          logger.info(`[Game Engine] Successfully delivered part ${partNumber}/${totalParts}`);
+          logger.info(`[Game Engine] Successfully delivered part ${partNumber}/${totalParts} to ${directTarget}`);
         } else {
-          await broadcastToGroups({
-            text: `⚠️ *[FilmFeed Games - Part ${partNumber}/${totalParts}]*\n${partFileName}\nDirect Mirror: ${partObj.url}`,
-            mentions: mentionsList,
+          await waSocket.sendMessage(directTarget, {
+            text: `⚠️ *[FilmFeed Games - Part ${partNumber}/${totalParts}]*\n${partFileName}\nDirect Cloud Mirror: ${partObj.url}`,
           });
         }
       }
 
-      // 3. Final summary
-      await broadcastToGroups({
+      // 3. Final summary to user's private chat
+      await waSocket.sendMessage(directTarget, {
         text:
 `✅ *[FilmFeed Games - Repack Completed!]*
 ━━━━━━━━━━━━━━━━━━━━
 🎮 *${gameTitle}*
 📦 Delivered: *${deliveredCount} / ${totalParts} Parts*
 💡 *Instructions:*
-1. Download all ${totalParts} RAR parts to the same folder.
+1. Download all ${totalParts} RAR parts to the same folder on your PC.
 2. Right click *Part 1* -> Extract Here (WinRAR / 7-Zip).
-3. Run setup.exe to install and play!
+3. Open the extracted folder and run setup.exe to install and play!
 ━━━━━━━━━━━━━━━━━━━━
-🍿 FilmFeed Games 4K Portal: https://github.com/kavakash766-maker456/fitgirl`,
-        mentions: mentionsList,
+🍿 FilmFeed Games 4K Portal: https://fitgirl-web.vercel.app`,
       });
 
       incrementUserRequest(requesterJid || replyTarget, pushName, gameTitle, "PC Game");
