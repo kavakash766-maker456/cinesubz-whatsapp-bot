@@ -583,12 +583,23 @@ def resolve_direct_link(
     movie_url: str, requested_quality: str = None, _depth: int = 0
 ):
     movie_url = re.sub(r"https?://(www\.)?cinesubz\.(net|co)/", "https://cinesubz.lk/", movie_url)
-    if "sinhalasub.lk" in movie_url:
+    if "sinhalasub" in movie_url:
         try:
             from sinhalasub_resolver import resolve_sinhalasub_movie
             return resolve_sinhalasub_movie(movie_url, requested_quality)
         except Exception as e:
             return {"error": f"Sinhalasub resolver error: {e}"}
+
+    if "baiscope" in movie_url:
+        clean_name = movie_url.rstrip("/").split("/")[-1].replace("-", " ")
+        clean_name = re.sub(r"(sinhala\s*subtitles?|සිංහල\s*උපසිරැසි.*|\b(19\d\d|20\d\d)\b)", "", clean_name, flags=re.I).strip()
+        try:
+            from sinhalasub_resolver import search_sinhalasub, resolve_sinhalasub_movie
+            sh_cands = search_sinhalasub(clean_name)
+            if sh_cands:
+                return resolve_sinhalasub_movie(sh_cands[0]["url"], requested_quality)
+        except Exception:
+            pass
 
     # Direct zt-links or intermediate redirect link support
     is_zt = "/zt-links/" in movie_url or "?r=" in movie_url or "cinesubz.net/zt-" in movie_url or "cinesubz.lk/zt-" in movie_url
@@ -727,6 +738,7 @@ def resolve_direct_link(
             result["series_title"] = movie["details"].get("title")
             result["series_url"] = movie_url
             result["episode_count"] = len(episodes)
+            return result
     if not downloads:
         if _depth == 0:
             clean_name = movie.get("details", {}).get("title") or movie_url.rstrip("/").split("/")[-1].replace("-", " ")
@@ -962,6 +974,17 @@ def main():
         except Exception:
             pass
 
+        # Check if SinhalaSub TV Series
+        if "sinhalasub" in args.url:
+            try:
+                from sinhalasub_resolver import get_sinhalasub_series_episodes
+                sh_series = get_sinhalasub_series_episodes(args.url)
+                if sh_series.get("episodes"):
+                    print(json.dumps(sh_series, ensure_ascii=False, indent=2))
+                    return
+            except Exception:
+                pass
+
         data = scrape_movie(args.url)
         out = {
             "success": bool(data.get("episodes")),
@@ -971,6 +994,21 @@ def main():
             "episodes": data.get("episodes") or [],
         }
         if not out["episodes"]:
+            # If CineSubz returned 0 episodes, try SinhalaSub search fallback
+            clean_title = data["details"].get("title") or args.url.rstrip("/").split("/")[-1].replace("-", " ")
+            clean_title = re.sub(r"(sinhala\s*subtitles?|සිංහල\s*උපසිරැසි.*|\b(19\d\d|20\d\d)\b)", "", clean_title, flags=re.I).strip()
+            if clean_title:
+                try:
+                    from sinhalasub_resolver import search_sinhalasub, get_sinhalasub_series_episodes
+                    cands = search_sinhalasub(clean_title)
+                    for cand in cands:
+                        if "/tvshows/" in cand["url"]:
+                            fb_eps = get_sinhalasub_series_episodes(cand["url"])
+                            if fb_eps.get("episodes"):
+                                print(json.dumps(fb_eps, ensure_ascii=False, indent=2))
+                                return
+                except Exception:
+                    pass
             out["error"] = "No episodes found on this page"
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return

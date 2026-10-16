@@ -388,6 +388,41 @@ async function resolveGameRepack(gameUrl) {
   });
 }
 
+async function downloadGamePart(url, destPath) {
+  return new Promise((resolve, reject) => {
+    const downloaderScript = path.join(__dirname, "../downloader.py");
+    const pythonCmd = process.platform === "win32" ? "python" : "python3";
+    const args = [downloaderScript, "--download-part", url, "--dest", destPath];
+
+    logger.info(`[Game Downloader] Invoking Playwright stealth downloader for part: ${url}`);
+    execFile(pythonCmd, args, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) {
+        logger.error({ err, stderr }, "Game part downloader error");
+        return reject(err);
+      }
+      try {
+        const lines = stdout.trim().split("\n");
+        let parsed = null;
+        for (let i = lines.length - 1; i >= 0; i--) {
+          try {
+            parsed = JSON.parse(lines[i].trim());
+            break;
+          } catch (_) {}
+        }
+        if (parsed && parsed.success && fs.existsSync(destPath) && fs.statSync(destPath).size > 100000) {
+          logger.info(`[Game Downloader] Part downloaded successfully! Size: ${Math.round(parsed.size / 1024 / 1024)}MB`);
+          resolve(parsed);
+        } else {
+          reject(new Error(parsed?.error || stderr || "Failed to download game RAR part"));
+        }
+      } catch (parseErr) {
+        logger.error({ stdout, stderr }, "Failed to parse downloader JSON");
+        reject(parseErr);
+      }
+    });
+  });
+}
+
 async function downloadGDriveFile(url, destPath, quality = null) {
   return new Promise((resolve, reject) => {
     const resolverScript = path.join(__dirname, "../resolver.py");
@@ -747,30 +782,18 @@ async function processQueue() {
 
         let partDownloadSuccess = false;
         try {
-          await downloadWithFastDownloader(partObj.url, tempPartPath, () => {});
-          partDownloadSuccess = fs.existsSync(tempPartPath) && fs.statSync(tempPartPath).size > 10000;
+          await downloadGamePart(partObj.url, tempPartPath);
+          partDownloadSuccess = fs.existsSync(tempPartPath) && fs.statSync(tempPartPath).size > 100000;
         } catch (dlErr) {
-          logger.warn(`Fast downloader error for part ${partNumber}: ${dlErr.message}`);
+          logger.warn(`Playwright downloader error for part ${partNumber}: ${dlErr.message}`);
         }
 
         if (!partDownloadSuccess) {
           try {
-            const resp = await axios({
-              url: partObj.url,
-              method: "GET",
-              responseType: "stream",
-              headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
-              timeout: 60000,
-            });
-            await new Promise((res, rej) => {
-              const writer = fs.createWriteStream(tempPartPath);
-              resp.data.pipe(writer);
-              writer.on("finish", res);
-              writer.on("error", rej);
-            });
-            partDownloadSuccess = fs.existsSync(tempPartPath) && fs.statSync(tempPartPath).size > 10000;
+            await downloadFile(partObj.url, tempPartPath);
+            partDownloadSuccess = fs.existsSync(tempPartPath) && fs.statSync(tempPartPath).size > 100000;
           } catch (e2) {
-            logger.error(`Standard stream error for part ${partNumber}: ${e2.message}`);
+            logger.error(`Fallback download error for part ${partNumber}: ${e2.message}`);
           }
         }
 
