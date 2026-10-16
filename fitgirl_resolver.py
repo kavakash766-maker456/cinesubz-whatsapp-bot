@@ -102,6 +102,8 @@ def parse_game_post(post: dict) -> Optional[dict]:
             "filename": filename,
             "url": l,
             "fuckingfast_url": l if "fuckingfast" in l else (ff_core[idx - 1] if idx <= len(ff_core) else None),
+            "filekeeper_url": fk_core[idx - 1] if idx <= len(fk_core) else None,
+            "datanodes_url": dn_core[idx - 1] if idx <= len(dn_core) else None,
         })
 
     return {
