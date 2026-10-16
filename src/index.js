@@ -395,7 +395,7 @@ async function downloadGamePart(url, destPath) {
     const args = [downloaderScript, "--download-part", url, "--dest", destPath];
 
     logger.info(`[Game Downloader] Invoking Playwright stealth downloader for part: ${url}`);
-    execFile(pythonCmd, args, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(pythonCmd, args, { maxBuffer: 20 * 1024 * 1024, timeout: 900000 }, (err, stdout, stderr) => {
       if (err) {
         logger.error({ err, stderr }, "Game part downloader error");
         return reject(err);
@@ -618,15 +618,17 @@ async function downloadFile(url, destPath, onProgress) {
       } else {
         logger.warn(`Fast parallel downloader exited with code ${code}. Falling back to standard stream...`);
         const writer = fs.createWriteStream(destPath);
+        const https = require("https");
         axios({
           url,
           method: "GET",
           responseType: "stream",
+          httpsAgent: new https.Agent({ rejectUnauthorized: false }),
           headers: {
             "User-Agent":
               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
           },
-          timeout: 300000,
+          timeout: 7200000,
         })
           .then((response) => {
             const totalLength = parseInt(response.headers["content-length"] || "0", 10);
@@ -745,19 +747,47 @@ async function processQueue() {
       const posterUrl = gameData.poster;
       const totalParts = gameData.total_parts || gameData.parts.length;
 
+      // 1. Calculate 10-part batch range (e.g. Part 1-10, Part 11-20)
+      const BATCH_SIZE = 10;
+      let startPartNum = 1;
+
+      // Parse batch offset from quality string if present (e.g., "Batch 2", "parts 11-20", "11", "2")
+      const qualityStr = (quality || "").toString().trim();
+      const rangeMatch = qualityStr.match(/parts?\s*(\d+)\s*[-to]+\s*(\d+)/i);
+      const batchMatch = qualityStr.match(/batch\s*(\d+)/i);
+      const pureNumMatch = qualityStr.match(/^(\d+)$/);
+
+      if (rangeMatch) {
+        startPartNum = parseInt(rangeMatch[1], 10);
+      } else if (batchMatch) {
+        const b = parseInt(batchMatch[1], 10);
+        startPartNum = (b - 1) * BATCH_SIZE + 1;
+      } else if (pureNumMatch) {
+        const n = parseInt(pureNumMatch[1], 10);
+        if (n > 1 && n <= totalParts) {
+          startPartNum = n;
+        }
+      }
+
+      if (startPartNum < 1) startPartNum = 1;
+      if (startPartNum > totalParts) startPartNum = totalParts;
+      const endPartNum = Math.min(startPartNum + BATCH_SIZE - 1, totalParts);
+      const batchCount = endPartNum - startPartNum + 1;
+
       // 1. Send Game Overview Poster to User's Private Chat
       const gameCaption =
 `🎮 *${gameTitle}*
 ━━━━━━━━━━━━━━━━━━━━
 📦 *Pack Type:* FitGirl Repack Archive (Direct Private Delivery)
-🔢 *Total Parts:* ${totalParts} RAR Parts (~500MB each)
+🔢 *Batch Delivery:* Parts ${startPartNum} – ${endPartNum} (${batchCount} Parts)
+📊 *Total Parts in Game:* ${totalParts} RAR Parts (~500MB each)
 💾 *Repack Size:* ${gameData.repack_size || "Full Repack"}
 💾 *Original Size:* ${gameData.original_size || "N/A"}
 👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
 🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
 🔑 *Token:* ${token || "VIP_GAME"}
 ━━━━━━━━━━━━━━━━━━━━
-⚡ _Part 1 සිට Part ${totalParts} දක්වා පිළිවෙළින් බාගත වී මෙම Chat එකට ලැබෙනු ඇත. සියලුම කොටස් ලැබෙන තුරු කරුණාකර රැඳී සිටින්න!_`;
+⚡ _Part ${startPartNum} සිට Part ${endPartNum} දක්වා පිළිවෙළින් බාගත වී මෙම Chat එකට ලැබෙනු ඇත. සියලුම කොටස් ලැබෙන තුරු කරුණාකර රැඳී සිටින්න!_`;
 
       if (posterUrl) {
         await waSocket.sendMessage(directTarget, {
@@ -770,15 +800,16 @@ async function processQueue() {
         });
       }
 
-      // 2. Deliver each part sequentially to the user's private chat
+      // 2. Deliver each part in this 10-part batch sequentially to the user's private chat
       let deliveredCount = 0;
-      for (let pIdx = 0; pIdx < gameData.parts.length; pIdx++) {
-        const partObj = gameData.parts[pIdx];
-        const partNumber = pIdx + 1;
+      for (let pNum = startPartNum; pNum <= endPartNum; pNum++) {
+        const pIdx = pNum - 1;
+        const partObj = gameData.parts[pIdx] || {};
+        const partNumber = pNum;
         const partFileName = partObj.filename || `${gameTitle}.part${partNumber}.rar`;
         const tempPartPath = path.join(__dirname, `../temp_game_${Date.now()}_part${partNumber}.rar`);
 
-        logger.info(`[Game Engine] (${partNumber}/${totalParts}) Downloading ${partFileName} for ${directTarget}...`);
+        logger.info(`[Game Engine] (${partNumber}/${totalParts}) [Batch: ${startPartNum}-${endPartNum}] Downloading ${partFileName} for ${directTarget}...`);
 
         let partDownloadSuccess = false;
         const candidateUrls = [partObj.url, partObj.filekeeper_url, partObj.fuckingfast_url, partObj.datanodes_url]
@@ -863,17 +894,25 @@ async function processQueue() {
         }
       }
 
-      // 3. Final summary to user's private chat
+      // 3. Final summary to user's private chat with next-batch link
+      let nextBatchNotice = "";
+      if (endPartNum < totalParts) {
+        const nextStart = endPartNum + 1;
+        const nextEnd = Math.min(nextStart + BATCH_SIZE - 1, totalParts);
+        nextBatchNotice = `\n━━━━━━━━━━━━━━━━━━━━\n⚡ *ඊළඟ කොටස් (Parts ${nextStart}–${nextEnd}):*\nඉතිරි කොටස් ලබා ගැනීමට කරුණාකර අපගේ වෙබ් අඩවියට පිවිස ඊළඟ Batch එක Request කරන්න:\n👉 https://fitgirl-web.vercel.app`;
+      }
+
       await waSocket.sendMessage(directTarget, {
         text:
 `✅ *[FilmFeed Games - Repack Completed!]*
 ━━━━━━━━━━━━━━━━━━━━
 🎮 *${gameTitle}*
-📦 Delivered: *${deliveredCount} / ${totalParts} Parts*
+📦 Delivered: *${deliveredCount} / ${batchCount} Parts in Batch* (Parts ${startPartNum}–${endPartNum})
+📊 Total Game Parts: *${totalParts} Parts*
 💡 *Instructions:*
-1. Download all ${totalParts} RAR parts to the same folder on your PC.
+1. Download all RAR parts of the game to the same folder on your PC.
 2. Right click *Part 1* -> Extract Here (WinRAR / 7-Zip).
-3. Open the extracted folder and run setup.exe to install and play!
+3. Open the extracted folder and run setup.exe to install and play!${nextBatchNotice}
 ━━━━━━━━━━━━━━━━━━━━
 🍿 FilmFeed Games 4K Portal: https://fitgirl-web.vercel.app`,
       });

@@ -176,55 +176,72 @@ def resolve_filekeeper_direct(fk_url: str) -> Optional[str]:
     """
     Resolve a filekeeper.net link directly to signed download URL.
     Bypasses countdown, posts form, and extracts 302 redirect location.
+    Uses curl_cffi with chrome124 impersonation and retry logic to avoid TLS timeouts.
     """
-    try:
-        import requests
-        from bs4 import BeautifulSoup
+    clean_url = fk_url.split("#")[0].strip()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer": clean_url,
+    }
 
-        clean_url = fk_url.split("#")[0].strip()
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Referer": clean_url,
-        }
-        s = requests.Session()
-        r1 = s.get(clean_url, headers=headers, timeout=20)
-        if r1.status_code != 200:
-            return None
+    for attempt in range(1, 4):
+        try:
+            from bs4 import BeautifulSoup
 
-        soup = BeautifulSoup(r1.text, "html.parser")
-        el = soup.find(id="download-countdown")
-        if not el:
-            return None
+            s = None
+            if HAS_CURL_CFFI:
+                s = cffi_requests.Session(impersonate="chrome124")
+            else:
+                import requests
+                s = requests.Session()
 
-        code = el.get("data-code")
-        rand = el.get("data-rand") or ""
-        referer = el.get("data-referer") or ""
-        method = el.get("data-method") or "Free download"
-        countdown = int(el.get("data-countdown") or "5")
+            r1 = s.get(clean_url, headers=headers, timeout=25)
+            if r1.status_code != 200:
+                time.sleep(1)
+                continue
 
-        if countdown > 0:
-            time.sleep(countdown)
+            soup = BeautifulSoup(r1.text, "html.parser")
+            el = soup.find(id="download-countdown")
+            if not el:
+                # Try finding direct rar link in initial page
+                for a in soup.find_all("a", href=True):
+                    if any(ext in a["href"].lower() for ext in [".rar", "/download/"]):
+                        return a["href"]
+                time.sleep(1)
+                continue
 
-        data = {
-            "op": "download2",
-            "id": code,
-            "rand": rand,
-            "referer": referer,
-            "method_free": method,
-            "down_direct": "1",
-        }
-        r2 = s.post(clean_url, data=data, headers=headers, allow_redirects=False, timeout=20)
-        direct_url = r2.headers.get("Location")
-        if direct_url and direct_url.startswith("http"):
-            return direct_url
+            code = el.get("data-code")
+            rand = el.get("data-rand") or ""
+            referer = el.get("data-referer") or ""
+            method = el.get("data-method") or "Free download"
+            countdown = int(el.get("data-countdown") or "5")
 
-        if r2.status_code == 200:
-            soup2 = BeautifulSoup(r2.text, "html.parser")
-            for a in soup2.find_all("a", href=True):
-                if any(ext in a["href"].lower() for ext in [".rar", "/download/"]):
-                    return a["href"]
-    except Exception as e:
-        console.print(f"[yellow]  FileKeeper resolver notice: {e}[/yellow]")
+            if countdown > 0:
+                time.sleep(countdown)
+
+            data = {
+                "op": "download2",
+                "id": code,
+                "rand": rand,
+                "referer": referer,
+                "method_free": method,
+                "down_direct": "1",
+            }
+            r2 = s.post(clean_url, data=data, headers=headers, allow_redirects=False, timeout=25)
+            direct_url = r2.headers.get("Location")
+            if direct_url and direct_url.startswith("http"):
+                return direct_url
+
+            if r2.status_code == 200:
+                soup2 = BeautifulSoup(r2.text, "html.parser")
+                for a in soup2.find_all("a", href=True):
+                    if any(ext in a["href"].lower() for ext in [".rar", "/download/"]):
+                        return a["href"]
+
+        except Exception as e:
+            console.print(f"[yellow]  FileKeeper resolver notice (attempt {attempt}/3): {e}[/yellow]")
+            time.sleep(1)
+
     return None
 
 
@@ -545,7 +562,8 @@ async def download_single_part(ff_url: str, dest_path: Path):
 
         # Attempt 1: Fast asynchronous streaming via aiohttp
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=7200)) as session:
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=7200)) as session:
                 async with session.get(direct_url, headers=HEADERS) as resp:
                     if resp.status in (200, 206):
                         async with aiofiles.open(dest_path, "wb") as f:
@@ -559,7 +577,7 @@ async def download_single_part(ff_url: str, dest_path: Path):
         if not download_ok:
             try:
                 import requests
-                with requests.get(direct_url, headers=HEADERS, stream=True, timeout=7200) as r:
+                with requests.get(direct_url, headers=HEADERS, stream=True, verify=False, timeout=7200) as r:
                     if r.status_code in (200, 206):
                         with open(dest_path, "wb") as f:
                             for chunk in r.iter_content(chunk_size=CHUNK):
@@ -572,7 +590,7 @@ async def download_single_part(ff_url: str, dest_path: Path):
         # Attempt 3: Fallback streaming via curl_cffi with Chrome TLS impersonation
         if not download_ok and HAS_CURL_CFFI:
             try:
-                s = cffi_requests.Session(impersonate="chrome124")
+                s = cffi_requests.Session(impersonate="chrome124", verify=False)
                 r = s.get(direct_url, headers=HEADERS, stream=True, timeout=7200)
                 if r.status_code in (200, 206):
                     with open(dest_path, "wb") as f:
