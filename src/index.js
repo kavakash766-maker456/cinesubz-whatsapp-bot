@@ -1107,7 +1107,7 @@ async function startBot() {
     retryRequestDelayMs: 5000,
     maxMsgRetryCount: 3,
     getMessage: async (key) => {
-      return { conversation: "" };
+      return undefined;
     },
   });
 
@@ -1248,6 +1248,22 @@ async function startBot() {
       logger.info(`✅ FilmFeed Bot Connected successfully! Active on: ${BOT_PHONE}`);
       logger.info(`🎯 Target Group: ${TARGET_GROUP_JID}`);
       await cloudSession.sync();
+      const ghToken = process.env.GH_PAT || process.env.GITHUB_TOKEN;
+      const vaultId = process.env.SESSION_VAULT_ID || "8f37b6dbcf07ff6fab07b21cc8cbe05b";
+      if (ghToken && vaultId) {
+        axios.patch(`https://api.github.com/gists/${vaultId}`, {
+          files: {
+            "latest_qr.txt": { content: "CONNECTED_OK: " + new Date().toISOString() },
+          },
+        }, {
+          headers: {
+            Authorization: "Bearer " + ghToken,
+            Accept: "application/vnd.github+json",
+            "User-Agent": "FilmFeed-QR",
+          },
+          timeout: 8000,
+        }).catch(() => {});
+      }
       try {
         const credsPath = path.join(AUTH_DIR, "creds.json");
         if (fs.existsSync(credsPath)) {

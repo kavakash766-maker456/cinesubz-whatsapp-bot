@@ -139,7 +139,6 @@ class CloudSession {
 
       let restoredCount = 0;
       for (const [fname, content] of Object.entries(files)) {
-        if (fname.startsWith("session-") || fname.startsWith("sender-key-")) continue;
         fs.writeFileSync(path.join(this.authDir, fname), content, "utf8");
         restoredCount++;
       }
@@ -221,13 +220,7 @@ class CloudSession {
         } catch (_) {}
       }
 
-      const fileNames = fs.readdirSync(this.authDir).filter((f) => {
-        if (!f.endsWith(".json")) return false;
-        // Never sync ephemeral chat sessions or group sender keys.
-        // Stale sessions from prior runs cause permanent "Bad MAC" signal decryption errors.
-        if (f.startsWith("session-") || f.startsWith("sender-key-")) return false;
-        return true;
-      });
+      const fileNames = fs.readdirSync(this.authDir).filter((f) => f.endsWith(".json"));
       if (fileNames.length === 0) {
         return;
       }
