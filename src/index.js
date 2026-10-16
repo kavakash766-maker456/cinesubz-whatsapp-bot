@@ -812,7 +812,7 @@ async function processQueue() {
         logger.info(`[Game Engine] (${partNumber}/${totalParts}) [Batch: ${startPartNum}-${endPartNum}] Downloading ${partFileName} for ${directTarget}...`);
 
         let partDownloadSuccess = false;
-        const candidateUrls = [partObj.url, partObj.filekeeper_url, partObj.fuckingfast_url, partObj.datanodes_url]
+        const candidateUrls = [partObj.fuckingfast_url, partObj.url, partObj.filekeeper_url, partObj.datanodes_url]
           .filter(Boolean)
           .filter((v, i, a) => a.indexOf(v) === i);
 

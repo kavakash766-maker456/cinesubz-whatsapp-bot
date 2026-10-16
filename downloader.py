@@ -131,44 +131,47 @@ def resolve_fuckingfast_direct(ff_url: str) -> Optional[str]:
     """
     if not HAS_CURL_CFFI:
         return None
-    try:
-        clean_url = ff_url.split("#")[0].strip()
-        code_match = re.search(r"fuckingfast\.co/([a-zA-Z0-9_-]+)", clean_url)
-        if not code_match:
-            return None
-        code = code_match.group(1)
+    clean_url = ff_url.split("#")[0].strip()
+    code_match = re.search(r"fuckingfast\.co/([a-zA-Z0-9_-]+)", clean_url)
+    if not code_match:
+        return None
+    code = code_match.group(1)
 
-        s = cffi_requests.Session(impersonate="chrome124")
-        r1 = s.get(f"https://fuckingfast.co/{code}", timeout=15)
-        if r1.status_code != 200:
-            return None
+    for attempt in range(1, 4):
+        try:
+            s = cffi_requests.Session(impersonate="chrome124")
+            r1 = s.get(f"https://fuckingfast.co/{code}", timeout=15)
+            if r1.status_code != 200:
+                time.sleep(1)
+                continue
 
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept": "*/*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "HX-Request": "true",
-            "HX-Current-URL": f"https://fuckingfast.co/{code}",
-            "Origin": "https://fuckingfast.co",
-            "Referer": f"https://fuckingfast.co/{code}",
-            "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124"',
-            "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Ch-Ua-Platform": '"Windows"',
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-origin",
-        }
-        r2 = s.post(f"https://fuckingfast.co/f/{code}/go", headers=headers, data="", timeout=15)
-        direct_url = r2.headers.get("hx-redirect") or r2.headers.get("location")
-        if direct_url and "dl." in direct_url:
-            return direct_url
-        if r2.text:
-            m = re.search(r'(https://dl\.fuckingfast\.co/[^\s"\'<>]+)', r2.text)
-            if m:
-                return m.group(1)
-    except Exception as e:
-        console.print(f"[yellow]  curl_cffi direct resolver notice: {e}[/yellow]")
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept": "*/*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "HX-Request": "true",
+                "HX-Current-URL": f"https://fuckingfast.co/{code}",
+                "Origin": "https://fuckingfast.co",
+                "Referer": f"https://fuckingfast.co/{code}",
+                "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin",
+            }
+            r2 = s.post(f"https://fuckingfast.co/f/{code}/go", headers=headers, data="", timeout=15)
+            direct_url = r2.headers.get("hx-redirect") or r2.headers.get("location")
+            if direct_url and "dl." in direct_url:
+                return direct_url
+            if r2.text:
+                m = re.search(r'(https://dl\.fuckingfast\.co/[^\s"\'<>]+)', r2.text)
+                if m:
+                    return m.group(1)
+        except Exception as e:
+            console.print(f"[yellow]  curl_cffi direct resolver notice (attempt {attempt}/3): {e}[/yellow]")
+            time.sleep(1)
     return None
 
 
@@ -246,16 +249,16 @@ def resolve_filekeeper_direct(fk_url: str) -> Optional[str]:
 
 
 def resolve_direct_url(url: str) -> Optional[str]:
-    """Auto-detect host (FileKeeper, FuckingFast, Direct) and resolve to direct signed download URL."""
+    """Auto-detect host (FuckingFast, FileKeeper, Direct) and resolve to direct signed download URL."""
     if not url:
         return None
     url_lower = url.lower()
-    if "filekeeper" in url_lower:
-        direct = resolve_filekeeper_direct(url)
-        if direct:
-            return direct
     if "fuckingfast" in url_lower:
         direct = resolve_fuckingfast_direct(url)
+        if direct:
+            return direct
+    if "filekeeper" in url_lower:
+        direct = resolve_filekeeper_direct(url)
         if direct:
             return direct
     if any(ext in url_lower for ext in [".rar", "/download/", "dl."]) and not any(h in url_lower for h in ["fuckingfast.co/", "filekeeper.net/"]):
