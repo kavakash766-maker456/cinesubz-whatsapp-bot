@@ -812,7 +812,10 @@ async function processQueue() {
         logger.info(`[Game Engine] (${partNumber}/${totalParts}) [Batch: ${startPartNum}-${endPartNum}] Downloading ${partFileName} for ${directTarget}...`);
 
         let partDownloadSuccess = false;
-        const candidateUrls = [partObj.fuckingfast_url, partObj.filekeeper_url, partObj.datanodes_url, partObj.url]
+        const candidateUrls = [
+          partObj.fuckingfast_url,
+          (partObj.url && partObj.url.includes("fuckingfast")) ? partObj.url : null
+        ]
           .filter(Boolean)
           .filter((v, i, a) => a.indexOf(v) === i);
 
@@ -878,7 +881,7 @@ async function processQueue() {
 
             await waSocket.sendMessage(directTarget, {
               text: `⚠️ *[FilmFeed Games - Part ${partNumber}/${totalParts}]* (${fileSizeMB}MB)\n${partFileName}\n\n📌 Upload Error: WhatsApp සර්වර් මඟින් ගොනුව ප්‍රතික්ෂේප විය (${uploadErr.message}). පහතින් Direct Download කරගන්න:\n🔗 Direct Download: ${directSignedLink}`,
-            });
+            }, { linkPreview: null });
           } finally {
             if (fs.existsSync(tempPartPath)) {
               fs.unlinkSync(tempPartPath);
@@ -908,7 +911,7 @@ async function processQueue() {
 
           await waSocket.sendMessage(directTarget, {
             text: `⚠️ *[FilmFeed Games - Part ${partNumber}/${totalParts}]*\n${partFileName}\n🔗 Direct Download: ${directSignedLink}`,
-          });
+          }, { linkPreview: null });
         }
 
         await new Promise((r) => setTimeout(r, 1000));
@@ -1390,7 +1393,7 @@ async function startBot() {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
-    generateHighQualityLinkPreview: true,
+    generateHighQualityLinkPreview: false,
     browser: Browsers.ubuntu("Chrome"),
     keepAliveIntervalMs: 25000,
     syncFullHistory: false,

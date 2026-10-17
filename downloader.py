@@ -277,9 +277,15 @@ def resolve_direct_url(url: str) -> Optional[str]:
 
 async def resolve_one(ff_url: str, browser_ctx) -> Optional[str]:
     """
-    Open a fuckingfast.co share page, handle Cloudflare + HTMX two-click flow,
-    and return the final dl.fuckingfast.co signed download URL.
+    Open a fuckingfast.co share page, wait for Cloudflare & Turnstile verification,
+    and fetch /f/{code}/go to return the direct dl.fuckingfast.co URL.
     """
+    clean_url = ff_url.split("#")[0].strip()
+    code_match = re.search(r"fuckingfast\.co/([a-zA-Z0-9_-]+)", clean_url)
+    if not code_match:
+        return None
+    file_id = code_match.group(1)
+
     page = await browser_ctx.new_page()
     try:
         await apply_stealth(page)
@@ -287,57 +293,113 @@ async def resolve_one(ff_url: str, browser_ctx) -> Optional[str]:
 
         # Intercept network responses for the HX-Redirect header or direct RAR redirect
         async def on_response(resp):
-            hx = resp.headers.get("hx-redirect", "")
-            loc = resp.headers.get("location", "")
+            hx = resp.headers.get("hx-redirect") or ""
+            loc = resp.headers.get("location") or ""
             for val in (hx, loc):
-                if val and ("dl." in val or ".rar" in val.lower()):
+                if val and ("dl.fuckingfast" in val or "dl." in val):
                     direct.append(val)
-            # Also catch 302 → direct URLs
             if resp.status in (301, 302, 303, 307, 308):
-                loc2 = resp.headers.get("location", "")
+                loc2 = resp.headers.get("location") or ""
                 if loc2 and "dl." in loc2:
                     direct.append(loc2)
 
         page.on("response", on_response)
 
-        await page.goto(ff_url, timeout=60_000, wait_until="domcontentloaded")
+        # 1. Navigate to page
+        await page.goto(clean_url, timeout=60_000, wait_until="domcontentloaded")
 
-        # Wait for Cloudflare to pass (page has actual content)
+        # 2. Wait for Cloudflare "Just a moment" challenge to clear
+        for _ in range(25):
+            title = await page.title()
+            body_text = await page.evaluate("() => document.body ? document.body.innerText : ''")
+            if "Just a moment" not in title and "Verifying you are human" not in body_text:
+                break
+            await asyncio.sleep(1)
+
+        # 3. Wait for Turnstile token
+        turnstile_token = ""
+        for i in range(25):
+            try:
+                turnstile_token = await page.evaluate("""() => {
+                    return (
+                        window.turnstileToken ||
+                        document.querySelector('[name="cf-turnstile-response"]')?.value ||
+                        ''
+                    );
+                }""")
+                if turnstile_token and len(turnstile_token) > 20:
+                    break
+            except Exception:
+                pass
+
+            # Nudge widget if present
+            if i == 5:
+                try:
+                    w = await page.query_selector("#cf-turnstile, iframe[src*='challenges.cloudflare']")
+                    if w:
+                        await w.click()
+                except Exception:
+                    pass
+            await asyncio.sleep(1)
+
+        # 4. Request /go directly inside page context using the cleared session & token
         try:
-            await page.wait_for_selector(
-                'button[hx-post], [hx-post], button:has-text("Download"), a:has-text("Download")',
-                timeout=20_000
-            )
-        except Exception:
-            pass  # continue anyway
+            go_res = await page.evaluate(f"""async () => {{
+                try {{
+                    const resp = await fetch('/f/{file_id}/go', {{
+                        method: 'POST',
+                        headers: {{
+                            'content-type': 'application/x-www-form-urlencoded',
+                            'hx-request': 'true',
+                            'hx-current-url': location.href,
+                            'referer': location.href
+                        }},
+                        body: new URLSearchParams({{ 'cf-turnstile-response': {json.dumps(turnstile_token or '')} }})
+                    }});
+                    const red = resp.headers.get('HX-Redirect') || resp.headers.get('hx-redirect') || resp.headers.get('location');
+                    const text = await resp.text();
+                    return {{ redirect: red, text: text }};
+                }} catch (e) {{
+                    return {{ error: e.toString() }};
+                }}
+            }}""")
+            if isinstance(go_res, dict):
+                red = go_res.get("redirect")
+                if red and ("dl." in red or "http" in red):
+                    return red
+                if go_res.get("text"):
+                    m = re.search(r'(https://dl\.fuckingfast\.co/[^"\'<>\s]+)', go_res["text"])
+                    if m:
+                        return m.group(1)
+        except Exception as e:
+            console.print(f"[yellow]page.evaluate fetch error: {e}[/yellow]")
 
-        # --- Click 1: dismisses ad popup, starts first HTMX request ---
-        btn = await page.query_selector('button[hx-post], [hx-post]')
+        # 5. Fallback: UI click flow
+        btn = await page.query_selector('a.link-button, button[hx-post], a[hx-post], [hx-post]')
         if btn:
             await btn.click()
             await asyncio.sleep(2)
 
-        # Close any popup/ad that opened
-        pages = browser_ctx.pages
-        if len(pages) > 1:
-            for p in pages[1:]:
-                await p.close()
+        # Close any ad popups
+        for pop in browser_ctx.pages[1:]:
+            try:
+                await pop.close()
+            except Exception:
+                pass
 
-        # Check if we already got it
         if direct:
             return direct[0]
 
-        # --- Click 2: second click triggers actual download stream / HX-Redirect ---
-        await asyncio.sleep(1)
-        btn = await page.query_selector('button[hx-post], [hx-post]')
-        if btn:
-            await btn.click()
+        # Second click on original page
+        btn2 = await page.query_selector('a.link-button, button[hx-post], a[hx-post], [hx-post]')
+        if btn2:
+            await btn2.click()
             await asyncio.sleep(3)
 
         if direct:
             return direct[0]
 
-        # Fallback: look for dl. link anywhere in the page source
+        # Check page HTML for dl link
         content = await page.content()
         dl_m = re.search(r'(https://dl\.fuckingfast\.co/[^"\'<>\s]+)', content)
         if dl_m:

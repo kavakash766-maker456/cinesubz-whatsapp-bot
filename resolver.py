@@ -381,7 +381,7 @@ def scrape_movie(url: str, log=sys.stderr.write):
     if not entries:
         for a in root.find_all(tag="a"):
             href = a.attrs.get("href", "")
-            if "/zt-links/" in href or "/zt-" in href:
+            if "/zt-links/" in href or "/zt-" in href or "/api-" in href or ("/api" in href and "cinesubz" in href):
                 text = a.text().strip()
                 parent_text = a.parent.text().strip() if a.parent else text
                 m = re.search(r"([\d.]+)\s*(GB|MB|TB|KB)", parent_text, re.I)
@@ -459,18 +459,23 @@ def map_zt_href(original: str, zt_html: str) -> str:
 def get_drive_url(zt_url: str):
     body, _, _ = http_get(zt_url)
     html = body.decode("utf-8", "replace")
-    m = re.search(r'<a id="link" href="([^"]+)"', html)
+    m = re.search(r'<a[^>]+id=["\']link["\'][^>]+href=["\']([^"\']+)["\']', html) or re.search(r'<a[^>]+href=["\']([^"\']+)["\'][^>]+id=["\']link["\']', html) or re.search(r'<a id="link" href="([^"]+)"', html)
+    parent_url = None
+    m_prev = re.search(r'<a[^>]+class=["\'][^"\']*prev-lnk[^"\']*["\'][^>]+href=["\']([^"\']+)["\']', html) or re.search(r'<a[^>]+href=["\']([^"\']+)["\'][^>]+class=["\'][^"\']*prev-lnk[^"\']*["\']', html)
+    if m_prev:
+        parent_url = m_prev.group(1).strip()
+
     if not m:
-        return {"kind": "error", "url": None, "reason": "no #link on zt page"}
+        return {"kind": "error", "url": None, "reason": "no #link on zt page", "parent_url": parent_url}
     original = m.group(1)
     mapped = map_zt_href(original, html)
     if re.match(r"https?://(www\.)?(telegram\.me|t\.me)/", mapped):
-        return {"kind": "telegram", "url": mapped, "original": original}
+        return {"kind": "telegram", "url": mapped, "original": original, "parent_url": parent_url}
 
     parts = urllib.parse.urlsplit(mapped)
     bare = urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
     urls = [bare] if bare == mapped or not parts.query else [bare, mapped]
-    return {"kind": "direct", "url": bare, "urls": urls, "original": original}
+    return {"kind": "direct", "url": bare, "urls": urls, "original": original, "parent_url": parent_url}
 
 
 def _resolve_one(drive_url: str):
@@ -579,6 +584,111 @@ def make_thumbnail_b64(image_url: str) -> str:
         return ""
 
 
+def resolve_baiscopes_movie(movie_url: str, requested_quality: str = None):
+    """Scrapes Baiscopes.lk page directly for intermediate/direct download links, with SinhalaSub/CineSubz fallbacks."""
+    body, _, final_url = http_get(movie_url)
+    html = body.decode("utf-8", "replace")
+    root = parse_html(html)
+
+    title = ""
+    h1 = root.find(tag="h1")
+    if h1:
+        title = re.split(r"\s*\|\s*", h1.text())[0].strip()
+    if not title:
+        title = movie_url.rstrip("/").split("/")[-1].replace("-", " ").title()
+
+    poster = ""
+    p_img = root.find(cls="poster")
+    if p_img:
+        img_el = p_img.find(tag="img")
+        if img_el:
+            poster = img_el.attrs.get("data-src") or img_el.attrs.get("src") or ""
+    if not poster:
+        m_og = re.search(r'property=["\']og:image["\']\s+content=["\']([^"\']+)', html)
+        if m_og:
+            poster = m_og.group(1).strip()
+
+    dl_links = []
+    for row in root.find_all(tag="tr"):
+        a_tag = row.find(tag="a")
+        if not a_tag:
+            continue
+        href = a_tag.attrs.get("href", "")
+        if "/links/" in href or ("baiscopes.lk" not in href and any(x in href.lower() for x in ["pixeldrain", "supercloud", "drive.google", ".mp4", ".mkv"])):
+            dl_links.append(href)
+
+    if not dl_links:
+        for a in root.find_all(tag="a"):
+            href = a.attrs.get("href", "")
+            if "/links/" in href:
+                dl_links.append(href)
+
+    for intermediate_url in dl_links:
+        if "/links/" in intermediate_url:
+            try:
+                i_body, _, _ = http_get(intermediate_url)
+                i_html = i_body.decode("utf-8", "replace")
+                i_root = parse_html(i_html)
+                for a in i_root.find_all(tag="a"):
+                    href = a.attrs.get("href", "")
+                    txt = a.text().lower()
+                    if ("download" in txt or "click here" in txt or "file" in txt) and href.startswith("http") and "baiscopes.lk" not in href:
+                        thumb = make_thumbnail_b64(poster)
+                        return {
+                            "success": True,
+                            "title": title,
+                            "poster": poster,
+                            "backdrop": poster,
+                            "thumbnail_b64": thumb,
+                            "quality": requested_quality or "720p",
+                            "size_text": "",
+                            "direct_url": href,
+                        }
+            except Exception:
+                pass
+        elif intermediate_url.startswith("http"):
+            thumb = make_thumbnail_b64(poster)
+            return {
+                "success": True,
+                "title": title,
+                "poster": poster,
+                "backdrop": poster,
+                "thumbnail_b64": thumb,
+                "quality": requested_quality or "720p",
+                "size_text": "",
+                "direct_url": intermediate_url,
+            }
+
+    # Fallback: Search SinhalaSub then CineSubz
+    clean_name = re.sub(r"(sinhala\s*subtitles?|සිංහල\s*උපසිරැසි.*|\b(19\d\d|20\d\d)\b)", "", title, flags=re.I).strip()
+    if clean_name:
+        try:
+            from sinhalasub_resolver import search_sinhalasub, resolve_sinhalasub_movie
+            sh_cands = search_sinhalasub(clean_name)
+            if sh_cands:
+                res = resolve_sinhalasub_movie(sh_cands[0]["url"], requested_quality)
+                if res.get("success"):
+                    res["fallback_from"] = "Baiscopes"
+                    return res
+        except Exception:
+            pass
+
+        try:
+            s_body, _, _ = http_get(f"https://cinesubz.lk/?s={urllib.parse.quote(clean_name)}")
+            s_root = parse_html(s_body.decode("utf-8", "replace"))
+            for a in s_root.find_all(tag="a"):
+                href = a.attrs.get("href", "")
+                if "/movies/" in href and not href.endswith("/movies/"):
+                    res = resolve_direct_link(href, requested_quality, _depth=1)
+                    if res.get("success"):
+                        res["fallback_from"] = "Baiscopes"
+                        return res
+        except Exception:
+            pass
+
+    return {"error": f"No download links found on Baiscopes page: {movie_url}"}
+
+
 def resolve_direct_link(
     movie_url: str, requested_quality: str = None, _depth: int = 0
 ):
@@ -591,22 +701,26 @@ def resolve_direct_link(
             return {"error": f"Sinhalasub resolver error: {e}"}
 
     if "baiscope" in movie_url:
-        clean_name = movie_url.rstrip("/").split("/")[-1].replace("-", " ")
-        clean_name = re.sub(r"(sinhala\s*subtitles?|සිංහල\s*උපසිරැසි.*|\b(19\d\d|20\d\d)\b)", "", clean_name, flags=re.I).strip()
         try:
-            from sinhalasub_resolver import search_sinhalasub, resolve_sinhalasub_movie
-            sh_cands = search_sinhalasub(clean_name)
-            if sh_cands:
-                return resolve_sinhalasub_movie(sh_cands[0]["url"], requested_quality)
-        except Exception:
+            return resolve_baiscopes_movie(movie_url, requested_quality)
+        except Exception as e:
             pass
 
-    # Direct zt-links or intermediate redirect link support
-    is_zt = "/zt-links/" in movie_url or "?r=" in movie_url or "cinesubz.net/zt-" in movie_url or "cinesubz.lk/zt-" in movie_url
+    # Direct zt-links or intermediate redirect link support (/zt-links/, /api-, /zt-, ?r=)
+    is_zt = (
+        "/zt-links/" in movie_url
+        or "?r=" in movie_url
+        or "cinesubz.net/zt-" in movie_url
+        or "cinesubz.lk/zt-" in movie_url
+        or "/api-" in movie_url
+        or ("cinesubz" in movie_url and ("/api" in movie_url or len(movie_url.split("/")) <= 5))
+    )
     if is_zt:
         found_link = None
         try:
             got = get_drive_url(movie_url)
+            if got.get("parent_url"):
+                found_link = got["parent_url"]
             if got.get("kind") == "telegram":
                 return {
                     "success": True,
@@ -752,6 +866,19 @@ def resolve_direct_link(
                         if res.get("success"):
                             res["fallback_from"] = "CineSubz"
                             return res
+                except Exception:
+                    pass
+                try:
+                    b_path = os.path.join(os.path.dirname(__file__), "../web/src/data/baiscopes_movies.json")
+                    if os.path.exists(b_path):
+                        with open(b_path, "r", encoding="utf-8") as bf:
+                            b_items = json.load(bf)
+                            for bi in b_items:
+                                if clean_name.lower() in (bi.get("title") or "").lower():
+                                    res = resolve_baiscopes_movie(bi["url"], requested_quality)
+                                    if res.get("success"):
+                                        res["fallback_from"] = "CineSubz"
+                                        return res
                 except Exception:
                     pass
         return {"error": "No download links found on movie page", "movie": movie}
