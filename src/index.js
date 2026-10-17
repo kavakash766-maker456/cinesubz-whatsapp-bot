@@ -368,59 +368,53 @@ async function resolveSeriesEpisodes(seriesUrl) {
   });
 }
 
-async function resolveGameRepack(gameUrl) {
-  return new Promise((resolve, reject) => {
-    const resolverScript = path.join(__dirname, "../fitgirl_resolver.py");
-    const pythonCmd = process.platform === "win32" ? "python" : "python3";
-    execFile(pythonCmd, [resolverScript, gameUrl], { maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) {
-        logger.error({ err, stderr }, "FitGirl Game resolver error");
-        return reject(err);
-      }
-      try {
-        const data = JSON.parse(stdout);
-        resolve(data);
-      } catch (parseErr) {
-        logger.error({ stdout, stderr }, "Failed to parse FitGirl resolver JSON");
-        reject(parseErr);
-      }
-    });
-  });
-}
+const TMDB_API_KEY = process.env.TMDB_API_KEY || "b6524bb48fb309af7e940a074a363851";
 
-async function downloadGamePart(url, destPath) {
-  return new Promise((resolve, reject) => {
-    const downloaderScript = path.join(__dirname, "../downloader.py");
-    const pythonCmd = process.platform === "win32" ? "python" : "python3";
-    const args = [downloaderScript, "--download-part", url, "--dest", destPath];
+async function getTmdbMediaDetails(title, isTv = false, year = null) {
+  if (!title) return null;
+  try {
+    let clean = title
+      .replace(/\[.*?\]|\(.*?\)/g, " ")
+      .replace(/sinhala\s*subtitles?|sinhala\s*sub|සිංහල\s*උපසිරැසි.*/gi, " ")
+      .replace(/\b(1080p|720p|480p|360p|2160p|4k|web-dl|bluray|hdrip|dvdrip|x264|x265|hevc|aac)\b/gi, " ")
+      .replace(/[-_.]+/g, " ")
+      .trim();
 
-    logger.info(`[Game Downloader] Invoking Playwright stealth downloader for part: ${url}`);
-    execFile(pythonCmd, args, { maxBuffer: 20 * 1024 * 1024, timeout: 900000 }, (err, stdout, stderr) => {
-      if (err) {
-        logger.error({ err, stderr }, "Game part downloader error");
-        return reject(err);
-      }
-      try {
-        const lines = stdout.trim().split("\n");
-        let parsed = null;
-        for (let i = lines.length - 1; i >= 0; i--) {
-          try {
-            parsed = JSON.parse(lines[i].trim());
-            break;
-          } catch (_) {}
-        }
-        if (parsed && parsed.success && fs.existsSync(destPath) && fs.statSync(destPath).size > 100000) {
-          logger.info(`[Game Downloader] Part downloaded successfully! Size: ${Math.round(parsed.size / 1024 / 1024)}MB`);
-          resolve(parsed);
-        } else {
-          reject(new Error(parsed?.error || stderr || "Failed to download game RAR part"));
-        }
-      } catch (parseErr) {
-        logger.error({ stdout, stderr }, "Failed to parse downloader JSON");
-        reject(parseErr);
-      }
-    });
-  });
+    const yMatch = title.match(/\b(19\d\d|20\d\d)\b/);
+    const searchYear = year || (yMatch ? yMatch[1] : null);
+    clean = clean.replace(/\b(19\d\d|20\d\d)\b/g, "").trim();
+
+    const endpoint = isTv ? "search/tv" : "search/movie";
+    let url = `https://api.themoviedb.org/3/${endpoint}?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(clean)}`;
+    if (searchYear) {
+      url += isTv ? `&first_air_date_year=${searchYear}` : `&year=${searchYear}`;
+    }
+
+    const res = await axios.get(url, { timeout: 8000 });
+    let results = res.data?.results || [];
+    if (results.length === 0 && searchYear) {
+      const retryUrl = `https://api.themoviedb.org/3/${endpoint}?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(clean)}`;
+      const retryRes = await axios.get(retryUrl, { timeout: 8000 });
+      results = retryRes.data?.results || [];
+    }
+
+    if (results.length > 0) {
+      const top = results[0];
+      const poster = top.poster_path ? `https://image.tmdb.org/t/p/w780${top.poster_path}` : null;
+      const backdrop = top.backdrop_path ? `https://image.tmdb.org/t/p/original${top.backdrop_path}` : null;
+      return {
+        title: top.title || top.name || clean,
+        overview: top.overview || "",
+        releaseDate: top.release_date || top.first_air_date || "",
+        voteAverage: top.vote_average || 0,
+        poster,
+        backdrop,
+      };
+    }
+  } catch (err) {
+    logger.warn(`TMDb lookup notice: ${err.message}`);
+  }
+  return null;
 }
 
 async function downloadGDriveFile(url, destPath, quality = null) {
@@ -667,7 +661,6 @@ async function processQueue() {
   currentProcessingItem = currentTask;
 
   const {
-    isGameRequest,
     isSeriesSeason,
     seasonNumber,
     movieUrl,
@@ -677,13 +670,14 @@ async function processQueue() {
     requesterJid,
     pushName,
     mentionTag,
+    mentionDisplay,
     mentionsList,
     userStats,
   } = currentTask;
   const { count, badge } = userStats;
 
   logger.info(
-    `[Queue Engine] Processing task for ${pushName}: ${movieUrl} | Type=${isGameRequest ? "FitGirl PC Game" : isSeriesSeason ? `Series S${seasonNumber}` : "Movie"} | Remaining in queue: ${requestQueue.length}`
+    `[Queue Engine] Processing task for ${pushName}: ${movieUrl} | Type=${isSeriesSeason ? `Series S${seasonNumber}` : "Movie"} | Remaining in queue: ${requestQueue.length}`
   );
 
   // Helper function to broadcast message to target groups
@@ -710,251 +704,13 @@ async function processQueue() {
 
   try {
     // ----------------------------------------------------------------------
-    // MODE C: PC GAME REPACK MULTIPART BATCH (FitGirl Repacks - Private Delivery)
-    // ----------------------------------------------------------------------
-    if (isGameRequest) {
-      // Determine the user's private WhatsApp chat target
-      const directTarget = (replyTarget && !replyTarget.endsWith("@g.us"))
-        ? replyTarget
-        : (requesterJid || replyTarget);
-
-      // If requested from inside a group, send a polite notice in the group that delivery is in DM
-      if (replyTarget && replyTarget.endsWith("@g.us")) {
-        try {
-          await waSocket.sendMessage(replyTarget, {
-            text: `🎮 *[FilmFeed Games 4K]*\n\n*${pushName}* (${mentionTag}), ඔබ ඉල්ලූ Game Repack එක Group එක පිරීම වැළැක්වීම සඳහා ඔබගේ WhatsApp Inbox (Private Chat) වෙත කෙලින්ම ලැබෙනු ඇත! 📥`,
-            mentions: mentionsList,
-          });
-        } catch (_) {}
-      }
-
-      await waSocket.sendMessage(directTarget, {
-        text: `🎮 *[FilmFeed Games 4K Engine]*\n\n*${pushName}*, ඔබ ඉල්ලූ Game Repack එක සැකසීම ආරම්භ විය!\nසියලුම Archive Parts (~500MB) පිළිවෙළින් බාගත වී ඔබගේ මෙම Private Chat එකටම ලැබෙනු ඇත. 🚀`,
-      });
-
-      const gameData = await resolveGameRepack(movieUrl);
-      if (!gameData || !gameData.success || !gameData.parts || gameData.parts.length === 0) {
-        await waSocket.sendMessage(directTarget, {
-          text: `❌ *[FilmFeed Games]* Game Repack එක සඳහා Download Parts සොයාගත නොහැකි විය: ${gameData?.error || "Unknown error"}`,
-        });
-        isProcessingQueue = false;
-        currentProcessingItem = null;
-        processQueue();
-        return;
-      }
-
-      const gameTitle = gameData.title || "PC Game";
-      const posterUrl = gameData.poster;
-      const totalParts = gameData.total_parts || gameData.parts.length;
-
-      // 1. Calculate 10-part batch range (e.g. Part 1-10, Part 11-20)
-      const BATCH_SIZE = 10;
-      let startPartNum = 1;
-
-      // Parse batch offset from quality string if present (e.g., "Batch 2", "parts 11-20", "11", "2")
-      const qualityStr = (quality || "").toString().trim();
-      const rangeMatch = qualityStr.match(/parts?\s*(\d+)\s*[-to]+\s*(\d+)/i);
-      const batchMatch = qualityStr.match(/batch\s*(\d+)/i);
-      const pureNumMatch = qualityStr.match(/^(\d+)$/);
-
-      if (rangeMatch) {
-        startPartNum = parseInt(rangeMatch[1], 10);
-      } else if (batchMatch) {
-        const b = parseInt(batchMatch[1], 10);
-        startPartNum = (b - 1) * BATCH_SIZE + 1;
-      } else if (pureNumMatch) {
-        const n = parseInt(pureNumMatch[1], 10);
-        if (n > 1 && n <= totalParts) {
-          startPartNum = n;
-        }
-      }
-
-      if (startPartNum < 1) startPartNum = 1;
-      if (startPartNum > totalParts) startPartNum = totalParts;
-      const endPartNum = Math.min(startPartNum + BATCH_SIZE - 1, totalParts);
-      const batchCount = endPartNum - startPartNum + 1;
-
-      // 1. Send Game Overview Poster to User's Private Chat
-      const gameCaption =
-`🎮 *${gameTitle}*
-━━━━━━━━━━━━━━━━━━━━
-📦 *Pack Type:* FitGirl Repack Archive (Direct Private Delivery)
-🔢 *Batch Delivery:* Parts ${startPartNum} – ${endPartNum} (${batchCount} Parts)
-📊 *Total Parts in Game:* ${totalParts} RAR Parts (~500MB each)
-💾 *Repack Size:* ${gameData.repack_size || "Full Repack"}
-💾 *Original Size:* ${gameData.original_size || "N/A"}
-👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
-🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
-🔑 *Token:* ${token || "VIP_GAME"}
-━━━━━━━━━━━━━━━━━━━━
-⚡ _Part ${startPartNum} සිට Part ${endPartNum} දක්වා පිළිවෙළින් බාගත වී මෙම Chat එකට ලැබෙනු ඇත. සියලුම කොටස් ලැබෙන තුරු කරුණාකර රැඳී සිටින්න!_`;
-
-      if (posterUrl) {
-        await waSocket.sendMessage(directTarget, {
-          image: { url: posterUrl },
-          caption: gameCaption,
-        });
-      } else {
-        await waSocket.sendMessage(directTarget, {
-          text: gameCaption,
-        });
-      }
-
-      // 2. Deliver each part in this 10-part batch sequentially to the user's private chat
-      let deliveredCount = 0;
-      for (let pNum = startPartNum; pNum <= endPartNum; pNum++) {
-        const pIdx = pNum - 1;
-        const partObj = gameData.parts[pIdx] || {};
-        const partNumber = pNum;
-        const partFileName = partObj.filename || `${gameTitle}.part${partNumber}.rar`;
-        const tempPartPath = path.join(__dirname, `../temp_game_${Date.now()}_part${partNumber}.rar`);
-
-        logger.info(`[Game Engine] (${partNumber}/${totalParts}) [Batch: ${startPartNum}-${endPartNum}] Downloading ${partFileName} for ${directTarget}...`);
-
-        let partDownloadSuccess = false;
-        const candidateUrls = [
-          partObj.fuckingfast_url,
-          (partObj.url && partObj.url.includes("fuckingfast")) ? partObj.url : null
-        ]
-          .filter(Boolean)
-          .filter((v, i, a) => a.indexOf(v) === i);
-
-        for (const candidateUrl of candidateUrls) {
-          try {
-            logger.info(`[Game Engine] (${partNumber}/${totalParts}) Trying mirror: ${candidateUrl}`);
-            await downloadGamePart(candidateUrl, tempPartPath);
-            partDownloadSuccess = fs.existsSync(tempPartPath) && fs.statSync(tempPartPath).size > 100000;
-            if (partDownloadSuccess) {
-              logger.info(`[Game Engine] Part ${partNumber} successfully downloaded from ${candidateUrl}`);
-              break;
-            }
-          } catch (dlErr) {
-            logger.warn(`Download error for part ${partNumber} from ${candidateUrl}: ${dlErr.message}`);
-          }
-        }
-
-        if (partDownloadSuccess) {
-          const fileSizeBytes = fs.statSync(tempPartPath).size;
-          const fileSizeMB = Math.round(fileSizeBytes / 1024 / 1024);
-
-          try {
-            const fileBuffer = fs.readFileSync(tempPartPath);
-
-            await waSocket.sendMessage(directTarget, {
-              document: fileBuffer,
-              mimetype: "application/x-rar-compressed",
-              fileName: partFileName,
-              caption:
-`🎮 *${gameTitle}* [Part ${partNumber}/${totalParts}] (${fileSizeMB}MB)
-━━━━━━━━━━━━━━━━━━━━
-📦 *Archive:* ${partFileName}
-⚡ *Status:* Part ${partNumber} of ${totalParts} Delivered Directly
-━━━━━━━━━━━━━━━━━━━━
-🍿 FilmFeed Games 4K Engine`,
-              contextInfo: getMetaAiContext(),
-            });
-
-            deliveredCount++;
-            logger.info(`[Game Engine] Successfully delivered part ${partNumber}/${totalParts} to ${directTarget}`);
-          } catch (uploadErr) {
-            logger.error(`[Game Engine] Failed uploading part ${partNumber} to WhatsApp: ${uploadErr.message}`);
-            // Fallback: If WhatsApp rejects large file (413), resolve and send 1-click direct link
-            let directSignedLink = partObj.url;
-            try {
-              const pythonCmd = process.platform === "win32" ? "python" : "python3";
-              const resUrl = await new Promise((res) => {
-                execFile(pythonCmd, [path.join(__dirname, "../downloader.py"), "--resolve-only", partObj.url], { timeout: 30000 }, (err, stdout) => {
-                  if (!err && stdout) {
-                    const lines = stdout.trim().split("\n");
-                    for (let i = lines.length - 1; i >= 0; i--) {
-                      try {
-                        const p = JSON.parse(lines[i].trim());
-                        if (p.direct_url) return res(p.direct_url);
-                      } catch (_) {}
-                    }
-                  }
-                  res(null);
-                });
-              });
-              if (resUrl) directSignedLink = resUrl;
-            } catch (_) {}
-
-            await waSocket.sendMessage(directTarget, {
-              text: `⚠️ *[FilmFeed Games - Part ${partNumber}/${totalParts}]* (${fileSizeMB}MB)\n${partFileName}\n\n📌 Upload Error: WhatsApp සර්වර් මඟින් ගොනුව ප්‍රතික්ෂේප විය (${uploadErr.message}). පහතින් Direct Download කරගන්න:\n🔗 Direct Download: ${directSignedLink}`,
-            }, { linkPreview: null });
-          } finally {
-            if (fs.existsSync(tempPartPath)) {
-              fs.unlinkSync(tempPartPath);
-            }
-          }
-        } else {
-          // If downloading failed, send the 1-click direct download link as fallback
-          let directSignedLink = partObj.url;
-          try {
-            const pythonCmd = process.platform === "win32" ? "python" : "python3";
-            const resUrl = await new Promise((res) => {
-              execFile(pythonCmd, [path.join(__dirname, "../downloader.py"), "--resolve-only", partObj.url], { timeout: 30000 }, (err, stdout) => {
-                if (!err && stdout) {
-                  const lines = stdout.trim().split("\n");
-                  for (let i = lines.length - 1; i >= 0; i--) {
-                    try {
-                      const p = JSON.parse(lines[i].trim());
-                      if (p.direct_url) return res(p.direct_url);
-                    } catch (_) {}
-                  }
-                }
-                res(null);
-              });
-            });
-            if (resUrl) directSignedLink = resUrl;
-          } catch (_) {}
-
-          await waSocket.sendMessage(directTarget, {
-            text: `⚠️ *[FilmFeed Games - Part ${partNumber}/${totalParts}]*\n${partFileName}\n🔗 Direct Download: ${directSignedLink}`,
-          }, { linkPreview: null });
-        }
-
-        await new Promise((r) => setTimeout(r, 1000));
-      }
-
-      // 3. Final summary to user's private chat with next-batch link
-      let nextBatchNotice = "";
-      if (endPartNum < totalParts) {
-        const nextStart = endPartNum + 1;
-        const nextEnd = Math.min(nextStart + BATCH_SIZE - 1, totalParts);
-        nextBatchNotice = `\n━━━━━━━━━━━━━━━━━━━━\n⚡ *ඊළඟ කොටස් (Parts ${nextStart}–${nextEnd}):*\nඉතිරි කොටස් ලබා ගැනීමට කරුණාකර අපගේ වෙබ් අඩවියට පිවිස ඊළඟ Batch එක Request කරන්න:\n👉 https://fitgirl-web.vercel.app`;
-      }
-
-      await waSocket.sendMessage(directTarget, {
-        text:
-`✅ *[FilmFeed Games - Repack Completed!]*
-━━━━━━━━━━━━━━━━━━━━
-🎮 *${gameTitle}*
-📦 Delivered: *${deliveredCount} / ${batchCount} Parts in Batch* (Parts ${startPartNum}–${endPartNum})
-📊 Total Game Parts: *${totalParts} Parts*
-💡 *Instructions:*
-1. Download all RAR parts of the game to the same folder on your PC.
-2. Right click *Part 1* -> Extract Here (WinRAR / 7-Zip).
-3. Open the extracted folder and run setup.exe to install and play!${nextBatchNotice}
-━━━━━━━━━━━━━━━━━━━━
-🍿 FilmFeed Games 4K Portal: https://fitgirl-web.vercel.app`,
-      });
-
-      incrementUserRequest(requesterJid || replyTarget, pushName, gameTitle, "PC Game");
-
-      isProcessingQueue = false;
-      currentProcessingItem = null;
-      processQueue();
-      return;
-    }
-
-    // ----------------------------------------------------------------------
-    // MODE A: TV SERIES SEASON BATCH (Processes All Episodes Sequentially)
+    // MODE A: TV SERIES SEASON BATCH (Sequential Episode Delivery)
     // ----------------------------------------------------------------------
     if (isSeriesSeason) {
       await waSocket.sendMessage(replyTarget, {
-        text: `🚀 *[FilmFeed TV Series Engine]*\n\n*${pushName}*, ඔබ ඉල්ලූ Season ${seasonNumber} පැක් එක සැකසීම ආරම්භ විය!\nසියලුම Episodes එකින් එක Download වී Group එකට Upload වනු ඇත.`,
+        text: `🚀 *[FilmFeed TV Series Engine]*\n━━━━━━━━━━━━━━━━━━━━\n*${pushName}*, ඔබ ඉල්ලූ Season ${seasonNumber} පැක් එක සැකසීම ආරම්භ විය!\nසියලුම Episodes එකින් එක Download වී Group එකට Upload වනු ඇත. 🍿`,
         mentions: mentionsList,
+        contextInfo: getMetaAiContext(mentionsList),
       });
 
       const seriesData = await resolveSeriesEpisodes(movieUrl);
@@ -977,43 +733,20 @@ async function processQueue() {
       if (episodes.length === 0) {
         await waSocket.sendMessage(replyTarget, {
           text: `❌ *[FilmFeed TV Series]* Season ${seasonNumber} සඳහා Episodes සොයාගත නොහැකි විය.`,
+          mentions: mentionsList,
+          contextInfo: getMetaAiContext(mentionsList),
         });
-        isProcessingQueue = false;
-        currentProcessingItem = null;
-        processQueue();
         return;
       }
 
-      const showTitle = seriesData.title || "TV Series";
-      const posterUrl = seriesData.poster || seriesData.backdrop;
+      // High-res TMDb lookup for the TV series
+      const tmdb = await getTmdbMediaDetails(seriesData.title || "TV Series", true);
+      const showTitle = tmdb?.title || seriesData.title || "TV Series";
+      const posterUrl = tmdb?.poster || seriesData.poster || seriesData.backdrop;
+      const backdropUrl = tmdb?.backdrop || seriesData.backdrop || posterUrl;
+      const overview = tmdb?.overview || seriesData.description || "FilmFeed Cinema Series Release";
       const totalEpisodes = episodes.length;
-
-      // Send Season Overview Poster to WhatsApp Group
-      const seasonCaption = 
-`🎬 *${showTitle} (Season ${seasonNumber})*
-━━━━━━━━━━━━━━━━━━━━
-📦 *Pack Type:* Complete Season Batch
-🔢 *Total Episodes:* ${totalEpisodes} Episodes
-👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
-🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
-🌟 *Quality:* ${quality}
-🔑 *Token:* ${token || "VIP_SEASON"}
-⚡ *Subtitle:* Sinhala Subtitles Included
-━━━━━━━━━━━━━━━━━━━━
-📥 _Episode 1 සිට ${totalEpisodes} දක්වා පිළිවෙළින් බාගත වී Group එකට Upload වනු ඇත!_`;
-
-      if (posterUrl) {
-        await broadcastToGroups({
-          image: { url: posterUrl },
-          caption: seasonCaption,
-          mentions: mentionsList,
-        });
-      } else {
-        await broadcastToGroups({
-          text: seasonCaption,
-          mentions: mentionsList,
-        });
-      }
+      let seasonPosterSent = false;
 
       // Download and Upload each episode 1 by 1
       let uploadedCount = 0;
@@ -1051,15 +784,65 @@ async function processQueue() {
             await downloadFile(directUrl, tempFilePath);
           }
 
-          const fileBuffer = fs.readFileSync(tempFilePath);
-          const epThumbnail = await getPosterThumbnail(epData.poster || epData.backdrop || movieData?.poster, epData.thumbnail_b64);
+          if (!fs.existsSync(tempFilePath) || fs.statSync(tempFilePath).size < 1000000) {
+            logger.warn(`Episode ${epTitle} download failed or produced corrupted file (<1MB). Skipping.`);
+            if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
+            continue;
+          }
 
-          // Upload Episode Document to All Groups
+          // ZERO POSTERS TO GROUP UNTIL FILE IS FULLY DOWNLOADED & VERIFIED!
+          if (!seasonPosterSent) {
+            const seasonCaption = 
+`🎬 *${showTitle} (Season ${seasonNumber})*
+━━━━━━━━━━━━━━━━━━━━
+📦 *Pack Type:* Complete Season Batch
+🔢 *Total Episodes:* ${totalEpisodes} Episodes
+👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
+🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
+🌟 *Quality:* ${quality}
+${tmdb?.voteAverage ? `⭐ *TMDb Rating:* ${tmdb.voteAverage.toFixed(1)}/10\n` : ""}${tmdb?.releaseDate ? `📅 *Air Date:* ${tmdb.releaseDate}\n` : ""}🔑 *Token:* ${token || "VIP_SEASON"}
+⚡ *Subtitle:* Sinhala Subtitles Included
+━━━━━━━━━━━━━━━━━━━━
+📝 *Storyline / සාරාංශය:*
+${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
+
+📥 _Episode 1 සිට ${totalEpisodes} දක්වා පිළිවෙළින් Group එකට Upload වනු ඇත!_`;
+
+            const effectivePoster = backdropUrl || posterUrl;
+            if (effectivePoster) {
+              await broadcastToGroups({
+                image: { url: effectivePoster },
+                caption: seasonCaption,
+                mentions: mentionsList,
+                contextInfo: getMetaAiContext(mentionsList),
+              });
+            } else {
+              await broadcastToGroups({
+                text: seasonCaption,
+                mentions: mentionsList,
+                contextInfo: getMetaAiContext(mentionsList),
+              });
+            }
+            seasonPosterSent = true;
+          }
+
+          const fileBuffer = fs.readFileSync(tempFilePath);
+          const epThumbnail = await getPosterThumbnail(posterUrl || epData.poster || epData.backdrop, epData.thumbnail_b64);
+
+          // Upload Episode Document to All Target Groups
           await broadcastToGroups({
             document: fileBuffer,
             mimetype: "video/mp4",
             fileName: `${epTitle} [${resolvedQuality}] [FilmFeed].mp4`,
-            caption: `✅ *${epTitle}* (${resolvedQuality})\n👤 Requested By: ${mentionTag}\n📦 Season ${seasonNumber} Pack [${epIndex}/${totalEpisodes} Episodes]\n✨ Uploaded by FilmFeed Auto-Bot`,
+            caption: 
+`🎬 *${epTitle}* (${resolvedQuality})
+━━━━━━━━━━━━━━━━━━━━
+👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
+📦 *Season:* Season ${seasonNumber} [Episode ${epIndex}/${totalEpisodes}]
+⚡ *Status:* Uploaded Successfully
+━━━━━━━━━━━━━━━━━━━━
+🍿 FilmFeed TV Series Engine
+👉 Request: https://web-umber-six-e1un7z6257.vercel.app`,
             mentions: mentionsList,
             ...(epThumbnail ? { jpegThumbnail: epThumbnail } : {}),
             contextInfo: getMetaAiContext(mentionsList),
@@ -1067,12 +850,10 @@ async function processQueue() {
 
           uploadedCount++;
 
-          // Delete temp file immediately
           if (fs.existsSync(tempFilePath)) {
             fs.unlinkSync(tempFilePath);
           }
 
-          // Small cooldown between episodes
           await new Promise((r) => setTimeout(r, 2000));
         } catch (epErr) {
           logger.error({ epErr }, `Error downloading episode ${epIndex}`);
@@ -1081,8 +862,18 @@ async function processQueue() {
 
       // Final Season Completion Notification
       await waSocket.sendMessage(replyTarget, {
-        text: `🎉 *[FilmFeed TV Series]* සම්පූර්ණයි!\n*${pushName}*, ඔබ ඉල්ලූ *${showTitle}* (Season ${seasonNumber}) හි Episodes ${uploadedCount}/${totalEpisodes} සාර්ථකව WhatsApp Group එකට Upload කරන ලදී. 🍿 Enjoy!`,
+        text: 
+`🎉 *[FilmFeed TV Series]* සම්පූර්ණයි!
+━━━━━━━━━━━━━━━━━━━━
+👤 *සාමාජිකයා:* ${pushName} [${badge}]
+📺 *Series:* *${showTitle}* (Season ${seasonNumber})
+📦 *Episodes:* ${uploadedCount}/${totalEpisodes} සාර්ථකව Upload කරන ලදී
+⚡ *තත්ත්වය:* Broadcast Complete
+━━━━━━━━━━━━━━━━━━━━
+🍿 FilmFeed Group එකෙන් දැන්ම නරඹන්න!
+👉 Website: https://web-umber-six-e1un7z6257.vercel.app`,
         mentions: mentionsList,
+        contextInfo: getMetaAiContext(mentionsList),
       });
 
     } else {
@@ -1092,8 +883,17 @@ async function processQueue() {
       const statusTrackerKeys = [];
 
       const initialQueueMsg = await waSocket.sendMessage(replyTarget, {
-        text: `🚀 *[FilmFeed Auto-Bot]*\n\n*${pushName}*, ඔබගේ වාරය පැමිණියා! චිත්‍රපටය බාගත කිරීම දැන් ආරම්භ වේ...\n\n📺 Quality: *${quality}*\n🔑 Token: *${token}*`,
+        text: 
+`🚀 *[FilmFeed Auto-Bot]*
+━━━━━━━━━━━━━━━━━━━━
+*${pushName}*, ඔබගේ වාරය පැමිණියා!
+චිත්‍රපටය බාගත කිරීම දැන් ආරම්භ වේ...
+
+📺 *Quality:* ${quality}
+🔑 *Token:* ${token || "DIRECT"}
+━━━━━━━━━━━━━━━━━━━━`,
         mentions: mentionsList,
+        contextInfo: getMetaAiContext(mentionsList),
       });
       if (initialQueueMsg?.key) statusTrackerKeys.push(initialQueueMsg.key);
 
@@ -1102,15 +902,19 @@ async function processQueue() {
       if (!movieData.success || !movieData.direct_url) {
         await waSocket.sendMessage(replyTarget, {
           text: `❌ *[FilmFeed Auto-Bot]* Error: ${movieData.error || "චිත්‍රපට ලින්ක් එක ලබා ගැනීමට නොහැකි විය."}`,
+          mentions: mentionsList,
+          contextInfo: getMetaAiContext(mentionsList),
         });
-        isProcessingQueue = false;
-        currentProcessingItem = null;
-        processQueue();
         return;
       }
 
-      const title = movieData.title || "Movie";
-      const posterUrl = movieData.backdrop || movieData.poster;
+      // Query TMDb for ultra high-resolution poster, backdrop, and official metadata
+      const rawTitle = movieData.title || "Movie";
+      const tmdb = await getTmdbMediaDetails(rawTitle, false);
+      const title = tmdb?.title || rawTitle;
+      const posterUrl = tmdb?.poster || movieData.poster || movieData.backdrop;
+      const backdropUrl = tmdb?.backdrop || movieData.backdrop || posterUrl;
+      const overview = tmdb?.overview || movieData.description || "FilmFeed Cinema Direct Release";
       const directUrl = movieData.direct_url;
       const resolvedQuality = movieData.quality || quality;
 
@@ -1129,21 +933,23 @@ async function processQueue() {
 
         const sizeAlertMsg = 
 `⚠️ *[FilmFeed Auto-Bot] ගොනු විශාලත්ව සීමාව (2GB Limit)*
-
+━━━━━━━━━━━━━━━━━━━━
 ආයුබෝවන් *${pushName}*,
 ඔබ ඉල්ලූ *${title}* (${resolvedQuality}) චිත්‍රපටයේ ගොනු ප්‍රමාණය: *${sizeInGB}* කි.
 
 📌 *WhatsApp නීති රීති අනුව:*
-WhatsApp මඟින් Document එකක් ලෙස එකවර යැවිය හැක්කේ උපරිම *2.00 GB* දක්වා ගොනු පමණි.
+WhatsApp මඟින් Document එකක් ලෙස එකවර යැවිය හැක්කේ උපරිම *1.95 GB* දක්වා ගොනු පමණි.
 
 💡 *විසඳුම:*
 කරුණාකර වෙබ් අඩවියෙන් *720p* හෝ *480p* Quality එක (2GB ට අඩු) තෝරා නැවත Request කරන්න:
-👉 https://web-umber-six-e1un7z6257.vercel.app`;
+👉 https://web-umber-six-e1un7z6257.vercel.app
+━━━━━━━━━━━━━━━━━━━━`;
 
-        await waSocket.sendMessage(replyTarget, { text: sizeAlertMsg });
-        isProcessingQueue = false;
-        currentProcessingItem = null;
-        processQueue();
+        await waSocket.sendMessage(replyTarget, {
+          text: sizeAlertMsg,
+          mentions: mentionsList,
+          contextInfo: getMetaAiContext(mentionsList),
+        });
         return;
       }
 
@@ -1158,9 +964,10 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
 👤 *Requested By:* ${pushName} [${badge}]
 ⏳ *තත්ත්වය:* බාගත කිරීම ආරම්භ විය...
 📥 *Download Progress:* 0%
-⚡ *Server:* High-Speed CDN
+⚡ *Server:* High-Speed Ultra Stream
 ━━━━━━━━━━━━━━━━━━━━`,
           mentions: mentionsList,
+          contextInfo: getMetaAiContext(mentionsList),
         });
         if (liveStatusMsg?.key) statusTrackerKeys.push(liveStatusMsg.key);
       } catch (_) {}
@@ -1207,6 +1014,7 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
 ⚡ *Speed:* ${speedText} (MTProto Secure Stream)
 ━━━━━━━━━━━━━━━━━━━━`,
                 edit: liveStatusMsg.key,
+                contextInfo: getMetaAiContext(mentionsList),
               }).catch(() => {});
             }
           }
@@ -1236,13 +1044,14 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
 ⚡ *Speed:* ${speedText} (8x Multi-Stream)
 ━━━━━━━━━━━━━━━━━━━━`,
                 edit: liveStatusMsg.key,
+                contextInfo: getMetaAiContext(mentionsList),
               }).catch(() => {});
             }
           }
         });
       }
 
-      // 2. Verify file exists on disk and is non-zero
+      // 2. Verify file exists on disk and is > 1MB
       if (!fs.existsSync(tempFilePath)) {
         throw new Error("ගොනුව බාගත කිරීම අසාර්ථක විය. File not created on disk.");
       }
@@ -1267,43 +1076,46 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
 ⚡ *Status:* Group Broadcast in Progress
 ━━━━━━━━━━━━━━━━━━━━`,
           edit: liveStatusMsg.key,
+          contextInfo: getMetaAiContext(mentionsList),
         }).catch(() => {});
       }
 
-      // 3. Send Poster to WhatsApp Group ONLY AFTER download is complete & verified
+      // 3. ZERO POSTERS SENT UNTIL FILE IS FULLY VERIFIED ON DISK!
+      // Send High-Res Poster to WhatsApp Group
       const caption = 
 `🎬 *${title}*
 ━━━━━━━━━━━━━━━━━━━━
 👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
 🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
-🌟 *Quality:* ${resolvedQuality} ${movieData.size_text ? `(${movieData.size_text})` : `(${finalSizeMB}MB)`}
-🔑 *Token:* ${token || "DIRECT"}
+🌟 *Quality:* ${resolvedQuality} (${finalSizeMB}MB)
+${tmdb?.voteAverage ? `⭐ *TMDb Rating:* ${tmdb.voteAverage.toFixed(1)}/10\n` : ""}${tmdb?.releaseDate ? `📅 *Release Date:* ${tmdb.releaseDate}\n` : ""}🔑 *Token:* ${token || "DIRECT"}
 ⚡ *Audio / Sub:* Sinhala Subtitles Included
 ━━━━━━━━━━━━━━━━━━━━
 📝 *Storyline / සාරාංශය:*
-${movieData.description ? movieData.description.substring(0, 420) + "..." : "FilmFeed Direct Release"}
+${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 
 🍿 _චිත්‍රපටය පහතින් Document එකක් ලෙස ලැබෙනු ඇත!_`;
 
-      const effectivePoster = posterUrl || movieData.backdrop || movieData.poster;
+      const effectivePoster = backdropUrl || posterUrl;
       if (effectivePoster) {
         await broadcastToGroups({
           image: { url: effectivePoster },
           caption: caption,
           mentions: mentionsList,
+          contextInfo: getMetaAiContext(mentionsList),
         });
       } else {
         await broadcastToGroups({
           text: caption,
           mentions: mentionsList,
+          contextInfo: getMetaAiContext(mentionsList),
         });
       }
 
       // 4. Upload Document to all groups with Movie Poster Thumbnail & Meta AI Styling
       logger.info(`Uploading ${finalSizeMB}MB document to WhatsApp groups...`);
-      
       const fileBuffer = fs.readFileSync(tempFilePath);
-      const thumbBuffer = await getPosterThumbnail(effectivePoster, movieData?.thumbnail_b64);
+      const thumbBuffer = await getPosterThumbnail(posterUrl || effectivePoster, movieData?.thumbnail_b64);
       
       await broadcastToGroups({
         document: fileBuffer,
@@ -1359,6 +1171,7 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
 🍿 FilmFeed Group එකෙන් දැන්ම Download කරගන්න!
 👉 Website: https://web-umber-six-e1un7z6257.vercel.app`,
         mentions: mentionsList,
+        contextInfo: getMetaAiContext(mentionsList),
       });
     }
 
@@ -1366,11 +1179,16 @@ ${movieData.description ? movieData.description.substring(0, 420) + "..." : "Fil
     logger.error({ err }, "Error processing queued task");
     await waSocket.sendMessage(replyTarget, {
       text: `⚠️ *[FilmFeed Auto-Bot]* දෝෂයක් සිදු විය: ${err.message}`,
+      contextInfo: getMetaAiContext(mentionsList),
     });
   } finally {
     isProcessingQueue = false;
     currentProcessingItem = null;
-    setTimeout(processQueue, 1500);
+    setTimeout(() => {
+      if (!isProcessingQueue && requestQueue.length > 0) {
+        processQueue();
+      }
+    }, 2000);
   }
 }
 
@@ -1788,8 +1606,16 @@ async function startBot() {
         // Skip bot's own non-command messages
         if (fromMe && !isCommandText) continue;
 
+        // Reject FitGirl or Game Repacks requests explicitly
+        if (text.includes("fitgirl-repacks.site") || text.match(/^[!/.]?(?:req_game|game)\b/i)) {
+          await waSocket.sendMessage(remoteJid, {
+            text: `⚠️ *[FilmFeed Auto-Bot]*\n━━━━━━━━━━━━━━━━━━━━\nGame Repacks සේවාව අත්හිටුවා ඇත. FilmFeed Auto-Bot මඟින් Movies සහ TV Series පමණක් ලබාගත හැක. 🍿`,
+            contextInfo: getMetaAiContext(mentionsList),
+          });
+          continue;
+        }
+
         let commandFound = false;
-        let isGameRequest = false;
         let isSeriesSeason = false;
         let seasonNumber = 1;
         let movieUrl = "";
@@ -1798,25 +1624,12 @@ async function startBot() {
 
         const textLines = text.split("\n");
 
-        // 1. Line-by-line check for commands (prevents false matches on headers like *Request Source:*)
+        // 1. Line-by-line check for commands
         for (const rawLine of textLines) {
           const line = rawLine.trim();
           if (!line) continue;
 
-          // 1A. FitGirl Game Command: !req_game, /game, .game, or !req <fitgirl_url>
-          const gMatch =
-            line.match(/^[!/.]?(?:req_game|game)\s+(https?:\/\/[^\s|]+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i) ||
-            line.match(/^[!/.]?req(?:uest)?\s+(https?:\/\/[^\s|]*fitgirl[^\s|]*)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
-          if (gMatch) {
-            commandFound = true;
-            isGameRequest = true;
-            movieUrl = gMatch[1].trim();
-            quality = gMatch[2] ? gMatch[2].trim() : "Full Game";
-            token = gMatch[3] ? gMatch[3].trim() : "";
-            break;
-          }
-
-          // 1B. Season Command: !req_season, /season, .season, or !req <url> | S1
+          // 1A. Season Command: !req_season, /season, .season, or !req <url> | S1
           const sMatch =
             line.match(/^[!/.]?(?:req_season|season)\s+([^\s|]+)(?:\s*\|\s*[Ss]?(\d+))?(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i) ||
             line.match(/^[!/.]?req(?:uest)?\s+([^\s|]+)\s*\|\s*[Ss](\d+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
@@ -1831,16 +1644,14 @@ async function startBot() {
             break;
           }
 
-          // 1C. Movie Command: !req <url> | <quality> | <token>
+          // 1B. Movie Command: !req <url> | <quality> | <token>
           const rMatch = line.match(/^[!/.]?req(?:uest)?\s+(https?:\/\/[^\s|]+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
           if (rMatch) {
             commandFound = true;
             movieUrl = rMatch[1].trim();
             quality = rMatch[2] ? rMatch[2].trim() : "720p";
             token = rMatch[3] ? rMatch[3].trim() : "";
-            if (movieUrl.includes("fitgirl-repacks.site")) {
-              isGameRequest = true;
-            } else if (movieUrl.includes("/tvshows/")) {
+            if (movieUrl.includes("/tvshows/")) {
               isSeriesSeason = true;
               seasonNumber = 1;
             }
@@ -1848,18 +1659,7 @@ async function startBot() {
           }
         }
 
-        // 2. Fallback: Search anywhere for a FitGirl, CineSubz, SinhalaSub, Baiscopes, Anime or Cartoons URL if no formal command was triggered
-        if (!commandFound) {
-          const fgMatch = text.match(/(https?:\/\/[^\s|]*fitgirl-repacks\.site[^\s|\n]*)/i);
-          if (fgMatch) {
-            commandFound = true;
-            isGameRequest = true;
-            movieUrl = fgMatch[1].trim();
-            quality = "Full Game";
-            token = "DIRECT";
-          }
-        }
-
+        // 2. Fallback: Search anywhere for a CineSubz, SinhalaSub, Baiscopes, Anime or Cartoons URL
         if (!commandFound) {
           const urlMatch = text.match(/(https?:\/\/[^\s|]*(?:cinesubz|sinhalasub|baiscopes|animekaizen|cartoons)[^\s|\n]*)/i);
           if (urlMatch) {
@@ -1876,7 +1676,7 @@ async function startBot() {
 
         if (!commandFound || !movieUrl) continue;
 
-        // Normalize domain to cinesubz.lk for fast direct connection without Cloudflare delays
+        // Normalize domain to cinesubz.lk for fast direct connection
         movieUrl = movieUrl.replace(/cinesubz\.(net|co)/g, "cinesubz.lk");
 
         logger.info(`🎯 Accepted FilmFeed command from ${pushName} (${remoteJid}): URL=${movieUrl} | Q=${quality}`);
@@ -1918,7 +1718,7 @@ async function startBot() {
           saveUserStats(stats);
         }
 
-        // A. CHECK IF USER IS CURRENTLY BANNED (Admins are NEVER banned)
+        // A. CHECK IF USER IS CURRENTLY BANNED
         if (!isAdmin && userRecord.isBanned) {
           logger.warn(`🚫 Ignoring request from BANNED user ${senderPhone} (${pushName})`);
           const banNotice = 
@@ -1931,11 +1731,15 @@ async function startBot() {
 _නැවත සේවාව ලබා ගැනීමට අවශ්‍ය නම් කරුණාකර Admin (+94760372547) අමතන්න._
 ━━━━━━━━━━━━━━━━━━━━`;
 
-          await waSocket.sendMessage(replyTarget, { text: banNotice, mentions: mentionsList });
+          await waSocket.sendMessage(replyTarget, {
+            text: banNotice,
+            mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
+          });
           continue;
         }
 
-        // B. CHECK DUPLICATE MOVIE REQUEST (Admins & VIPs are NEVER blocked for duplicate requests)
+        // B. CHECK DUPLICATE MOVIE REQUEST
         const cleanUrl = movieUrl.trim().toLowerCase().replace(/\/+$/, "");
         const prevUrl = (userRecord.lastRequestedUrl || "").trim().toLowerCase().replace(/\/+$/, "");
 
@@ -1944,7 +1748,6 @@ _නැවත සේවාව ලබා ගැනීමට අවශ්‍ය �
           userRecord.lastRequestedAt = Date.now();
 
           if (userRecord.duplicateCount >= 2) {
-            // BAN the user immediately!
             userRecord.isBanned = true;
             userRecord.bannedAt = new Date().toISOString();
             userRecord.banReason = "එකම චිත්‍රපටය නැවත නැවතත් (Duplicate Spam Request) ඉල්ලුම් කිරීම";
@@ -1963,7 +1766,11 @@ _නැවත සේවාව ලබා ගැනීමට අවශ්‍ය �
 💡 *විසඳුම:* නැවත සක්‍රීය කර ගැනීමට අවශ්‍ය නම් කරුණාකර FilmFeed Admin (+94760372547) අමතන්න.
 ━━━━━━━━━━━━━━━━━━━━`;
 
-            await waSocket.sendMessage(replyTarget, { text: banMessage, mentions: mentionsList });
+            await waSocket.sendMessage(replyTarget, {
+              text: banMessage,
+              mentions: mentionsList,
+              contextInfo: getMetaAiContext(mentionsList),
+            });
             continue;
           }
         } else {
@@ -1972,7 +1779,7 @@ _නැවත සේවාව ලබා ගැනීමට අවශ්‍ය �
           userRecord.lastRequestedAt = Date.now();
         }
 
-        // C. CHECK DAILY 6-MOVIE LIMIT FOR NON-VIP (Admins & VIP are NEVER limited)
+        // C. CHECK DAILY 6-MOVIE LIMIT FOR NON-VIP
         const isVipUser = Boolean(
           isAdmin ||
           userRecord.isVip ||
@@ -2012,6 +1819,7 @@ https://web-umber-six-e1un7z6257.vercel.app
           await waSocket.sendMessage(replyTarget, {
             text: limitMessage,
             mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
           });
           continue;
         }
@@ -2020,7 +1828,7 @@ https://web-umber-six-e1un7z6257.vercel.app
         const { count, badge } = userStats;
 
         // ------------------------------------------------------------------
-        // Check User Group Membership (Admin / Owner auto-approved)
+        // Check User Group Membership
         // ------------------------------------------------------------------
         let userGroups = [];
         if (isAdmin || isGroup) {
@@ -2030,7 +1838,6 @@ https://web-umber-six-e1un7z6257.vercel.app
         }
 
         const taskItem = {
-          isGameRequest,
           isSeriesSeason,
           seasonNumber,
           movieUrl,
@@ -2065,7 +1872,7 @@ https://web-umber-six-e1un7z6257.vercel.app
 
           const joinRequiredMessage =
 `⚠️ *[FilmFeed 4K • Group Membership Required]*
-
+━━━━━━━━━━━━━━━━━━━━
 ආයුබෝවන් *${pushName}*! 🎬
 ඔබ ඉල්ලූ චිත්‍රපටය ලබා ගැනීමට පෙර ඔබ අපගේ නිල WhatsApp සමූහයන්ගෙන් (Groups) එකකට සම්බන්ධ වී සිටිය යුතුය.
 
@@ -2082,6 +1889,7 @@ Group එකට Join වී අවසන් වූ පසු, මෙම චැ�
           await waSocket.sendMessage(replyTarget, {
             text: joinRequiredMessage,
             mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
           });
           continue;
         }
@@ -2089,8 +1897,9 @@ Group එකට Join වී අවසන් වූ පසු, මෙම චැ�
         // Instant Acknowledgment Message
         try {
           await waSocket.sendMessage(replyTarget, {
-            text: `📥 *[FilmFeed Auto-Bot]*\n\n*${pushName}*, ඔබගේ ඉල්ලීම පද්ධතියට ලැබුණි! 🎬\n\n📌 *Quality:* ${quality}\n⏳ බාගත කිරීම සඳහා පෝලිමට එක් කරන ලදී...`,
+            text: `📥 *[FilmFeed Auto-Bot]*\n━━━━━━━━━━━━━━━━━━━━\n*${pushName}*, ඔබගේ ඉල්ලීම පද්ධතියට ලැබුණි! 🎬\n\n📌 *Quality:* ${quality}\n⏳ බාගත කිරීම සඳහා පෝලිමට එක් කරන ලදී...`,
             mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
           });
         } catch (_) {}
 
@@ -2103,38 +1912,42 @@ Group එකට Join වී අවසන් වූ පසු, මෙම චැ�
 
           const queueMessage = 
 `⏳ *[FilmFeed Auto-Bot] පෝලිමේ රඳවා ඇත (Queued)*
-
+━━━━━━━━━━━━━━━━━━━━
 ආයුබෝවන් *${pushName}* (${mentionTag}),
 දැනට වෙනත් චිත්‍රපටයක් බාගත වෙමින් පවතී.
 
 📊 *ඔබගේ පෝලිම් ස්ථානය (Queue Position):* *#${queuePosition}*
-📦 *ඉල්ලීම:* ${isGameRequest ? "FitGirl PC Game Repack" : isSeriesSeason ? `TV Series (Season ${seasonNumber})` : "Movie"}
+📦 *ඉල්ලීම:* ${isSeriesSeason ? `TV Series (Season ${seasonNumber})` : "Movie"}
 🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
 📺 *Quality:* ${quality}
-🔑 *Token:* ${token}
-
-_කලින් ඉල්ලීම් අවසන් වූ සැණින් ඔබගේ ඉල්ලීම බාගත කර Group එකට Upload වනු ඇත! ස්තූතියි!_`;
+🔑 *Token:* ${token || "DIRECT"}
+━━━━━━━━━━━━━━━━━━━━
+_කලින් ඉල්ලීම අවසන් වූ සැණින් ඔබගේ ඉල්ලීම බාගත කර Group එකට Upload වනු ඇත! ස්තූතියි!_`;
 
           await waSocket.sendMessage(replyTarget, {
             text: queueMessage,
             mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
           });
         } else {
           requestQueue.push(taskItem);
 
           const startMessage = 
 `🚀 *[FilmFeed Auto-Bot] සකසමින් පවතී (Processing)*
-
+━━━━━━━━━━━━━━━━━━━━
 ආයුබෝවන් *${pushName}* (${mentionTag})!
 ඔබගේ *${count}* වන ඉල්ලීම ලැබුණා [${badge}].
-${isGameRequest ? "🎮 *FitGirl PC Game Repack Parts* සකස් කිරීම ආරම්භ විය..." : isSeriesSeason ? `📺 *TV Series (Season ${seasonNumber}) Pack* සකස් කිරීම ආරම්භ විය...` : "🎬 Direct High-Speed ලින්ක් එක සකසා බාගත කිරීම ආරම්භ විය..."}
+${isSeriesSeason ? `📺 *TV Series (Season ${seasonNumber}) Pack* සකස් කිරීම ආරම්භ විය...` : "🎬 Direct High-Speed ලින්ක් එක සකසා බාගත කිරීම ආරම්භ විය..."}
 
 📺 *Quality:* ${quality}
-🔑 *Token:* ${token}`;
+🔑 *Token:* ${token || "DIRECT"}
+━━━━━━━━━━━━━━━━━━━━
+🍿 FilmFeed 4K Cinema Engine`;
 
           await waSocket.sendMessage(replyTarget, {
             text: startMessage,
             mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
           });
 
           processQueue();
