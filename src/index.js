@@ -571,15 +571,33 @@ async function getPosterThumbnail(posterUrl, thumbnailB64 = null) {
 // Global variable to hold real verified newsletter JID dynamically resolved from WhatsApp
 let resolvedNewsletterJid = null;
 
+// Pre-load gift box thumbnail for externalAdReply so WhatsApp never renders an empty black box
+let giftBoxThumbBuffer = null;
+try {
+  const thumbPath = path.join(__dirname, "../gift_box_thumb.jpg");
+  if (fs.existsSync(thumbPath)) {
+    giftBoxThumbBuffer = fs.readFileSync(thumbPath);
+  } else {
+    const bannerPath = path.join(__dirname, "../gift_box.jpg");
+    if (fs.existsSync(bannerPath)) {
+      giftBoxThumbBuffer = fs.readFileSync(bannerPath);
+    }
+  }
+} catch (e) {
+  console.warn("Could not pre-load externalAdReply thumbnail buffer:", e.message);
+}
+
 function getMetaAiContext(mentionsList = []) {
   const ctx = {
     externalAdReply: {
-      title: "FILMFEED MINI • OFFICIAL VIP CHANNEL",
-      body: "Tap to follow for daily movies, trainers & bot updates",
-      sourceUrl: "https://whatsapp.com/channel/0029Vb9AG1c3GJOsPvzqdu0R",
+      title: "🎁 FILMFEED VIP GIFT • TAP TO PLAY & CLAIM",
+      body: "🎮 Play Retro Arcade Game & Unlock VIP 4K Downloads!",
+      sourceUrl: "https://nexus-one-orpin.vercel.app/game",
       mediaType: 1,
       renderLargerThumbnail: true,
       showAdAttribution: true,
+      ...(giftBoxThumbBuffer ? { thumbnail: giftBoxThumbBuffer } : {}),
+      thumbnailUrl: "https://nexus-one-orpin.vercel.app/gift_box.jpg",
     },
     quotedMessage: {
       extendedTextMessage: {
