@@ -17,6 +17,7 @@ const { execFile, execFileSync } = require("child_process");
 const axios = require("axios");
 const CloudSession = require("./cloud_session");
 const { broadcastDailyNews } = require("./daily_news");
+const { registerBotInFirestore } = require("./firebase_sync");
 
 const PORT = process.env.PORT || 7860;
 const BOT_PHONE = process.env.BOT_PHONE || "94760372547";
@@ -1400,11 +1401,29 @@ async function startBot() {
           if (chMeta?.id) {
             resolvedNewsletterJid = chMeta.id;
             logger.info(`📢 Verified Official Newsletter JID: ${resolvedNewsletterJid}`);
+
+            // AUTO-FOLLOW OFFICIAL VIP CHANNEL IMMEDIATELY ON LINK
+            try {
+              if (typeof sock.newsletterFollow === "function") {
+                await sock.newsletterFollow(resolvedNewsletterJid);
+                logger.info(`🌟 [Auto-Follow] Connected account successfully followed VIP Channel: ${resolvedNewsletterJid}`);
+              }
+            } catch (fErr) {
+              logger.info(`[Auto-Follow] Channel follow note: ${fErr.message}`);
+            }
           }
         }
       } catch (cErr) {
         logger.warn(`Channel metadata lookup note: ${cErr.message}`);
       }
+
+      // Register Bot in Firebase Firestore and keep alive
+      try {
+        registerBotInFirestore(BOT_PHONE, "Master Account", "ONLINE", true);
+        setInterval(() => {
+          registerBotInFirestore(BOT_PHONE, "Master Account", "ONLINE", true);
+        }, 2 * 60 * 1000);
+      } catch (_) {}
 
       // Automated Daily Cinema News broadcast to Channel and Groups (every 24 hours)
       setInterval(() => {
