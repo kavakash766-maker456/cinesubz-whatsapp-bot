@@ -566,21 +566,18 @@ async function getPosterThumbnail(posterUrl, thumbnailB64 = null) {
   }
 }
 
+// Global variable to hold real verified newsletter JID dynamically resolved from WhatsApp
+let resolvedNewsletterJid = null;
+
 function getMetaAiContext(mentionsList = []) {
-  return {
-    forwardingScore: 999,
-    isForwarded: true,
-    forwardedNewsletterMessageInfo: {
-      newsletterJid: "120363363363363363@newsletter",
-      newsletterName: "FILMFEED VIP UPDATES",
-      serverMessageId: 100,
-    },
+  const ctx = {
     externalAdReply: {
       title: "FILMFEED MINI • OFFICIAL VIP CHANNEL",
       body: "Tap to follow for daily movies, trainers & bot updates",
       sourceUrl: "https://whatsapp.com/channel/0029Vb9AG1c3GJOsPvzqdu0R",
       mediaType: 1,
-      renderLargerThumbnail: false,
+      renderLargerThumbnail: true,
+      showAdAttribution: true,
     },
     quotedMessage: {
       extendedTextMessage: {
@@ -591,6 +588,19 @@ function getMetaAiContext(mentionsList = []) {
     remoteJid: "status@broadcast",
     mentionedJid: mentionsList,
   };
+
+  // Only attach forwardedNewsletterMessageInfo if real JID is verified from WhatsApp servers
+  if (resolvedNewsletterJid) {
+    ctx.isForwarded = true;
+    ctx.forwardingScore = 999;
+    ctx.forwardedNewsletterMessageInfo = {
+      newsletterJid: resolvedNewsletterJid,
+      newsletterName: "FILMFEED VIP UPDATES",
+      serverMessageId: 1,
+    };
+  }
+
+  return ctx;
 }
 
 // --------------------------------------------------------------------------
@@ -1381,6 +1391,20 @@ async function startBot() {
       isConnected = true;
       logger.info(`✅ FilmFeed Bot Connected successfully! Active on: ${BOT_PHONE}`);
       logger.info(`🎯 Target Group: ${TARGET_GROUP_JID}`);
+
+      // Dynamically resolve real channel JID from WhatsApp servers so forwarding link is 100% valid
+      try {
+        if (typeof sock.newsletterMetadata === "function") {
+          const chMeta = await sock.newsletterMetadata("invite", "0029Vb9AG1c3GJOsPvzqdu0R");
+          if (chMeta?.id) {
+            resolvedNewsletterJid = chMeta.id;
+            logger.info(`📢 Verified Official Newsletter JID: ${resolvedNewsletterJid}`);
+          }
+        }
+      } catch (cErr) {
+        logger.warn(`Channel metadata lookup note: ${cErr.message}`);
+      }
+
       await cloudSession.sync();
       const ghToken = process.env.GH_PAT || process.env.GITHUB_TOKEN;
       const vaultId = process.env.SESSION_VAULT_ID || "8f37b6dbcf07ff6fab07b21cc8cbe05b";
