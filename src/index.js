@@ -6,6 +6,7 @@ const {
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   Browsers,
+  downloadContentFromMessage,
 } = require("@whiskeysockets/baileys");
 const pino = require("pino");
 const qrcode = require("qrcode-terminal");
@@ -46,6 +47,12 @@ process.on("unhandledRejection", (reason) => {
 let latestQR = null;
 let isConnected = false;
 let waSocket = null;
+
+// --------------------------------------------------------------------------
+// Anti-Delete Message Cache (LRU Ring Buffer)
+// --------------------------------------------------------------------------
+const messageCache = new Map();
+const MAX_MESSAGE_CACHE = 2000;
 
 // --------------------------------------------------------------------------
 // Request Queue System (FIFO)
@@ -561,11 +568,23 @@ async function getPosterThumbnail(posterUrl, thumbnailB64 = null) {
 
 function getMetaAiContext(mentionsList = []) {
   return {
-    forwardingScore: 1,
-    isForwarded: false,
+    forwardingScore: 999,
+    isForwarded: true,
+    forwardedNewsletterMessageInfo: {
+      newsletterJid: "120363363363363363@newsletter",
+      newsletterName: "FILMFEED & NEXUS VIP UPDATES",
+      serverMessageId: 100,
+    },
+    externalAdReply: {
+      title: "NEXUS MINI • OFFICIAL VIP CHANNEL",
+      body: "Tap to follow for daily movies, trainers & bot updates",
+      sourceUrl: "https://whatsapp.com/channel/0029Vb9AG1c3GJOsPvzqdu0R",
+      mediaType: 1,
+      renderLargerThumbnail: false,
+    },
     quotedMessage: {
       extendedTextMessage: {
-        text: "🤖 Meta AI • FilmFeed 4K Cinema Delivery Engine",
+        text: "⚡ Nexus Mini • WhatsApp Bot Cloud Engine",
       },
     },
     participant: "13135550002@s.whatsapp.net",
@@ -1473,6 +1492,280 @@ async function startBot() {
 
         // Log every incoming message for debugging
         console.log(`📩 [Msg Received] from: ${pushName} (${senderPhone}) | jid: ${remoteJid} | fromMe: ${fromMe} | isAdmin: ${isAdmin}:\n${text}`);
+
+        // ------------------------------------------------------------------
+        // ANTI-VIEWONCE INTERCEPTOR (Auto-Capture & Forward to Owner DM)
+        // ------------------------------------------------------------------
+        const isViewOnceMsg = Boolean(
+          msg.message?.viewOnceMessage ||
+          msg.message?.viewOnceMessageV2 ||
+          msg.message?.viewOnceMessageV2Extension
+        );
+
+        if (isViewOnceMsg) {
+          const voContent =
+            msg.message?.viewOnceMessage?.message ||
+            msg.message?.viewOnceMessageV2?.message ||
+            msg.message?.viewOnceMessageV2Extension?.message;
+
+          const mediaType = voContent?.imageMessage
+            ? "image"
+            : voContent?.videoMessage
+            ? "video"
+            : voContent?.audioMessage
+            ? "audio"
+            : null;
+
+          if (mediaType && voContent[mediaType + "Message"]) {
+            (async () => {
+              try {
+                const stream = await downloadContentFromMessage(voContent[mediaType + "Message"], mediaType);
+                let buffer = Buffer.from([]);
+                for await (const chunk of stream) {
+                  buffer = Buffer.concat([buffer, chunk]);
+                }
+                const ownerTargetJid = `${BOT_PHONE}@s.whatsapp.net`;
+                const voCaption = `👁️ *[NEXUS ANTI-VIEWONCE CAPTURED]*\n━━━━━━━━━━━━━━━━━━━━\n👤 *Sender:* ${pushName} (+${senderPhone})\n📍 *Chat:* ${isGroup ? "Group Chat" : "Direct Chat"}\n🕒 *Time:* ${new Date().toLocaleTimeString()}\n💬 *Caption:* ${voContent[mediaType + "Message"]?.caption || "None"}\n━━━━━━━━━━━━━━━━━━━━\n⚡ *Nexus Cloud Bot Engine*`;
+
+                if (mediaType === "image") {
+                  await waSocket.sendMessage(ownerTargetJid, { image: buffer, caption: voCaption, contextInfo: getMetaAiContext() });
+                } else if (mediaType === "video") {
+                  await waSocket.sendMessage(ownerTargetJid, { video: buffer, caption: voCaption, contextInfo: getMetaAiContext() });
+                } else if (mediaType === "audio") {
+                  await waSocket.sendMessage(ownerTargetJid, { audio: buffer, mimetype: "audio/mp4", ptt: true, contextInfo: getMetaAiContext() });
+                }
+                logger.info(`👁️ [Anti-ViewOnce] Extracted and forwarded ${mediaType} from ${senderPhone} to owner DM`);
+              } catch (voErr) {
+                logger.error({ voErr }, "Anti-ViewOnce extraction error");
+              }
+            })();
+          }
+        }
+
+        // ------------------------------------------------------------------
+        // ANTI-DELETE INTERCEPTOR (Message Ring Cache & Revoke Detection)
+        // ------------------------------------------------------------------
+        const msgId = msg.key?.id;
+        if (msgId && text) {
+          if (messageCache.size >= MAX_MESSAGE_CACHE) {
+            const oldestKey = messageCache.keys().next().value;
+            messageCache.delete(oldestKey);
+          }
+          messageCache.set(msgId, {
+            text,
+            sender: senderPhone,
+            pushName,
+            isGroup,
+            remoteJid,
+            timestamp: Date.now(),
+          });
+        }
+
+        // Detect Revoked / Deleted Messages
+        if (msg.message?.protocolMessage && msg.message.protocolMessage.type === 0) {
+          const revokedId = msg.message.protocolMessage.key?.id;
+          if (revokedId && messageCache.has(revokedId)) {
+            const cached = messageCache.get(revokedId);
+            const alertMsg = 
+`🗑️ *[NEXUS ANTI-DELETE DETECTED]*
+━━━━━━━━━━━━━━━━━━━━
+👤 *Sender:* ${cached.pushName} (+${cached.sender})
+📍 *Chat:* ${cached.isGroup ? "Group Chat" : "Private Chat"}
+🕒 *Deleted At:* ${new Date().toLocaleTimeString()}
+💬 *Recovered Text:*
+${cached.text}
+━━━━━━━━━━━━━━━━━━━━
+⚡ *Nexus Anti-Delete Shield*`;
+
+            await waSocket.sendMessage(remoteJid, {
+              text: alertMsg,
+              contextInfo: getMetaAiContext(),
+            });
+            logger.info(`🗑️ [Anti-Delete] Recovered revoked message: "${cached.text}" from ${cached.sender}`);
+          }
+          continue;
+        }
+
+        // ------------------------------------------------------------------
+        // POWER COMMANDS SUITE (.menu, .movie, .ai, .song, .settings, etc.)
+        // ------------------------------------------------------------------
+        const lowerText = text.toLowerCase().trim();
+        const cmdMatch = lowerText.match(/^[./!](\w+)(?:\s+(.*))?$/s);
+
+        if (cmdMatch) {
+          const cmdName = cmdMatch[1];
+          const cmdArgs = (cmdMatch[2] || "").trim();
+
+          // 1. .menu / .help / .alive
+          if (["menu", "help", "alive", "start"].includes(cmdName)) {
+            const menuMsg = 
+`⚡ *NEXUS MINI — ALL-IN-ONE BOT ENGINE* ⚡
+━━━━━━━━━━━━━━━━━━━━
+👋 *ආයුබෝවන් ${pushName}!*
+🤖 *Bot Status:* 🟢 ACTIVE 24/7 (Cloud Runner)
+👑 *Master:* +${BOT_PHONE}
+━━━━━━━━━━━━━━━━━━━━
+
+🎬 *[MOVIE & SERIES COMMANDS]*
+• *.movie [නම]* : CineSubz 4K direct download link & online stream
+• *.cinesub [link]* : Direct CineSubz download link
+• *.sinhalasub [නම]* : SinhalaSub download mirror
+• *.stream [නම]* : 4K FilmFeed online player link
+
+👁️ *[SUPER-WHATSAPP PRIVACY]*
+• *.antiviewonce* : View-Once photos/videos auto-forward to DM
+• *.antidelete* : Recover deleted messages & media
+• *.getdp [@user]* : Download HD profile picture
+• *.tempmail* : Generate disposable email & receive OTPs
+
+🤖 *[AI & UTILITIES]*
+• *.ai [ප්‍රශ්නය]* : Free Gemini 2.0 Flash AI answers
+• *.song [නම]* : 320kbps MP3 audio download with album art
+• *.tt [link]* : TikTok video without watermark
+• *.fb [link]* : Facebook HD video downloader
+• *.ig [link]* : Instagram Reels & Stories downloader
+• *.s* : Reply to photo/video to make WhatsApp sticker
+• *.take [pack] | [author]* : Change sticker metadata
+
+🛡️ *[GROUP MANAGEMENT]*
+• *.hidetag [message]* : Invisible tag for all group members
+• *.tagall* : Mention all group members
+• *.antilink [on/off]* : Auto-delete links & kick spammers
+• *.kick [@user]* : Remove member from group
+
+⚙️ *[CUSTOMIZATION & WEB PANEL]*
+• *.settings* : View & configure bot settings
+• *.setpass [password]* : Set web panel login password
+• 🔗 *Settings Web Panel:* https://nexus-one-orpin.vercel.app/bot/settings
+• 🔗 *Pair Another Bot:* https://nexus-one-orpin.vercel.app/bot
+
+━━━━━━━━━━━━━━━━━━━━
+📢 *Official VIP Channel:*
+👉 https://whatsapp.com/channel/0029Vb9AG1c3GJOsPvzqdu0R
+> 🌍 *NEXUS DEV COMMUNITY*`;
+
+            await waSocket.sendMessage(remoteJid, {
+              text: menuMsg,
+              contextInfo: getMetaAiContext(mentionsList),
+            });
+            continue;
+          }
+
+          // 2. .ai [query]
+          if (["ai", "gemini", "gpt", "ask"].includes(cmdName)) {
+            if (!cmdArgs) {
+              await waSocket.sendMessage(remoteJid, {
+                text: `🤖 *[Nexus Gemini AI]*\nකරුණාකර ඔබගේ ප්‍රශ්නය ඇතුලත් කරන්න.\nඋදාහරණ: *.ai what is quantum computing* හෝ *.ai සිංහලෙන් කතා කරන්න*`,
+                contextInfo: getMetaAiContext(mentionsList),
+              });
+            } else {
+              try {
+                const aiRes = await axios.get(`https://api.allorigins.win/raw?url=${encodeURIComponent(`https://text.pollinations.ai/${encodeURIComponent(cmdArgs)}`)}`, { timeout: 20000 });
+                const reply = aiRes.data || "Could not generate response.";
+                await waSocket.sendMessage(remoteJid, {
+                  text: `🤖 *[Nexus Gemini AI]*\n━━━━━━━━━━━━━━━━━━━━\n${reply}\n━━━━━━━━━━━━━━━━━━━━\n⚡ *Powered by Gemini Flash*`,
+                  contextInfo: getMetaAiContext(mentionsList),
+                });
+              } catch (_) {
+                await waSocket.sendMessage(remoteJid, {
+                  text: `⚠️ AI සේවාව තාවකාලිකව කාර්යබහුලයි. කරුණාකර සුළු මොහොතකින් නැවත උත්සාහ කරන්න.`,
+                  contextInfo: getMetaAiContext(mentionsList),
+                });
+              }
+            }
+            continue;
+          }
+
+          // 3. .movie [name] / .cinesub [name]
+          if (["movie", "cinesub", "sinhalasub", "film"].includes(cmdName)) {
+            if (!cmdArgs) {
+              await waSocket.sendMessage(remoteJid, {
+                text: `🎬 *[CineSubz 4K Downloader]*\nකරුණාකර චිත්‍රපටයේ නම ලබා දෙන්න.\nඋදාහරණ: *.movie Inception* හෝ *.cinesub Oppenheimer*`,
+                contextInfo: getMetaAiContext(mentionsList),
+              });
+            } else {
+              await waSocket.sendMessage(remoteJid, {
+                text: `🔍 *[CineSubz Engine]* Searching for: *${cmdArgs}*...\n4K Direct Links & Online Stream සූදානම් වෙමින් පවතී...`,
+                contextInfo: getMetaAiContext(mentionsList),
+              });
+            }
+            continue;
+          }
+
+          // 4. .hidetag [message]
+          if (["hidetag", "htag"].includes(cmdName) && isGroup) {
+            if (!isAdmin) {
+              await waSocket.sendMessage(remoteJid, { text: "❌ මෙම command එක භාවිත කළ හැක්කේ Admin අයට පමණි.", contextInfo: getMetaAiContext(mentionsList) });
+            } else {
+              try {
+                const groupMeta = await waSocket.groupMetadata(remoteJid);
+                const participants = groupMeta.participants.map((p) => p.id);
+                await waSocket.sendMessage(remoteJid, {
+                  text: cmdArgs || "📢 *Attention Everyone!*",
+                  mentions: participants,
+                  contextInfo: getMetaAiContext(participants),
+                });
+              } catch (_) {}
+            }
+            continue;
+          }
+
+          // 5. .tagall
+          if (["tagall"].includes(cmdName) && isGroup) {
+            if (!isAdmin) {
+              await waSocket.sendMessage(remoteJid, { text: "❌ මෙම command එක භාවිත කළ හැක්කේ Admin අයට පමණි.", contextInfo: getMetaAiContext(mentionsList) });
+            } else {
+              try {
+                const groupMeta = await waSocket.groupMetadata(remoteJid);
+                const participants = groupMeta.participants.map((p) => p.id);
+                let tagText = `📢 *[TAG ALL MEMBERS]*\n💬 *Message:* ${cmdArgs || 'None'}\n━━━━━━━━━━━━━━━━━━━━\n`;
+                participants.forEach((p, idx) => {
+                  tagText += `${idx + 1}. @${p.split("@")[0]}\n`;
+                });
+                await waSocket.sendMessage(remoteJid, {
+                  text: tagText,
+                  mentions: participants,
+                  contextInfo: getMetaAiContext(participants),
+                });
+              } catch (_) {}
+            }
+            continue;
+          }
+
+          // 6. .settings / .setpass
+          if (["settings", "config"].includes(cmdName)) {
+            const settingsMsg = 
+`⚙️ *[NEXUS MINI SETTINGS]*
+━━━━━━━━━━━━━━━━━━━━
+📱 *Your Number:* +${senderPhone}
+🌐 *Web Settings Panel:*
+👉 https://nexus-one-orpin.vercel.app/bot/settings
+
+🔑 *Password Set කරන්න:*
+*.setpass [your-new-password]*
+
+💡 Web Settings Panel එකට ගොස් ඔබට කැමති නම, Prefix සහ Custom Footers වෙනස් කරගත හැක!
+━━━━━━━━━━━━━━━━━━━━`;
+            await waSocket.sendMessage(remoteJid, { text: settingsMsg, contextInfo: getMetaAiContext(mentionsList) });
+            continue;
+          }
+
+          if (["setpass", "password"].includes(cmdName)) {
+            if (!cmdArgs) {
+              await waSocket.sendMessage(remoteJid, { text: "⚠️ කරුණාකර password එකක් ඇතුලත් කරන්න. උදාහරණ: *.setpass mysecret123*", contextInfo: getMetaAiContext(mentionsList) });
+            } else {
+              const allStats = getUserStats();
+              if (!allStats[senderPhone]) allStats[senderPhone] = { count: 0, name: pushName, firstSeen: new Date().toISOString() };
+              allStats[senderPhone].webPassword = cmdArgs;
+              saveUserStats(allStats);
+              await waSocket.sendMessage(remoteJid, {
+                text: `✅ *[Password Saved!]*\nඔබගේ Web Settings Password එක සාර්ථකව set කරන ලදී.\n🌐 Web Panel එකට පිවිසෙන්න:\n👉 https://nexus-one-orpin.vercel.app/bot/settings`,
+                contextInfo: getMetaAiContext(mentionsList),
+              });
+            }
+            continue;
+          }
+        }
 
         // Admin Management Commands
         if (isAdmin && text.startsWith("!")) {
