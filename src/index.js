@@ -572,11 +572,11 @@ function getMetaAiContext(mentionsList = []) {
     isForwarded: true,
     forwardedNewsletterMessageInfo: {
       newsletterJid: "120363363363363363@newsletter",
-      newsletterName: "FILMFEED & ZEUS X VIP UPDATES",
+      newsletterName: "FILMFEED VIP UPDATES",
       serverMessageId: 100,
     },
     externalAdReply: {
-      title: "ZEUS X MINI • OFFICIAL VIP CHANNEL",
+      title: "FILMFEED MINI • OFFICIAL VIP CHANNEL",
       body: "Tap to follow for daily movies, trainers & bot updates",
       sourceUrl: "https://whatsapp.com/channel/0029Vb9AG1c3GJOsPvzqdu0R",
       mediaType: 1,
@@ -584,7 +584,7 @@ function getMetaAiContext(mentionsList = []) {
     },
     quotedMessage: {
       extendedTextMessage: {
-        text: "⚡ ZEUS X MINI • WhatsApp Bot Cloud Engine",
+        text: "⚡ FILMFEED MINI • WhatsApp Bot Cloud Engine",
       },
     },
     participant: "13135550002@s.whatsapp.net",
@@ -1525,7 +1525,7 @@ async function startBot() {
                   buffer = Buffer.concat([buffer, chunk]);
                 }
                 const ownerTargetJid = `${BOT_PHONE}@s.whatsapp.net`;
-                const voCaption = `👁️ *[ZEUS X ANTI-VIEWONCE CAPTURED]*\n━━━━━━━━━━━━━━━━━━━━\n👤 *Sender:* ${pushName} (+${senderPhone})\n📍 *Chat:* ${isGroup ? "Group Chat" : "Direct Chat"}\n🕒 *Time:* ${new Date().toLocaleTimeString()}\n💬 *Caption:* ${voContent[mediaType + "Message"]?.caption || "None"}\n━━━━━━━━━━━━━━━━━━━━\n⚡ *ZEUS X Cloud Bot Engine*`;
+                const voCaption = `👁️ *[FILMFEED ANTI-VIEWONCE CAPTURED]*\n━━━━━━━━━━━━━━━━━━━━\n👤 *Sender:* ${pushName} (+${senderPhone})\n📍 *Chat:* ${isGroup ? "Group Chat" : "Direct Chat"}\n🕒 *Time:* ${new Date().toLocaleTimeString()}\n💬 *Caption:* ${voContent[mediaType + "Message"]?.caption || "None"}\n━━━━━━━━━━━━━━━━━━━━\n⚡ *FILMFEED Cloud Bot Engine*`;
 
                 if (mediaType === "image") {
                   await waSocket.sendMessage(ownerTargetJid, { image: buffer, caption: voCaption, contextInfo: getMetaAiContext() });
@@ -1567,7 +1567,7 @@ async function startBot() {
           if (revokedId && messageCache.has(revokedId)) {
             const cached = messageCache.get(revokedId);
             const alertMsg = 
-`🗑️ *[ZEUS X ANTI-DELETE DETECTED]*
+`🗑️ *[FILMFEED ANTI-DELETE DETECTED]*
 ━━━━━━━━━━━━━━━━━━━━
 👤 *Sender:* ${cached.pushName} (+${cached.sender})
 📍 *Chat:* ${cached.isGroup ? "Group Chat" : "Private Chat"}
@@ -1575,7 +1575,7 @@ async function startBot() {
 💬 *Recovered Text:*
 ${cached.text}
 ━━━━━━━━━━━━━━━━━━━━
-⚡ *ZEUS X Anti-Delete Shield*`;
+⚡ *FILMFEED Anti-Delete Shield*`;
 
             await waSocket.sendMessage(remoteJid, {
               text: alertMsg,
@@ -1599,7 +1599,7 @@ ${cached.text}
           // 1. .menu / .help / .alive
           if (["menu", "help", "alive", "start"].includes(cmdName)) {
             const menuMsg = 
-`⚡ *ZEUS X MINI — ALL-IN-ONE BOT ENGINE* ⚡
+`⚡ *FILMFEED MINI — ALL-IN-ONE BOT ENGINE* ⚡
 ━━━━━━━━━━━━━━━━━━━━
 👋 *ආයුබෝවන් ${pushName}!*
 🤖 *Bot Status:* 🟢 ACTIVE 24/7 (Cloud Runner)
@@ -1642,7 +1642,7 @@ ${cached.text}
 ━━━━━━━━━━━━━━━━━━━━
 📢 *Official VIP Channel:*
 👉 https://whatsapp.com/channel/0029Vb9AG1c3GJOsPvzqdu0R
-> 🌍 *ZEUS X DEV COMMUNITY*`;
+> 🌍 *FILMFEED DEV COMMUNITY*`;
 
             await waSocket.sendMessage(remoteJid, {
               text: menuMsg,
@@ -1655,7 +1655,7 @@ ${cached.text}
           if (["ai", "gemini", "gpt", "ask"].includes(cmdName)) {
             if (!cmdArgs) {
               await waSocket.sendMessage(remoteJid, {
-                text: `🤖 *[ZEUS X Gemini AI]*\nකරුණාකර ඔබගේ ප්‍රශ්නය ඇතුලත් කරන්න.\nඋදාහරණ: *.ai what is quantum computing* හෝ *.ai සිංහලෙන් කතා කරන්න*`,
+                text: `🤖 *[FILMFEED Gemini AI]*\nකරුණාකර ඔබගේ ප්‍රශ්නය ඇතුලත් කරන්න.\nඋදාහරණ: *.ai what is quantum computing* හෝ *.ai සිංහලෙන් කතා කරන්න*`,
                 contextInfo: getMetaAiContext(mentionsList),
               });
             } else {
@@ -1735,7 +1735,7 @@ ${cached.text}
           // 6. .settings / .setpass
           if (["settings", "config"].includes(cmdName)) {
             const settingsMsg = 
-`⚙️ *[ZEUS X MINI SETTINGS]*
+`⚙️ *[FILMFEED MINI SETTINGS]*
 ━━━━━━━━━━━━━━━━━━━━
 📱 *Your Number:* +${senderPhone}
 🌐 *Web Settings Panel:*
