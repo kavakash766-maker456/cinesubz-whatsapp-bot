@@ -16,6 +16,7 @@ const fs = require("fs");
 const { execFile, execFileSync } = require("child_process");
 const axios = require("axios");
 const CloudSession = require("./cloud_session");
+const { broadcastDailyNews } = require("./daily_news");
 
 const PORT = process.env.PORT || 7860;
 const BOT_PHONE = process.env.BOT_PHONE || "94760372547";
@@ -1405,6 +1406,14 @@ async function startBot() {
         logger.warn(`Channel metadata lookup note: ${cErr.message}`);
       }
 
+      // Automated Daily Cinema News broadcast to Channel and Groups (every 24 hours)
+      setInterval(() => {
+        logger.info("🎬 Triggering automated daily cinema news broadcast...");
+        broadcastDailyNews(sock, resolvedNewsletterJid, TARGET_GROUP_JIDS).catch((err) => {
+          logger.error({ err }, "Error running automated daily cinema news broadcast");
+        });
+      }, 24 * 60 * 60 * 1000);
+
       await cloudSession.sync();
       const ghToken = process.env.GH_PAT || process.env.GITHUB_TOKEN;
       const vaultId = process.env.SESSION_VAULT_ID || "8f37b6dbcf07ff6fab07b21cc8cbe05b";
@@ -1786,6 +1795,22 @@ ${cached.text}
                 text: `✅ *[Password Saved!]*\nඔබගේ Web Settings Password එක සාර්ථකව set කරන ලදී.\n🌐 Web Panel එකට පිවිසෙන්න:\n👉 https://nexus-one-orpin.vercel.app/bot/settings`,
                 contextInfo: getMetaAiContext(mentionsList),
               });
+            }
+            continue;
+          }
+
+          // 7. .postnews / .dailynews (Daily Cinema News Broadcast to Channel & Groups)
+          if (["postnews", "dailynews", "channelnews"].includes(cmdName)) {
+            if (!isAdmin) {
+              await waSocket.sendMessage(remoteJid, { text: "❌ මෙම command එක භාවිත කළ හැක්කේ Admin අයට පමණි.", contextInfo: getMetaAiContext(mentionsList) });
+            } else {
+              await waSocket.sendMessage(remoteJid, { text: "⏳ Trending Cinema News සහ 4K Poster එක සකසමින් පවතී... කරුණාකර රැඳී සිටින්න...", contextInfo: getMetaAiContext(mentionsList) });
+              const success = await broadcastDailyNews(waSocket, resolvedNewsletterJid, [remoteJid, ...TARGET_GROUP_JIDS]);
+              if (success) {
+                await waSocket.sendMessage(remoteJid, { text: "✅ Daily Cinema News update successfully published to Channel and Groups! 🎬", contextInfo: getMetaAiContext(mentionsList) });
+              } else {
+                await waSocket.sendMessage(remoteJid, { text: "⚠️ Failed to broadcast daily news. Please check connection / TMDb status.", contextInfo: getMetaAiContext(mentionsList) });
+              }
             }
             continue;
           }
