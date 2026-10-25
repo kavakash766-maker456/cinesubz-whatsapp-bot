@@ -846,6 +846,23 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
               });
             }
             seasonPosterSent = true;
+            try {
+              await broadcastToGroups({
+                poll: {
+                  name: `🍿 "${showTitle} (Season ${seasonNumber})" කතා මාලාව ගැන ඔබේ අදහස?`,
+                  values: [
+                    "🔥 සුපිරියක් (Must Watch)",
+                    "👍 හොඳයි (Good)",
+                    "😐 සාමාන්‍යයි (Average)",
+                    "👎 වැඩක් නෑ (Not Recommended)",
+                    "⏳ තාම බැලුවේ නෑ (Watching Soon)",
+                  ],
+                  selectableCount: 1,
+                },
+              });
+            } catch (pErr) {
+              logger.warn(`Could not send season poll: ${pErr.message}`);
+            }
           }
 
           const fileBuffer = fs.readFileSync(tempFilePath);
@@ -1132,6 +1149,25 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
           mentions: mentionsList,
           contextInfo: getMetaAiContext(mentionsList),
         });
+      }
+
+      // Interactive WhatsApp Movie Poll
+      try {
+        await broadcastToGroups({
+          poll: {
+            name: `🍿 "${title}" චිත්‍රපටය ඔබ නැරඹුවාද? ඔබේ අදහස කුමක්ද?`,
+            values: [
+              "🔥 සුපිරියක් (Must Watch)",
+              "👍 හොඳයි (Good)",
+              "😐 සාමාන්‍යයි (Average)",
+              "👎 වැඩක් නෑ (Not Recommended)",
+              "⏳ තාම බැලුවේ නෑ (Watching Soon)",
+            ],
+            selectableCount: 1,
+          },
+        });
+      } catch (pErr) {
+        logger.warn(`Could not send movie poll: ${pErr.message}`);
       }
 
       // 4. Upload Document to all groups with Movie Poster Thumbnail & Meta AI Styling
