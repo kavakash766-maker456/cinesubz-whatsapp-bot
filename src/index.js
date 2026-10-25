@@ -830,7 +830,7 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 
 📥 _Episode 1 සිට ${totalEpisodes} දක්වා පිළිවෙළින් Group එකට Upload වනු ඇත!_\n${getPromoFooter()}`;
 
-            const effectivePoster = backdropUrl || posterUrl;
+            const effectivePoster = posterUrl || backdropUrl;
             if (effectivePoster) {
               await broadcastToGroups({
                 image: { url: effectivePoster },
@@ -846,23 +846,6 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
               });
             }
             seasonPosterSent = true;
-            try {
-              await broadcastToGroups({
-                poll: {
-                  name: `🍿 "${showTitle} (Season ${seasonNumber})" කතා මාලාව ගැන ඔබේ අදහස?`,
-                  values: [
-                    "🔥 සුපිරියක් (Must Watch)",
-                    "👍 හොඳයි (Good)",
-                    "😐 සාමාන්‍යයි (Average)",
-                    "👎 වැඩක් නෑ (Not Recommended)",
-                    "⏳ තාම බැලුවේ නෑ (Watching Soon)",
-                  ],
-                  selectableCount: 1,
-                },
-              });
-            } catch (pErr) {
-              logger.warn(`Could not send season poll: ${pErr.message}`);
-            }
           }
 
           const fileBuffer = fs.readFileSync(tempFilePath);
@@ -897,6 +880,39 @@ ${getPromoFooter()}`,
         } catch (epErr) {
           logger.error({ epErr }, `Error downloading episode ${epIndex}`);
         }
+      }
+
+      // Send Interactive Poll after ALL episodes are uploaded
+      try {
+        await broadcastToGroups({
+          poll: {
+            name: `🍿 "${showTitle} (Season ${seasonNumber})" කතා මාලාව ගැන ඔබේ අදහස?`,
+            values: [
+              "🔥 සුපිරියක් (Must Watch)",
+              "👍 හොඳයි (Good)",
+              "😐 සාමාන්‍යයි (Average)",
+              "👎 වැඩක් නෑ (Not Recommended)",
+              "⏳ තාම බැලුවේ නෑ (Watching Soon)",
+            ],
+            selectableCount: 1,
+          },
+        });
+      } catch (pErr) {
+        logger.warn(`Could not send season poll: ${pErr.message}`);
+      }
+
+      // Auto-post TV Series to WhatsApp Status
+      try {
+        const sPoster = posterUrl || backdropUrl;
+        if (sPoster && waSocket) {
+          await waSocket.sendMessage("status@broadcast", {
+            image: { url: sPoster },
+            caption: `📺 *NEW TV SERIES PACK!* 🍿\n━━━━━━━━━━━━━━━━━━━━\n🔥 *${showTitle} (Season ${seasonNumber})*\n📦 All Episodes Uploaded\n⚡ Sinhala Subtitles Included\n\n📥 *Download from our Group:*\n👥 ${primaryGroupLink}\n\n🌐 *Web:* https://nexus-one-orpin.vercel.app`,
+          });
+          logger.info("📢 Auto-posted TV series update to WhatsApp Status!");
+        }
+      } catch (stErr) {
+        logger.warn(`Could not auto-post season to WhatsApp status: ${stErr.message}`);
       }
 
       // Final Season Completion Notification
@@ -1135,7 +1151,7 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 
 🍿 _චිත්‍රපටය පහතින් Document එකක් ලෙස ලැබෙනු ඇත!_\n${getPromoFooter()}`;
 
-      const effectivePoster = backdropUrl || posterUrl;
+      const effectivePoster = posterUrl || backdropUrl;
       if (effectivePoster) {
         await broadcastToGroups({
           image: { url: effectivePoster },
@@ -1149,25 +1165,6 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
           mentions: mentionsList,
           contextInfo: getMetaAiContext(mentionsList),
         });
-      }
-
-      // Interactive WhatsApp Movie Poll
-      try {
-        await broadcastToGroups({
-          poll: {
-            name: `🍿 "${title}" චිත්‍රපටය ඔබ නැරඹුවාද? ඔබේ අදහස කුමක්ද?`,
-            values: [
-              "🔥 සුපිරියක් (Must Watch)",
-              "👍 හොඳයි (Good)",
-              "😐 සාමාන්‍යයි (Average)",
-              "👎 වැඩක් නෑ (Not Recommended)",
-              "⏳ තාම බැලුවේ නෑ (Watching Soon)",
-            ],
-            selectableCount: 1,
-          },
-        });
-      } catch (pErr) {
-        logger.warn(`Could not send movie poll: ${pErr.message}`);
       }
 
       // 4. Upload Document to all groups with Movie Poster Thumbnail & Meta AI Styling
@@ -1192,6 +1189,50 @@ ${getPromoFooter()}`,
         ...(thumbBuffer ? { jpegThumbnail: thumbBuffer } : {}),
         contextInfo: getMetaAiContext(mentionsList),
       });
+
+      // 4.1. Send Interactive WhatsApp Movie Poll AFTER Document is delivered to groups
+      try {
+        await broadcastToGroups({
+          poll: {
+            name: `🍿 "${title}" චිත්‍රපටය ඔබ නැරඹුවාද? ඔබේ අදහස කුමක්ද?`,
+            values: [
+              "🔥 සුපිරියක් (Must Watch)",
+              "👍 හොඳයි (Good)",
+              "😐 සාමාන්‍යයි (Average)",
+              "👎 වැඩක් නෑ (Not Recommended)",
+              "⏳ තාම බැලුවේ නෑ (Watching Soon)",
+            ],
+            selectableCount: 1,
+          },
+        });
+      } catch (pErr) {
+        logger.warn(`Could not send movie poll: ${pErr.message}`);
+      }
+
+      // 4.2. Auto-post Movie Drop to WhatsApp Status (mentioning group)
+      try {
+        if (effectivePoster && waSocket) {
+          const statusCaption = 
+`🎬 *NEW MOVIE UPLOADED!* 🍿
+━━━━━━━━━━━━━━━━━━━━
+🔥 *${title}* (${resolvedQuality})
+⭐ TMDb Rating: ${tmdb?.voteAverage ? tmdb.voteAverage.toFixed(1) : "7.5"}/10
+⚡ Sinhala Subtitles Included (CineSubz)
+
+📥 *Download from our Group:*
+👥 ${primaryGroupLink}
+
+🌐 *Web:* https://nexus-one-orpin.vercel.app`;
+
+          await waSocket.sendMessage("status@broadcast", {
+            image: { url: effectivePoster },
+            caption: statusCaption,
+          });
+          logger.info("📢 Auto-posted movie drop to WhatsApp Status!");
+        }
+      } catch (stErr) {
+        logger.warn(`Could not auto-post to WhatsApp status: ${stErr.message}`);
+      }
 
       // 5. Delete temp file from disk
       if (fs.existsSync(tempFilePath)) {
