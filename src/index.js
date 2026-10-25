@@ -571,56 +571,29 @@ async function getPosterThumbnail(posterUrl, thumbnailB64 = null) {
 // Global variable to hold real verified newsletter JID dynamically resolved from WhatsApp
 let resolvedNewsletterJid = null;
 
-// Pre-load gift box thumbnail for externalAdReply so WhatsApp never renders an empty black box
-let giftBoxThumbBuffer = null;
-try {
-  const thumbPath = path.join(__dirname, "../gift_box_thumb.jpg");
-  if (fs.existsSync(thumbPath)) {
-    giftBoxThumbBuffer = fs.readFileSync(thumbPath);
-  } else {
-    const bannerPath = path.join(__dirname, "../gift_box.jpg");
-    if (fs.existsSync(bannerPath)) {
-      giftBoxThumbBuffer = fs.readFileSync(bannerPath);
-    }
-  }
-} catch (e) {
-  console.warn("Could not pre-load externalAdReply thumbnail buffer:", e.message);
+// Global cached primary group invite link
+let primaryGroupLink = "https://chat.whatsapp.com/invite";
+
+// Standard automatic promotional footer for FilmFeed Network
+function getPromoFooter() {
+  const gLink = (primaryGroupLink && primaryGroupLink !== "https://chat.whatsapp.com/invite")
+    ? `
+👥 *Official Group:* ${primaryGroupLink}`
+    : "";
+  return `━━━━━━━━━━━━━━━━━━━━
+🌐 *Website:* https://nexus-one-orpin.vercel.app${gLink}
+📢 *VIP Channel:* https://whatsapp.com/channel/0029Vb9AG1c3GJOsPvzqdu0R`;
 }
 
+// Clean, standard WhatsApp message context (No fake participant quotes or fake stanzas)
+// This guarantees 100% visibility for all group members across Android, iPhone, Web & Desktop
 function getMetaAiContext(mentionsList = []) {
-  const ctx = {
-    externalAdReply: {
-      title: "🎁 FILMFEED VIP GIFT • TAP TO PLAY & CLAIM",
-      body: "🎮 Play Retro Arcade Game & Unlock VIP 4K Downloads!",
-      sourceUrl: "https://nexus-one-orpin.vercel.app/game",
-      mediaType: 1,
-      renderLargerThumbnail: true,
-      showAdAttribution: true,
-      ...(giftBoxThumbBuffer ? { thumbnail: giftBoxThumbBuffer } : {}),
-      thumbnailUrl: "https://nexus-one-orpin.vercel.app/gift_box.jpg",
-    },
-    quotedMessage: {
-      extendedTextMessage: {
-        text: "⚡ FILMFEED MINI • WhatsApp Bot Cloud Engine",
-      },
-    },
-    participant: "13135550002@s.whatsapp.net",
-    remoteJid: "status@broadcast",
-    mentionedJid: mentionsList,
-  };
-
-  // Only attach forwardedNewsletterMessageInfo if real JID is verified from WhatsApp servers
-  if (resolvedNewsletterJid) {
-    ctx.isForwarded = true;
-    ctx.forwardingScore = 999;
-    ctx.forwardedNewsletterMessageInfo = {
-      newsletterJid: resolvedNewsletterJid,
-      newsletterName: "FILMFEED VIP UPDATES",
-      serverMessageId: 1,
+  if (Array.isArray(mentionsList) && mentionsList.length > 0) {
+    return {
+      mentionedJid: mentionsList,
     };
   }
-
-  return ctx;
+  return {};
 }
 
 // --------------------------------------------------------------------------
@@ -855,7 +828,7 @@ ${tmdb?.voteAverage ? `⭐ *TMDb Rating:* ${tmdb.voteAverage.toFixed(1)}/10\n` :
 📝 *Storyline / සාරාංශය:*
 ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 
-📥 _Episode 1 සිට ${totalEpisodes} දක්වා පිළිවෙළින් Group එකට Upload වනු ඇත!_`;
+📥 _Episode 1 සිට ${totalEpisodes} දක්වා පිළිවෙළින් Group එකට Upload වනු ඇත!_\n${getPromoFooter()}`;
 
             const effectivePoster = backdropUrl || posterUrl;
             if (effectivePoster) {
@@ -891,7 +864,7 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 ⚡ *Status:* Uploaded Successfully
 ━━━━━━━━━━━━━━━━━━━━
 🍿 FilmFeed TV Series Engine
-👉 Request: https://web-umber-six-e1un7z6257.vercel.app`,
+${getPromoFooter()}`,
             mentions: mentionsList,
             ...(epThumbnail ? { jpegThumbnail: epThumbnail } : {}),
             contextInfo: getMetaAiContext(mentionsList),
@@ -920,7 +893,7 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 ⚡ *තත්ත්වය:* Broadcast Complete
 ━━━━━━━━━━━━━━━━━━━━
 🍿 FilmFeed Group එකෙන් දැන්ම නරඹන්න!
-👉 Website: https://web-umber-six-e1un7z6257.vercel.app`,
+👉 Website: https://nexus-one-orpin.vercel.app`,
         mentions: mentionsList,
         contextInfo: getMetaAiContext(mentionsList),
       });
@@ -991,7 +964,7 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
 
 💡 *විසඳුම:*
 කරුණාකර වෙබ් අඩවියෙන් *720p* හෝ *480p* Quality එක (2GB ට අඩු) තෝරා නැවත Request කරන්න:
-👉 https://web-umber-six-e1un7z6257.vercel.app
+👉 https://nexus-one-orpin.vercel.app
 ━━━━━━━━━━━━━━━━━━━━`;
 
         await waSocket.sendMessage(replyTarget, {
@@ -1143,7 +1116,7 @@ ${tmdb?.voteAverage ? `⭐ *TMDb Rating:* ${tmdb.voteAverage.toFixed(1)}/10\n` :
 📝 *Storyline / සාරාංශය:*
 ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 
-🍿 _චිත්‍රපටය පහතින් Document එකක් ලෙස ලැබෙනු ඇත!_`;
+🍿 _චිත්‍රපටය පහතින් Document එකක් ලෙස ලැබෙනු ඇත!_\n${getPromoFooter()}`;
 
       const effectivePoster = backdropUrl || posterUrl;
       if (effectivePoster) {
@@ -1178,7 +1151,7 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 ⚡ *Status:* Group Broadcast Completed
 ━━━━━━━━━━━━━━━━━━━━
 🍿 FilmFeed 4K Auto-Bot Engine
-👉 Request: https://web-umber-six-e1un7z6257.vercel.app`,
+${getPromoFooter()}`,
         mentions: mentionsList,
         ...(thumbBuffer ? { jpegThumbnail: thumbBuffer } : {}),
         contextInfo: getMetaAiContext(mentionsList),
@@ -1218,7 +1191,7 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 📜 *ඔබ මෙතෙක් ලබාගත් චිත්‍රපට ලැයිස්තුව (${updatedStats.count}):*${historyText}
 ━━━━━━━━━━━━━━━━━━━━
 🍿 FilmFeed Group එකෙන් දැන්ම Download කරගන්න!
-👉 Website: https://web-umber-six-e1un7z6257.vercel.app`,
+👉 Website: https://nexus-one-orpin.vercel.app`,
         mentions: mentionsList,
         contextInfo: getMetaAiContext(mentionsList),
       });
@@ -1438,6 +1411,19 @@ async function startBot() {
       // Register Bot in Firebase Firestore and keep alive
       try {
         registerBotInFirestore(BOT_PHONE, "Master Account", "ONLINE", true);
+      // Auto-resolve group invite link so it can be promoted across messages
+      for (const gjid of TARGET_GROUP_JIDS) {
+        try {
+          const code = await sock.groupInviteCode(gjid);
+          if (code) {
+            primaryGroupLink = `https://chat.whatsapp.com/${code}`;
+            logger.info(`👥 Resolved Official Group Invite Link: ${primaryGroupLink}`);
+            break;
+          }
+        } catch (e) {
+          logger.warn(`Could not resolve group invite code for ${gjid}: ${e.message}`);
+        }
+      }
         setInterval(() => {
           registerBotInFirestore(BOT_PHONE, "Master Account", "ONLINE", true);
         }, 2 * 60 * 1000);
@@ -1710,8 +1696,8 @@ ${cached.text}
 • 🔗 *Pair Another Bot:* https://nexus-one-orpin.vercel.app/bot
 
 ━━━━━━━━━━━━━━━━━━━━
-📢 *Official VIP Channel:*
-👉 https://whatsapp.com/channel/0029Vb9AG1c3GJOsPvzqdu0R
+🌐 *Website:* https://nexus-one-orpin.vercel.app
+📢 *VIP Channel:* https://whatsapp.com/channel/0029Vb9AG1c3GJOsPvzqdu0R
 > 🌍 *FILMFEED DEV COMMUNITY*`;
 
             await waSocket.sendMessage(remoteJid, {
@@ -2190,7 +2176,7 @@ _නැවත සේවාව ලබා ගැනීමට අවශ්‍ය �
 • 🚫 කිසිදු සීමාවකින් තොර වීම
 
 👉 *VIP සක්‍රීය කරගැනීමට පිවිසෙන්න:*
-https://web-umber-six-e1un7z6257.vercel.app
+https://nexus-one-orpin.vercel.app
 
 හෝ Admin අමතන්න: +94 76 037 2547
 ━━━━━━━━━━━━━━━━━━━━`;

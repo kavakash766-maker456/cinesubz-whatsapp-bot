@@ -121,7 +121,7 @@ ${sinhalaOverview}
 
 ⚡ *නවතම තොරතුරු & Viewing Options:*
 • *4K Ultra HD Streaming:* FilmFeed Player එකෙන් Buffer නොවී දැන්ම නරඹන්න!
-  🔗 https://web-umber-six-e1un7z6257.vercel.app/movie/${movie.id}
+  🔗 https://nexus-one-orpin.vercel.app/movie/${movie.id}
 
 • *Direct Download Links:* FilmFeed Bot හරහා පහසුවෙන්ම ලබාගත හැක:
   👉 Type: *.movie ${movie.title}*
