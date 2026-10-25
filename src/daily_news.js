@@ -135,6 +135,7 @@ ${sinhalaOverview}
 
   return {
     movieId: movie.id,
+    movieTitle: movie.title,
     posterUrl: movie.posterUrl,
     caption,
   };
@@ -161,7 +162,7 @@ async function broadcastDailyNews(sock, channelJid = null, targetGroupJids = [])
       }
     }
 
-    // 2. Broadcast to user's Groups
+    // 2. Broadcast to user's Groups with Interactive Poll
     for (const groupJid of targetGroupJids) {
       try {
         await sock.sendMessage(groupJid, {
@@ -169,6 +170,23 @@ async function broadcastDailyNews(sock, channelJid = null, targetGroupJids = [])
           caption: post.caption,
         });
         console.log(`✅ [DailyNews] Broadcasted daily news to group: ${groupJid}`);
+
+        // Interactive Poll
+        try {
+          await sock.sendMessage(groupJid, {
+            poll: {
+              name: `🍿 "${post.movieTitle}" ගැන ඔබේ අදහස?`,
+              values: [
+                "🔥 සුපිරියක් (Must Watch)",
+                "👍 හොඳයි (Good)",
+                "😐 සාමාන්‍යයි (Average)",
+                "👎 වැඩක් නෑ (Not Recommended)",
+                "⏳ තාම බැලුවේ නෑ (Watching Soon)",
+              ],
+              selectableCount: 1,
+            },
+          });
+        } catch (_) {}
       } catch (gErr) {
         console.warn(`[DailyNews] Could not post to group ${groupJid}:`, gErr.message);
       }
