@@ -18,6 +18,7 @@ const axios = require("axios");
 const CloudSession = require("./cloud_session");
 const { broadcastDailyNews } = require("./daily_news");
 const { registerBotInFirestore } = require("./firebase_sync");
+const { handleInboxAutoReply } = require("./gemini_assistant");
 
 const PORT = process.env.PORT || 7860;
 const BOT_PHONE = process.env.BOT_PHONE || "94760372547";
@@ -2116,7 +2117,34 @@ ${cached.text}
           }
         }
 
-        if (!commandFound || !movieUrl) continue;
+        if (!commandFound || !movieUrl) {
+          // If in private chat (DM) and not from bot itself, check for intelligent Gemini Auto-Reply
+          if (!isGroup && !fromMe) {
+            try {
+              const aiResult = await handleInboxAutoReply(senderPhone, pushName, text, primaryGroupLink);
+              if (aiResult && aiResult.text) {
+                await waSocket.sendMessage(remoteJid, {
+                  text: aiResult.text,
+                  contextInfo: getMetaAiContext(mentionsList),
+                });
+
+                // Send Akash Sithum vCard if identity/developer was queried
+                if (aiResult.sendContactCard && aiResult.contact) {
+                  await waSocket.sendMessage(remoteJid, {
+                    contacts: {
+                      displayName: aiResult.contact.displayName,
+                      contacts: [{ vcard: aiResult.contact.vcard }],
+                    },
+                  });
+                }
+                logger.info(`🤖 [Gemini Auto-Reply] Sent guidance to +${senderPhone} (${pushName})`);
+              }
+            } catch (aiErr) {
+              logger.warn(`[Gemini Auto-Reply] Error: ${aiErr.message}`);
+            }
+          }
+          continue;
+        }
 
         // Normalize domain to cinesubz.lk for fast direct connection
         movieUrl = movieUrl.replace(/cinesubz\.(net|co)/g, "cinesubz.lk");
