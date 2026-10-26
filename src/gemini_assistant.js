@@ -5,14 +5,13 @@ const GEMINI_API_KEY =
   process.env.GEMINI_API_KEY ||
   Buffer.from("QVEuQWI4Uk42Sl9ZQ3Z2QlFaVnZ2dlBsVTNXVnNvWGJWQUVtZnhjcU9xR1V1UllTR0VBb1E=", "base64").toString("utf-8");
 
-// Candidate models in cascade order: Gemini 2.5 Flash first, then ultra-fast 3.5 Flash Lite, 3.6 Flash, 3.1 Flash Lite, 3.5 Flash, 3.8 Flash
+// Candidate models in cascade order: Ultra-fast stable 3.6 Flash (3.8s) and 3.5 Flash Lite (5.5s),
+// followed by gemini-flash-lite-latest, and 2.5 Flash as quota fallback
 const CANDIDATE_MODELS = [
-  { name: "gemini-2.5-flash", timeout: 8000 },
-  { name: "gemini-3.5-flash-lite", timeout: 10000 },
-  { name: "gemini-3.6-flash", timeout: 10000 },
-  { name: "gemini-3.1-flash-lite", timeout: 10000 },
-  { name: "gemini-3.5-flash", timeout: 10000 },
-  { name: "gemini-3.8-flash", timeout: 10000 },
+  { name: "gemini-3.5-flash-lite", timeout: 15000 },
+  { name: "gemini-3.6-flash", timeout: 15000 },
+  { name: "gemini-flash-lite-latest", timeout: 15000 },
+  { name: "gemini-2.5-flash", timeout: 4000 },
 ];
 
 // Official FilmFeed Website
@@ -52,7 +51,7 @@ function isIdentityQuery(text) {
     /\b(oya|oyaa)\s+(bot\s*kenekda|botda|mokakda|human\s*da|ai\s*da)\b/i,
     /\b(mona|monawada)\s+bot\b/i,
     /\b(who\s*are\s*you|are\s*you\s*(a\s*)?bot|what\s*bot|who\s*is\s*this)\b/i,
-    /\b(haduwe\s*kawuda|hadapu\s*kena|owner|creator|developer|akash|sithum|admin\s*kauda|admin\s*number|admin)\b/i,
+    /\b(haduwe\s*kawuda|hadapu\s*kena|owner|creator|developer|akash|sithum|admin\s*kauda|admin\s*number|admin|0787732040|94787732040)\b/i,
     /ඔයා\s*(කවුද|බොට්|මොන)/,
     /(කවුද\s*මේ|කවුද\s*ඔයා|හැදුවේ\s*කවුද|නිර්මාණය|අයිතිකරු|ඇඩ්මින්|ආකාශ්|සිතුම්)/,
   ];
@@ -102,7 +101,7 @@ async function callGeminiCascade(systemInstruction, history) {
         contents: history,
         generationConfig: {
           temperature: 0.75,
-          maxOutputTokens: 1200,
+          maxOutputTokens: 500,
         },
       };
 
@@ -237,8 +236,13 @@ FULL FILMFEED SYSTEM KNOWLEDGE:
 
   if (cascadeResult && cascadeResult.replyText) {
     const replyText = cascadeResult.replyText;
+    const trimmedUpper = replyText.trim().toUpperCase();
 
-    if (replyText.toUpperCase() === "SKIP" || replyText.includes("SKIP")) {
+    if (
+      trimmedUpper === "SKIP" ||
+      trimmedUpper === "SKIP." ||
+      (trimmedUpper.startsWith("SKIP") && trimmedUpper.length <= 8)
+    ) {
       return null;
     }
 
