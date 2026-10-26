@@ -60,6 +60,10 @@ class CloudSession {
   }
 
   async restore() {
+    if (process.env.RESET_SESSION === "true" || process.env.FORCE_NEW_QR === "true") {
+      console.log("🔄 [CloudSession] RESET_SESSION is true: Skipping restore to generate fresh QR/Pairing code!");
+      return false;
+    }
     if (!this.token) {
       console.log("[CloudSession] No GitHub token provided; skipping cloud restore.");
       return false;
