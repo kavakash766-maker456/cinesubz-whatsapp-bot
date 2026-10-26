@@ -44,16 +44,15 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install System Dependencies
+      - name: Verify System Dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y openssl ffmpeg
+          ffmpeg -version | head -n 1 || (sudo apt-get update -qq && sudo apt-get install -y ffmpeg)
+          openssl version
 
       - name: Install Python Packages
         run: |
-          python -m pip install --upgrade pip
-          pip install cryptography pycryptodome requests beautifulsoup4 gdown telethon Pillow playwright playwright-stealth aiohttp aiofiles rich curl_cffi
-          python -m playwright install chromium --with-deps
+          pip install --no-cache-dir cryptography pycryptodome requests beautifulsoup4 gdown telethon Pillow playwright playwright-stealth aiohttp aiofiles rich curl_cffi
+          python -m playwright install chromium
 
       - name: Install Node Dependencies
         run: |
