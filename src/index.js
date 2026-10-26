@@ -569,6 +569,120 @@ async function getPosterThumbnail(posterUrl, thumbnailB64 = null) {
   }
 }
 
+// Resolve ffmpeg binary path across Linux/Docker and Windows environments
+function getFfmpegBinary() {
+  if (process.env.FFMPEG_PATH && fs.existsSync(process.env.FFMPEG_PATH)) {
+    return process.env.FFMPEG_PATH;
+  }
+  const winPaths = [
+    "C:\\Users\\akash\\AppData\\Local\\Programs\\Xender AI\\ffmpeg\\ffmpeg.exe",
+    "C:\\Users\\akash\\AppData\\Local\\CapCut\\Apps\\9.3.0.3970\\ffmpeg.exe",
+  ];
+  for (const wp of winPaths) {
+    if (fs.existsSync(wp)) return wp;
+  }
+  return "ffmpeg";
+}
+
+/**
+ * Overlay requester WhatsApp profile avatar in a neat circular badge in the corner of the banner poster
+ */
+async function createPosterWithRequesterAvatar(posterSource, requesterJid) {
+  if (!posterSource || !requesterJid || !waSocket) {
+    return posterSource;
+  }
+
+  let avatarUrl = null;
+  try {
+    avatarUrl = await waSocket.profilePictureUrl(requesterJid, "image").catch(() => null);
+  } catch (e) {
+    avatarUrl = null;
+  }
+
+  if (!avatarUrl) {
+    logger.info(`[Poster PiP] Requester ${requesterJid} has no public profile picture; broadcasting standard poster.`);
+    return posterSource;
+  }
+
+  const timestamp = Date.now();
+  const tempPosterPath = path.join(TEMP_DIR, `poster_raw_${timestamp}.jpg`);
+  const tempAvatarPath = path.join(TEMP_DIR, `avatar_raw_${timestamp}.jpg`);
+  const tempOutPath = path.join(TEMP_DIR, `pip_poster_${timestamp}.jpg`);
+
+  try {
+    // 1. Fetch or copy poster source
+    if (typeof posterSource === "string" && posterSource.startsWith("http")) {
+      const pRes = await axios.get(posterSource, {
+        responseType: "arraybuffer",
+        timeout: 10000,
+        headers: { "User-Agent": "Mozilla/5.0" },
+      });
+      fs.writeFileSync(tempPosterPath, Buffer.from(pRes.data));
+    } else if (Buffer.isBuffer(posterSource)) {
+      fs.writeFileSync(tempPosterPath, posterSource);
+    } else if (typeof posterSource === "string" && fs.existsSync(posterSource)) {
+      fs.copyFileSync(posterSource, tempPosterPath);
+    } else {
+      return posterSource;
+    }
+
+    // 2. Fetch requester's profile picture
+    const aRes = await axios.get(avatarUrl, {
+      responseType: "arraybuffer",
+      timeout: 8000,
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
+    fs.writeFileSync(tempAvatarPath, Buffer.from(aRes.data));
+
+    const ffmpegBin = getFfmpegBinary();
+
+    // Circle badge with elegant white border overlay in top-right corner
+    // Outer radius 110, white border width 8px (between 102 and 110)
+    const filterComplex =
+      "[1:v]scale=220:220:force_original_aspect_ratio=increase,crop=220:220,format=rgba," +
+      "geq=r='if(gt(hypot(X-110,Y-110),102),255,r(X,Y))':" +
+      "g='if(gt(hypot(X-110,Y-110),102),255,g(X,Y))':" +
+      "b='if(gt(hypot(X-110,Y-110),102),255,b(X,Y))':" +
+      "a='if(lte(hypot(X-110,Y-110),110),255,0)'[avatar];" +
+      "[0:v][avatar]overlay=W-w-35:35";
+
+    await new Promise((resolve, reject) => {
+      execFile(
+        ffmpegBin,
+        [
+          "-y",
+          "-i", tempPosterPath,
+          "-i", tempAvatarPath,
+          "-filter_complex", filterComplex,
+          "-frames:v", "1",
+          "-q:v", "2",
+          tempOutPath,
+        ],
+        (err, stdout, stderr) => {
+          if (err) return reject(new Error(stderr || err.message));
+          resolve();
+        }
+      );
+    });
+
+    if (fs.existsSync(tempOutPath)) {
+      const outputBuffer = fs.readFileSync(tempOutPath);
+      logger.info(
+        `[Poster PiP] Overlay completed: added requester ${requesterJid}'s avatar badge to poster (${outputBuffer.length} bytes)`
+      );
+      return outputBuffer;
+    }
+  } catch (err) {
+    logger.warn(`[Poster PiP] Requester avatar overlay failed: ${err.message}. Falling back to original poster.`);
+  } finally {
+    try { if (fs.existsSync(tempPosterPath)) fs.unlinkSync(tempPosterPath); } catch (_) {}
+    try { if (fs.existsSync(tempAvatarPath)) fs.unlinkSync(tempAvatarPath); } catch (_) {}
+    try { if (fs.existsSync(tempOutPath)) fs.unlinkSync(tempOutPath); } catch (_) {}
+  }
+
+  return posterSource;
+}
+
 // Global variable to hold real verified newsletter JID dynamically resolved from WhatsApp
 let resolvedNewsletterJid = null;
 
@@ -582,7 +696,7 @@ function getPromoFooter() {
 👥 *Official Group:* ${primaryGroupLink}`
     : "";
   return `━━━━━━━━━━━━━━━━━━━━
-🌐 *Website:* https://nexus-one-orpin.vercel.app${gLink}
+🌐 *Website:* https://web-umber-six-e1un7z6257.vercel.app${gLink}
 📢 *VIP Channel:* https://whatsapp.com/channel/0029Vb9AG1c3GJOsPvzqdu0R`;
 }
 
@@ -833,8 +947,9 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 
             const effectivePoster = posterUrl || backdropUrl;
             if (effectivePoster) {
+              const pipPoster = await createPosterWithRequesterAvatar(effectivePoster, requesterJid);
               await broadcastToGroups({
-                image: { url: effectivePoster },
+                image: Buffer.isBuffer(pipPoster) ? pipPoster : { url: effectivePoster },
                 caption: seasonCaption,
                 mentions: mentionsList,
                 contextInfo: getMetaAiContext(mentionsList),
@@ -908,7 +1023,7 @@ ${getPromoFooter()}`,
         if (sPoster && waSocket) {
           await waSocket.sendMessage("status@broadcast", {
             image: { url: sPoster },
-            caption: `📺 *NEW TV SERIES PACK!* 🍿\n━━━━━━━━━━━━━━━━━━━━\n🔥 *${showTitle} (Season ${seasonNumber})*\n📦 All Episodes Uploaded\n⚡ Sinhala Subtitles Included\n\n📥 *Download from our Group:*\n👥 ${primaryGroupLink}\n\n🌐 *Web:* https://nexus-one-orpin.vercel.app`,
+            caption: `📺 *NEW TV SERIES PACK!* 🍿\n━━━━━━━━━━━━━━━━━━━━\n🔥 *${showTitle} (Season ${seasonNumber})*\n📦 All Episodes Uploaded\n⚡ Sinhala Subtitles Included\n\n📥 *Download from our Group:*\n👥 ${primaryGroupLink}\n\n🌐 *Web:* https://web-umber-six-e1un7z6257.vercel.app`,
           });
           logger.info("📢 Auto-posted TV series update to WhatsApp Status!");
         }
@@ -927,7 +1042,7 @@ ${getPromoFooter()}`,
 ⚡ *තත්ත්වය:* Broadcast Complete
 ━━━━━━━━━━━━━━━━━━━━
 🍿 FilmFeed Group එකෙන් දැන්ම නරඹන්න!
-👉 Website: https://nexus-one-orpin.vercel.app`,
+👉 Website: https://filmfeed-website.vercel.app`,
         mentions: mentionsList,
         contextInfo: getMetaAiContext(mentionsList),
       });
@@ -998,7 +1113,7 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
 
 💡 *විසඳුම:*
 කරුණාකර වෙබ් අඩවියෙන් *720p* හෝ *480p* Quality එක (2GB ට අඩු) තෝරා නැවත Request කරන්න:
-👉 https://nexus-one-orpin.vercel.app
+👉 https://filmfeed-website.vercel.app
 ━━━━━━━━━━━━━━━━━━━━`;
 
         await waSocket.sendMessage(replyTarget, {
@@ -1154,8 +1269,9 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 
       const effectivePoster = posterUrl || backdropUrl;
       if (effectivePoster) {
+        const pipPoster = await createPosterWithRequesterAvatar(effectivePoster, requesterJid);
         await broadcastToGroups({
-          image: { url: effectivePoster },
+          image: Buffer.isBuffer(pipPoster) ? pipPoster : { url: effectivePoster },
           caption: caption,
           mentions: mentionsList,
           contextInfo: getMetaAiContext(mentionsList),
@@ -1223,7 +1339,7 @@ ${getPromoFooter()}`,
 📥 *Download from our Group:*
 👥 ${primaryGroupLink}
 
-🌐 *Web:* https://nexus-one-orpin.vercel.app`;
+🌐 *Web:* https://web-umber-six-e1un7z6257.vercel.app`;
 
           await waSocket.sendMessage("status@broadcast", {
             image: { url: effectivePoster },
@@ -1269,7 +1385,7 @@ ${getPromoFooter()}`,
 📜 *ඔබ මෙතෙක් ලබාගත් චිත්‍රපට ලැයිස්තුව (${updatedStats.count}):*${historyText}
 ━━━━━━━━━━━━━━━━━━━━
 🍿 FilmFeed Group එකෙන් දැන්ම Download කරගන්න!
-👉 Website: https://nexus-one-orpin.vercel.app`,
+👉 Website: https://filmfeed-website.vercel.app`,
         mentions: mentionsList,
         contextInfo: getMetaAiContext(mentionsList),
       });
@@ -1770,11 +1886,11 @@ ${cached.text}
 ⚙️ *[CUSTOMIZATION & WEB PANEL]*
 • *.settings* : View & configure bot settings
 • *.setpass [password]* : Set web panel login password
-• 🔗 *Settings Web Panel:* https://nexus-one-orpin.vercel.app/bot/settings
-• 🔗 *Pair Another Bot:* https://nexus-one-orpin.vercel.app/bot
+• 🔗 *Settings Web Panel:* https://filmfeed-website.vercel.app/bot/settings
+• 🔗 *Pair Another Bot:* https://filmfeed-website.vercel.app/bot
 
 ━━━━━━━━━━━━━━━━━━━━
-🌐 *Website:* https://nexus-one-orpin.vercel.app
+🌐 *Website:* https://filmfeed-website.vercel.app
 📢 *VIP Channel:* https://whatsapp.com/channel/0029Vb9AG1c3GJOsPvzqdu0R
 > 🌍 *FILMFEED DEV COMMUNITY*`;
 
@@ -1873,7 +1989,7 @@ ${cached.text}
 ━━━━━━━━━━━━━━━━━━━━
 📱 *Your Number:* +${senderPhone}
 🌐 *Web Settings Panel:*
-👉 https://nexus-one-orpin.vercel.app/bot/settings
+👉 https://filmfeed-website.vercel.app/bot/settings
 
 🔑 *Password Set කරන්න:*
 *.setpass [your-new-password]*
@@ -1893,7 +2009,7 @@ ${cached.text}
               allStats[senderPhone].webPassword = cmdArgs;
               saveUserStats(allStats);
               await waSocket.sendMessage(remoteJid, {
-                text: `✅ *[Password Saved!]*\nඔබගේ Web Settings Password එක සාර්ථකව set කරන ලදී.\n🌐 Web Panel එකට පිවිසෙන්න:\n👉 https://nexus-one-orpin.vercel.app/bot/settings`,
+                text: `✅ *[Password Saved!]*\nඔබගේ Web Settings Password එක සාර්ථකව set කරන ලදී.\n🌐 Web Panel එකට පිවිසෙන්න:\n👉 https://filmfeed-website.vercel.app/bot/settings`,
                 contextInfo: getMetaAiContext(mentionsList),
               });
             }
@@ -2281,7 +2397,7 @@ _නැවත සේවාව ලබා ගැනීමට අවශ්‍ය �
 • 🚫 කිසිදු සීමාවකින් තොර වීම
 
 👉 *VIP සක්‍රීය කරගැනීමට පිවිසෙන්න:*
-https://nexus-one-orpin.vercel.app
+https://filmfeed-website.vercel.app
 
 හෝ Admin අමතන්න: +94 76 037 2547
 ━━━━━━━━━━━━━━━━━━━━`;
