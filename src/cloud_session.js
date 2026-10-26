@@ -10,7 +10,8 @@ try {
 } catch (_) {}
 
 const ipv4Agent = new https.Agent({ family: 4, keepAlive: true });
-const GIST_DESC = "filmfeed-whatsapp-auth-vault-v1";
+const BOT_PHONE = process.env.BOT_PHONE || "94760372547";
+const GIST_DESC = process.env.SESSION_VAULT_DESC || (BOT_PHONE === "94782088603" ? "filmfeed-whatsapp-auth-vault-series" : "filmfeed-whatsapp-auth-vault-v1");
 const GIST_FILENAME = "session_vault.json";
 
 class CloudSession {
@@ -32,7 +33,7 @@ class CloudSession {
 
   async findGist() {
     if (this.gistId) return { id: this.gistId };
-    const directVaultId = process.env.SESSION_VAULT_ID || "8f37b6dbcf07ff6fab07b21cc8cbe05b";
+    const directVaultId = process.env.SESSION_VAULT_ID || (BOT_PHONE === "94782088603" ? null : "8f37b6dbcf07ff6fab07b21cc8cbe05b");
     if (directVaultId) {
       this.gistId = directVaultId;
       return { id: directVaultId };
