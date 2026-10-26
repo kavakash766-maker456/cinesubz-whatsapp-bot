@@ -540,61 +540,67 @@ async function checkFileSize(url) {
 // --------------------------------------------------------------------------
 // 4B. Poster Thumbnail Buffer & Meta AI Context Info Helpers
 // --------------------------------------------------------------------------
-async function getPosterThumbnail(posterUrl, thumbnailB64 = null) {
+const POSTER_STYLER_SCRIPT = path.join(__dirname, "poster_styler.py");
+
+/**
+ * Generate crisp 240x320 JPEG thumbnail (< 25KB) for WhatsApp document preview
+ */
+async function getPosterThumbnail(posterSource, thumbnailB64 = null) {
   if (thumbnailB64) {
     try {
       const buf = Buffer.from(thumbnailB64, "base64");
-      if (buf.length > 500 && buf.length < 35000) {
+      if (buf.length > 500 && buf.length < 32000) {
         return buf;
       }
     } catch (_) {}
   }
-  if (!posterUrl) return null;
-  try {
-    const res = await axios.get(posterUrl, {
-      responseType: "arraybuffer",
-      timeout: 8000,
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      },
-    });
-    const rawBuf = Buffer.from(res.data);
-    if (rawBuf.length < 32000) {
-      return rawBuf;
-    }
-    return null;
-  } catch (err) {
-    return null;
-  }
-}
+  if (!posterSource) return null;
 
-// Resolve ffmpeg binary path across Linux/Docker and Windows environments
-function getFfmpegBinary() {
-  if (process.env.FFMPEG_PATH && fs.existsSync(process.env.FFMPEG_PATH)) {
-    return process.env.FFMPEG_PATH;
-  }
-  if (process.platform === "win32") {
-    const winPaths = [
-      "C:\\Users\\akash\\AppData\\Local\\Programs\\Xender AI\\ffmpeg\\ffmpeg.exe",
-      "C:\\Users\\akash\\AppData\\Local\\CapCut\\Apps\\9.3.0.3970\\ffmpeg.exe",
-    ];
-    for (const wp of winPaths) {
-      if (fs.existsSync(wp)) return wp;
+  const timestamp = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+  const tempInPath = path.join(TEMP_DIR, `thumb_in_${timestamp}.jpg`);
+  const tempOutPath = path.join(TEMP_DIR, `thumb_out_${timestamp}.jpg`);
+
+  try {
+    if (typeof posterSource === "string" && posterSource.startsWith("http")) {
+      const pRes = await axios.get(posterSource, {
+        responseType: "arraybuffer",
+        timeout: 10000,
+        headers: { "User-Agent": "Mozilla/5.0" },
+      });
+      fs.writeFileSync(tempInPath, Buffer.from(pRes.data));
+    } else if (Buffer.isBuffer(posterSource)) {
+      fs.writeFileSync(tempInPath, posterSource);
+    } else if (typeof posterSource === "string" && fs.existsSync(posterSource)) {
+      fs.copyFileSync(posterSource, tempInPath);
+    } else {
+      return null;
     }
-  } else {
-    const nixPaths = ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"];
-    for (const np of nixPaths) {
-      if (fs.existsSync(np)) return np;
+
+    await new Promise((resolve, reject) => {
+      execFile("python", [POSTER_STYLER_SCRIPT, "thumb", tempInPath, tempOutPath], (err) => {
+        if (err) return reject(err);
+        resolve();
+      });
+    });
+
+    if (fs.existsSync(tempOutPath)) {
+      const thumbBuf = fs.readFileSync(tempOutPath);
+      logger.info(`[Document Thumbnail] Generated ${thumbBuf.length} bytes preview card!`);
+      return thumbBuf;
     }
+  } catch (err) {
+    logger.warn(`[Document Thumbnail] Could not generate thumbnail: ${err.message}`);
+  } finally {
+    try { if (fs.existsSync(tempInPath)) fs.unlinkSync(tempInPath); } catch (_) {}
+    try { if (fs.existsSync(tempOutPath)) fs.unlinkSync(tempOutPath); } catch (_) {}
   }
-  return "ffmpeg";
+  return null;
 }
 
 /**
- * Overlay requester WhatsApp profile avatar in a neat circular badge in the corner of the banner poster
+ * Create stunning branded cinema poster with FilmFeed golden gradient banner & requester avatar
  */
-async function createPosterWithRequesterAvatar(posterSource, requesterJid, fallbackJid = null) {
+async function createPosterWithRequesterAvatar(posterSource, requesterJid, fallbackJid = null, requesterName = "VIP Member") {
   if (!posterSource || !waSocket) {
     return posterSource;
   }
@@ -602,38 +608,23 @@ async function createPosterWithRequesterAvatar(posterSource, requesterJid, fallb
   const primaryJid = requesterJid ? String(requesterJid).trim() : "";
   const secJid = fallbackJid ? String(fallbackJid).trim() : "";
 
-  if (!primaryJid && !secJid) {
-    return posterSource;
-  }
-
   let avatarUrl = null;
-  let activeJid = primaryJid;
   if (primaryJid) {
     try {
       avatarUrl = await waSocket.profilePictureUrl(primaryJid, "image").catch(() => null);
-    } catch (_) {
-      avatarUrl = null;
-    }
+    } catch (_) {}
   }
 
   if (!avatarUrl && secJid && secJid !== primaryJid) {
     try {
       avatarUrl = await waSocket.profilePictureUrl(secJid, "image").catch(() => null);
-      if (avatarUrl) activeJid = secJid;
-    } catch (_) {
-      avatarUrl = null;
-    }
-  }
-
-  if (!avatarUrl) {
-    logger.info(`[Poster PiP] Requester ${primaryJid || secJid} has no public profile picture; broadcasting standard poster.`);
-    return posterSource;
+    } catch (_) {}
   }
 
   const timestamp = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
   const tempPosterPath = path.join(TEMP_DIR, `poster_raw_${timestamp}.jpg`);
   const tempAvatarPath = path.join(TEMP_DIR, `avatar_raw_${timestamp}.jpg`);
-  const tempOutPath = path.join(TEMP_DIR, `pip_poster_${timestamp}.jpg`);
+  const tempOutPath = path.join(TEMP_DIR, `branded_poster_${timestamp}.jpg`);
 
   try {
     // 1. Fetch or copy poster source
@@ -652,41 +643,29 @@ async function createPosterWithRequesterAvatar(posterSource, requesterJid, fallb
       return posterSource;
     }
 
-    // 2. Fetch requester's profile picture
-    const aRes = await axios.get(avatarUrl, {
-      responseType: "arraybuffer",
-      timeout: 8000,
-      headers: { "User-Agent": "Mozilla/5.0" },
-    });
-    fs.writeFileSync(tempAvatarPath, Buffer.from(aRes.data));
+    // 2. Fetch avatar if available
+    let hasAvatar = false;
+    if (avatarUrl) {
+      try {
+        const aRes = await axios.get(avatarUrl, {
+          responseType: "arraybuffer",
+          timeout: 8000,
+          headers: { "User-Agent": "Mozilla/5.0" },
+        });
+        fs.writeFileSync(tempAvatarPath, Buffer.from(aRes.data));
+        hasAvatar = true;
+      } catch (_) {}
+    }
 
-    const ffmpegBin = getFfmpegBinary();
-
-    // Circle badge with elegant white border overlay in top-right corner
-    // Outer radius 110, white border width 8px (between 102 and 110)
-    const filterComplex =
-      "[1:v]scale=220:220:force_original_aspect_ratio=increase,crop=220:220,format=rgba," +
-      "geq=r='if(gt(hypot(X-110,Y-110),102),255,r(X,Y))':" +
-      "g='if(gt(hypot(X-110,Y-110),102),255,g(X,Y))':" +
-      "b='if(gt(hypot(X-110,Y-110),102),255,b(X,Y))':" +
-      "a='if(lte(hypot(X-110,Y-110),110),255,0)'[avatar];" +
-      "[0:v][avatar]overlay=W-w-35:35";
+    const cleanName = (requesterName || "VIP Member").replace(/[\r\n\t]/g, " ").trim();
+    const avatarArg = hasAvatar ? tempAvatarPath : "NONE";
 
     await new Promise((resolve, reject) => {
       execFile(
-        ffmpegBin,
-        [
-          "-y",
-          "-i", tempPosterPath,
-          "-i", tempAvatarPath,
-          "-filter_complex", filterComplex,
-          "-frames:v", "1",
-          "-q:v", "2",
-          "-update", "1",
-          tempOutPath,
-        ],
-        (err, stdout, stderr) => {
-          if (err) return reject(new Error(stderr || err.message));
+        "python",
+        [POSTER_STYLER_SCRIPT, "brand", tempPosterPath, avatarArg, cleanName, tempOutPath],
+        (err) => {
+          if (err) return reject(err);
           resolve();
         }
       );
@@ -695,12 +674,12 @@ async function createPosterWithRequesterAvatar(posterSource, requesterJid, fallb
     if (fs.existsSync(tempOutPath)) {
       const outputBuffer = fs.readFileSync(tempOutPath);
       logger.info(
-        `[Poster PiP] Overlay completed: added requester ${activeJid}'s avatar badge to poster (${outputBuffer.length} bytes)`
+        `[Poster PiP] Branded poster created successfully: ${outputBuffer.length} bytes (avatar: ${hasAvatar})`
       );
       return outputBuffer;
     }
   } catch (err) {
-    logger.warn(`[Poster PiP] Requester avatar overlay failed: ${err.message}. Falling back to original poster.`);
+    logger.warn(`[Poster PiP] Branded poster styling failed: ${err.message}. Falling back to original.`);
   } finally {
     try { if (fs.existsSync(tempPosterPath)) fs.unlinkSync(tempPosterPath); } catch (_) {}
     try { if (fs.existsSync(tempAvatarPath)) fs.unlinkSync(tempAvatarPath); } catch (_) {}
@@ -727,8 +706,7 @@ function getPromoFooter() {
 📢 *VIP Channel:* https://whatsapp.com/channel/0029Vb9AG1c3GJOsPvzqdu0R`;
 }
 
-// Clean, standard WhatsApp message context (No fake participant quotes or fake stanzas)
-// This guarantees 100% visibility for all group members across Android, iPhone, Web & Desktop
+// Clean, standard WhatsApp message context
 function getMetaAiContext(mentionsList = []) {
   if (Array.isArray(mentionsList) && mentionsList.length > 0) {
     return {
@@ -979,7 +957,7 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 
             const effectivePoster = posterUrl || backdropUrl;
             if (effectivePoster) {
-              const pipPoster = await createPosterWithRequesterAvatar(effectivePoster, requesterIdentifier, fallbackIdentifier);
+              const pipPoster = await createPosterWithRequesterAvatar(effectivePoster, requesterIdentifier, fallbackIdentifier, pushName);
               await broadcastToGroups({
                 image: Buffer.isBuffer(pipPoster) ? pipPoster : { url: effectivePoster },
                 caption: seasonCaption,
@@ -1301,7 +1279,7 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 
       const effectivePoster = posterUrl || backdropUrl;
       if (effectivePoster) {
-        const pipPoster = await createPosterWithRequesterAvatar(effectivePoster, requesterIdentifier, fallbackIdentifier);
+        const pipPoster = await createPosterWithRequesterAvatar(effectivePoster, requesterIdentifier, fallbackIdentifier, pushName);
         await broadcastToGroups({
           image: Buffer.isBuffer(pipPoster) ? pipPoster : { url: effectivePoster },
           caption: caption,
@@ -2029,29 +2007,50 @@ function attachMessageEvents(sock, instanceBotPhone, instanceBotName) {
           }
   
           if (!commandFound || !movieUrl) {
-            // If in private chat (DM) and not from bot itself, check for intelligent Gemini Auto-Reply
+            // If in private chat (DM) and not from bot itself, check for intelligent Senu Auto-Reply
             if (!isGroup && !fromMe) {
               try {
+                // Show Senu WhatsApp composing typing indicator
+                try {
+                  await sock.sendPresenceUpdate("composing", remoteJid);
+                } catch (_) {}
+
                 const aiResult = await handleInboxAutoReply(senderPhone, pushName, text, primaryGroupLink);
                 if (aiResult && aiResult.text) {
-                  await waSocket.sendMessage(remoteJid, {
+                  // Human-like typing delay based on message length (800ms to 2000ms)
+                  const typingDelay = Math.min(2000, Math.max(800, Math.floor(aiResult.text.length * 12)));
+                  await new Promise((r) => setTimeout(r, typingDelay));
+
+                  await sock.sendMessage(remoteJid, {
                     text: aiResult.text,
                     contextInfo: getMetaAiContext(mentionsList),
                   });
-  
+
                   // Send Akash Sithum vCard if identity/developer was queried
                   if (aiResult.sendContactCard && aiResult.contact) {
-                    await waSocket.sendMessage(remoteJid, {
+                    await sock.sendMessage(remoteJid, {
                       contacts: {
                         displayName: aiResult.contact.displayName,
                         contacts: [{ vcard: aiResult.contact.vcard }],
                       },
                     });
                   }
-                  logger.info(`🤖 [Gemini Auto-Reply] Sent guidance to +${senderPhone} (${pushName})`);
+
+                  try {
+                    await sock.sendPresenceUpdate("paused", remoteJid);
+                  } catch (_) {}
+
+                  logger.info(`[Senu AI Support] Replied to ${pushName || senderPhone}`);
+                } else {
+                  try {
+                    await sock.sendPresenceUpdate("paused", remoteJid);
+                  } catch (_) {}
                 }
               } catch (aiErr) {
-                logger.warn(`[Gemini Auto-Reply] Error: ${aiErr.message}`);
+                logger.warn(`[Senu AI Support] Auto-reply error: ${aiErr.message}`);
+                try {
+                  await sock.sendPresenceUpdate("paused", remoteJid);
+                } catch (_) {}
               }
             }
             continue;
