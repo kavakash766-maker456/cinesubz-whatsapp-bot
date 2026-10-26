@@ -574,12 +574,19 @@ function getFfmpegBinary() {
   if (process.env.FFMPEG_PATH && fs.existsSync(process.env.FFMPEG_PATH)) {
     return process.env.FFMPEG_PATH;
   }
-  const winPaths = [
-    "C:\\Users\\akash\\AppData\\Local\\Programs\\Xender AI\\ffmpeg\\ffmpeg.exe",
-    "C:\\Users\\akash\\AppData\\Local\\CapCut\\Apps\\9.3.0.3970\\ffmpeg.exe",
-  ];
-  for (const wp of winPaths) {
-    if (fs.existsSync(wp)) return wp;
+  if (process.platform === "win32") {
+    const winPaths = [
+      "C:\\Users\\akash\\AppData\\Local\\Programs\\Xender AI\\ffmpeg\\ffmpeg.exe",
+      "C:\\Users\\akash\\AppData\\Local\\CapCut\\Apps\\9.3.0.3970\\ffmpeg.exe",
+    ];
+    for (const wp of winPaths) {
+      if (fs.existsSync(wp)) return wp;
+    }
+  } else {
+    const nixPaths = ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"];
+    for (const np of nixPaths) {
+      if (fs.existsSync(np)) return np;
+    }
   }
   return "ffmpeg";
 }
@@ -587,24 +594,43 @@ function getFfmpegBinary() {
 /**
  * Overlay requester WhatsApp profile avatar in a neat circular badge in the corner of the banner poster
  */
-async function createPosterWithRequesterAvatar(posterSource, requesterJid) {
-  if (!posterSource || !requesterJid || !waSocket) {
+async function createPosterWithRequesterAvatar(posterSource, requesterJid, fallbackJid = null) {
+  if (!posterSource || !waSocket) {
+    return posterSource;
+  }
+
+  const primaryJid = requesterJid ? String(requesterJid).trim() : "";
+  const secJid = fallbackJid ? String(fallbackJid).trim() : "";
+
+  if (!primaryJid && !secJid) {
     return posterSource;
   }
 
   let avatarUrl = null;
-  try {
-    avatarUrl = await waSocket.profilePictureUrl(requesterJid, "image").catch(() => null);
-  } catch (e) {
-    avatarUrl = null;
+  let activeJid = primaryJid;
+  if (primaryJid) {
+    try {
+      avatarUrl = await waSocket.profilePictureUrl(primaryJid, "image").catch(() => null);
+    } catch (_) {
+      avatarUrl = null;
+    }
+  }
+
+  if (!avatarUrl && secJid && secJid !== primaryJid) {
+    try {
+      avatarUrl = await waSocket.profilePictureUrl(secJid, "image").catch(() => null);
+      if (avatarUrl) activeJid = secJid;
+    } catch (_) {
+      avatarUrl = null;
+    }
   }
 
   if (!avatarUrl) {
-    logger.info(`[Poster PiP] Requester ${requesterJid} has no public profile picture; broadcasting standard poster.`);
+    logger.info(`[Poster PiP] Requester ${primaryJid || secJid} has no public profile picture; broadcasting standard poster.`);
     return posterSource;
   }
 
-  const timestamp = Date.now();
+  const timestamp = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
   const tempPosterPath = path.join(TEMP_DIR, `poster_raw_${timestamp}.jpg`);
   const tempAvatarPath = path.join(TEMP_DIR, `avatar_raw_${timestamp}.jpg`);
   const tempOutPath = path.join(TEMP_DIR, `pip_poster_${timestamp}.jpg`);
@@ -656,6 +682,7 @@ async function createPosterWithRequesterAvatar(posterSource, requesterJid) {
           "-filter_complex", filterComplex,
           "-frames:v", "1",
           "-q:v", "2",
+          "-update", "1",
           tempOutPath,
         ],
         (err, stdout, stderr) => {
@@ -668,7 +695,7 @@ async function createPosterWithRequesterAvatar(posterSource, requesterJid) {
     if (fs.existsSync(tempOutPath)) {
       const outputBuffer = fs.readFileSync(tempOutPath);
       logger.info(
-        `[Poster PiP] Overlay completed: added requester ${requesterJid}'s avatar badge to poster (${outputBuffer.length} bytes)`
+        `[Poster PiP] Overlay completed: added requester ${activeJid}'s avatar badge to poster (${outputBuffer.length} bytes)`
       );
       return outputBuffer;
     }
@@ -805,6 +832,8 @@ async function processQueue() {
     token,
     replyTarget,
     requesterJid,
+    requesterLid,
+    cleanPhone,
     pushName,
     mentionTag,
     mentionDisplay,
@@ -812,6 +841,9 @@ async function processQueue() {
     userStats,
   } = currentTask;
   const { count, badge } = userStats;
+
+  const requesterIdentifier = requesterJid || (cleanPhone ? `${cleanPhone}@s.whatsapp.net` : "") || requesterLid || replyTarget;
+  const fallbackIdentifier = requesterLid || (cleanPhone ? `${cleanPhone}@s.whatsapp.net` : null);
 
   logger.info(
     `[Queue Engine] Processing task for ${pushName}: ${movieUrl} | Type=${isSeriesSeason ? `Series S${seasonNumber}` : "Movie"} | Remaining in queue: ${requestQueue.length}`
@@ -947,7 +979,7 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 
             const effectivePoster = posterUrl || backdropUrl;
             if (effectivePoster) {
-              const pipPoster = await createPosterWithRequesterAvatar(effectivePoster, requesterJid);
+              const pipPoster = await createPosterWithRequesterAvatar(effectivePoster, requesterIdentifier, fallbackIdentifier);
               await broadcastToGroups({
                 image: Buffer.isBuffer(pipPoster) ? pipPoster : { url: effectivePoster },
                 caption: seasonCaption,
@@ -1269,7 +1301,7 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 
       const effectivePoster = posterUrl || backdropUrl;
       if (effectivePoster) {
-        const pipPoster = await createPosterWithRequesterAvatar(effectivePoster, requesterJid);
+        const pipPoster = await createPosterWithRequesterAvatar(effectivePoster, requesterIdentifier, fallbackIdentifier);
         await broadcastToGroups({
           image: Buffer.isBuffer(pipPoster) ? pipPoster : { url: effectivePoster },
           caption: caption,
@@ -2430,7 +2462,9 @@ https://filmfeed-website.vercel.app
           quality,
           token,
           replyTarget,
-          requesterJid,
+          requesterJid: requesterJid || (cleanPhone ? `${cleanPhone}@s.whatsapp.net` : ""),
+          requesterLid: requesterLid || "",
+          cleanPhone: cleanPhone || "",
           pushName,
           mentionTag,
           mentionDisplay,
