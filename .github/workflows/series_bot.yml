@@ -2,6 +2,17 @@ name: FilmFeed Series Bot 24/7 (0782088603)
 
 on:
   workflow_dispatch:
+    inputs:
+      reset_session:
+        description: 'Force New QR Code / 8-Digit Pairing Code (Re-link WhatsApp)'
+        required: false
+        type: boolean
+        default: false
+      use_pairing_code:
+        description: 'Use 8-digit Pairing Code instead of QR'
+        required: false
+        type: boolean
+        default: true
   push:
     branches:
       - main
@@ -59,7 +70,8 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
           SESSION_VAULT_DESC: "filmfeed-whatsapp-auth-vault-series"
-          USE_PAIRING_CODE: "true"
+          RESET_SESSION: ${{ inputs.reset_session || 'false' }}
+          USE_PAIRING_CODE: ${{ inputs.use_pairing_code || 'true' }}
           RUNNER_LIFETIME_HOURS: "4.5"
         run: |
           mkdir -p auth_info_series temp
@@ -71,13 +83,11 @@ jobs:
             NOW=$(date +%s)
             ELAPSED=$((NOW - START_TIME))
 
-            # Scheduled rotation handoff after ~4.5 hours (16200s):
             if [ $EXIT_CODE -eq 0 ] && [ $ELAPSED -ge 16200 ]; then
               echo "✅ Scheduled 4.5-hour runner rotation completed cleanly. Handing off to next 24/7 runner..."
               break
             fi
 
-            # Prevent GitHub Actions hard kill
             if [ $ELAPSED -ge 17280 ]; then
               echo "⏳ Runner lifespan reached 4.8 hours. Handing off to next 24/7 runner..."
               break
