@@ -10,15 +10,14 @@ try {
 } catch (_) {}
 
 const ipv4Agent = new https.Agent({ family: 4, keepAlive: true });
-const BOT_PHONE = process.env.BOT_PHONE || "94760372547";
-const GIST_DESC = process.env.SESSION_VAULT_DESC || (BOT_PHONE === "94782088603" ? "filmfeed-whatsapp-auth-vault-series" : "filmfeed-whatsapp-auth-vault-v1");
 const GIST_FILENAME = "session_vault.json";
 
 class CloudSession {
-  constructor(authDir, token) {
+  constructor(authDir, token, gistId = null, gistDesc = null) {
     this.authDir = authDir;
-    this.token = token || process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
-    this.gistId = null;
+    this.token = token || process.env.GITHUB_TOKEN || process.env.GH_TOKEN || process.env.GH_PAT;
+    this.gistId = gistId || process.env.SESSION_VAULT_ID || null;
+    this.gistDesc = gistDesc || process.env.SESSION_VAULT_DESC || "filmfeed-whatsapp-auth-vault-v1";
     this.isSyncing = false;
     this.syncTimeout = null;
   }
@@ -33,47 +32,48 @@ class CloudSession {
 
   async findGist() {
     if (this.gistId) return { id: this.gistId };
-    const directVaultId = process.env.SESSION_VAULT_ID || (BOT_PHONE === "94782088603" ? null : "8f37b6dbcf07ff6fab07b21cc8cbe05b");
-    if (directVaultId) {
-      this.gistId = directVaultId;
-      return { id: directVaultId };
-    }
     if (!this.token) return null;
     try {
-      const res = await axios.get("https://api.github.com/gists?per_page=30", {
+      const res = await axios.get("https://api.github.com/gists?per_page=50", {
         headers: this.getHeaders(),
         httpsAgent: ipv4Agent,
         timeout: 10000,
       });
       const gists = res.data;
       const match = gists.find(
-        (g) => g.description === GIST_DESC && g.files && g.files[GIST_FILENAME]
+        (g) => g.description === this.gistDesc && g.files && g.files[GIST_FILENAME]
       );
       if (match) {
         this.gistId = match.id;
         return match;
       }
     } catch (err) {
-      console.warn(`[CloudSession] Error finding gist: ${err.message}`);
+      console.warn(`[CloudSession] Error finding gist (${this.gistDesc}): ${err.message}`);
     }
     return null;
   }
 
   async restore() {
-    if (process.env.RESET_SESSION === "true" || process.env.FORCE_NEW_QR === "true") {
-      console.log("🔄 [CloudSession] RESET_SESSION is true: Skipping restore to generate fresh QR/Pairing code!");
-      return false;
-    }
     if (!this.token) {
       console.log("[CloudSession] No GitHub token provided; skipping cloud restore.");
       return false;
     }
 
+    if (
+      process.env.RESET_SESSION === "true" ||
+      process.env.FORCE_NEW_QR === "true" ||
+      (this.gistDesc.includes("series") && process.env.RESET_SERIES_BOT === "true") ||
+      (!this.gistDesc.includes("series") && process.env.RESET_MOVIE_BOT === "true")
+    ) {
+      console.log(`🔄 [CloudSession] RESET requested: Skipping restore for ${this.gistDesc} to generate fresh QR!`);
+      return false;
+    }
+
     try {
-      console.log("[CloudSession] Searching for existing WhatsApp session in private GitHub vault...");
+      console.log(`[CloudSession] Searching for existing WhatsApp session in vault (${this.gistDesc})...`);
       const gist = await this.findGist();
       if (!gist) {
-        console.log("[CloudSession] No existing cloud session found in private vault.");
+        console.log(`[CloudSession] No existing cloud session found for ${this.gistDesc}. Fresh QR will be generated.`);
         return false;
       }
 
@@ -143,15 +143,18 @@ class CloudSession {
       }
 
       let restoredCount = 0;
-      for (const [fname, content] of Object.entries(files)) {
-        fs.writeFileSync(path.join(this.authDir, fname), content, "utf8");
-        restoredCount++;
+      for (const [fname, fcontent] of Object.entries(files)) {
+        if (typeof fcontent === "string") {
+          fs.writeFileSync(path.join(this.authDir, fname), fcontent, "utf8");
+          restoredCount++;
+        }
       }
 
-      console.log(`✅ [CloudSession] Successfully restored ${restoredCount} session files from Private Cloud Vault! (Linked to: ${credsObj.me?.id || "Registered User"})`);
+      const linkedAccount = credsObj.me?.id || "Registered User";
+      console.log(`✅ [CloudSession] Successfully restored ${restoredCount} session files from vault (${this.gistDesc})! (Linked to: ${linkedAccount})`);
       return true;
     } catch (err) {
-      console.warn(`⚠️ [CloudSession] Restore failed: ${err.message}`);
+      console.warn(`[CloudSession] Restore notice: ${err.message}`);
       return false;
     }
   }
@@ -159,27 +162,24 @@ class CloudSession {
   async clearVault() {
     if (!this.token) return;
     try {
-      if (!this.gistId) await this.findGist();
+      await this.findGist();
       if (this.gistId) {
         await axios.patch(`https://api.github.com/gists/${this.gistId}`, {
-          description: GIST_DESC,
+          description: this.gistDesc,
           files: {
             [GIST_FILENAME]: {
-              content: JSON.stringify({ invalid: true, cleared_at: new Date().toISOString() }),
-            },
-            "latest_qr.txt": {
-              content: "Awaiting new QR generation...",
+              content: '{"invalid":true}',
             },
           },
         }, {
           headers: this.getHeaders(),
           httpsAgent: ipv4Agent,
-          timeout: 15000,
+          timeout: 10000,
         });
-        console.log("🗑️ [CloudSession] Revoked/expired session cleared from Private Cloud Vault.");
+        console.log(`🧹 [CloudSession] Cleared cloud session vault (${this.gistDesc}).`);
       }
-    } catch (err) {
-      console.warn(`[CloudSession] Failed to clear vault: ${err.message}`);
+    } catch (e) {
+      console.warn(`[CloudSession] clearVault warning: ${e.message}`);
     }
   }
 
@@ -188,7 +188,7 @@ class CloudSession {
     if (this.syncTimeout) clearTimeout(this.syncTimeout);
     this.syncTimeout = setTimeout(() => {
       this.sync().catch((e) => console.warn(`[CloudSession] Background sync error: ${e.message}`));
-    }, 4000);
+    }, 2000);
   }
 
   async sync() {
@@ -214,7 +214,6 @@ class CloudSession {
       );
 
       if (!isValidAuth) {
-        console.log("[CloudSession] Session not authenticated yet; skipping cloud vault sync.");
         return;
       }
 
@@ -245,7 +244,7 @@ class CloudSession {
 
       if (this.gistId) {
         await axios.patch(`https://api.github.com/gists/${this.gistId}`, {
-          description: GIST_DESC,
+          description: this.gistDesc,
           files: {
             [GIST_FILENAME]: {
               content: base64Content,
@@ -256,10 +255,10 @@ class CloudSession {
           httpsAgent: ipv4Agent,
           timeout: 20000,
         });
-        console.log(`☁️ [CloudSession] Synced ${fileNames.length} auth files to private cloud vault.`);
+        console.log(`☁️ [CloudSession] Synced ${fileNames.length} auth files to vault (${this.gistDesc}).`);
       } else {
         const createdRes = await axios.post("https://api.github.com/gists", {
-          description: GIST_DESC,
+          description: this.gistDesc,
           public: false,
           files: {
             [GIST_FILENAME]: {
@@ -272,10 +271,10 @@ class CloudSession {
           timeout: 20000,
         });
         this.gistId = createdRes.data.id;
-        console.log(`☁️ [CloudSession] Created new private cloud vault (id: ${this.gistId}) and synced session.`);
+        console.log(`☁️ [CloudSession] Created new private cloud vault for ${this.gistDesc} (id: ${this.gistId}).`);
       }
     } catch (err) {
-      console.warn(`[CloudSession] Sync failed: ${err.message}`);
+      console.warn(`[CloudSession] Sync failed (${this.gistDesc}): ${err.message}`);
     } finally {
       this.isSyncing = false;
     }
