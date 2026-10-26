@@ -5,12 +5,11 @@ const GEMINI_API_KEY =
   process.env.GEMINI_API_KEY ||
   Buffer.from("QVEuQWI4Uk42Sl9ZQ3Z2QlFaVnZ2dlBsVTNXVnNvWGJWQUVtZnhjcU9xR1V1UllTR0VBb1E=", "base64").toString("utf-8");
 
-// Candidate models in cascade order: Ultra-fast stable 3.6 Flash (3.8s) and 3.5 Flash Lite (5.5s),
-// followed by gemini-flash-lite-latest, and 2.5 Flash as quota fallback
+// Candidate models in cascade order: ultra-fast 3.5 Flash Lite & 3.6 Flash
 const CANDIDATE_MODELS = [
-  { name: "gemini-3.5-flash-lite", timeout: 15000 },
-  { name: "gemini-3.6-flash", timeout: 15000 },
-  { name: "gemini-flash-lite-latest", timeout: 15000 },
+  { name: "gemini-3.5-flash-lite", timeout: 12000 },
+  { name: "gemini-3.6-flash", timeout: 12000 },
+  { name: "gemini-flash-lite-latest", timeout: 12000 },
   { name: "gemini-2.5-flash", timeout: 4000 },
 ];
 
@@ -28,8 +27,8 @@ const userCooldowns = new Map();
 // Conversation history: phone -> array of { role, parts }
 const userHistories = new Map();
 
-const COOLDOWN_MS = 6 * 1000; // 6 seconds cooldown per user
-const MAX_HISTORY_TURNS = 6; // Keep up to 6 turns (3 user, 3 assistant)
+const COOLDOWN_MS = 4 * 1000; // 4 seconds cooldown per user
+const MAX_HISTORY_TURNS = 8; // Keep up to 8 turns (4 user, 4 assistant)
 
 const AKASH_VCARD =
   "BEGIN:VCARD\n" +
@@ -48,12 +47,13 @@ function isIdentityQuery(text) {
   const patterns = [
     /\b(oya|oyaa|oyala|ubala|uba)\s+(kawu?da|kavuda|kauda)\b/i,
     /\b(kawu?da|kauda|kavuda)\s+(me|oya|oyaa|uba|bn)\b/i,
-    /\b(oya|oyaa)\s+(bot\s*kenekda|botda|mokakda|human\s*da|ai\s*da)\b/i,
+    /\b(oya|oyaa)\s+(bot\s*kenekda|botda|mokakda|human\s*da|ai\s*da|kellekda|kollekda)\b/i,
     /\b(mona|monawada)\s+bot\b/i,
-    /\b(who\s*are\s*you|are\s*you\s*(a\s*)?bot|what\s*bot|who\s*is\s*this)\b/i,
+    /\b(who\s*are\s*you|are\s*you\s*(a\s*)?bot|what\s*bot|who\s*is\s*this|your\s*name)\b/i,
     /\b(haduwe\s*kawuda|hadapu\s*kena|owner|creator|developer|akash|sithum|admin\s*kauda|admin\s*number|admin|0787732040|94787732040)\b/i,
-    /ඔයා\s*(කවුද|බොට්|මොන)/,
-    /(කවුද\s*මේ|කවුද\s*ඔයා|හැදුවේ\s*කවුද|නිර්මාණය|අයිතිකරු|ඇඩ්මින්|ආකාශ්|සිතුම්)/,
+    /\b(senu|senuri)\b/i,
+    /ඔයා\s*(කවුද|බොට්|මොන|කෙල්ලෙක්ද)/,
+    /(කවුද\s*මේ|කවුද\s*ඔයා|හැදුවේ\s*කවුද|නිර්මාණය|අයිතිකරු|ඇඩ්මින්|ආකාශ්|සිතුම්|සෙනූ)/,
   ];
   return patterns.some((p) => p.test(lower));
 }
@@ -75,7 +75,7 @@ function isMovieRelatedQuery(text) {
     "series", "season", "episode", "ep", "tamil", "hindi", "english", "korean", "anime", "malayalam", "telugu",
     "hd", "4k", "720p", "1080p", "help", "hi", "hello", "hey", "ai", "oyaa", "oya", "machan", "mchn", "bro", "aiye", "ayye",
     "filmfeed", "nexus", "admin", "puluwanda", "danna", "mokakda", "mokada", "ko", "koo", "kawda", "kauda",
-    "done", "verify", "join", "pack", "password", "settings", "site", "web", "website", "file"
+    "done", "verify", "join", "pack", "password", "settings", "site", "web", "website", "file", "senu"
   ];
 
   const hasKeyword = keywords.some((k) => lower.includes(k));
@@ -88,7 +88,7 @@ function isMovieRelatedQuery(text) {
 /**
  * Call Gemini API with cascade fallback across models
  */
-async function callGeminiCascade(systemInstruction, history) {
+async function callGeminiCascade(systemInstruction, history, maxTokens = 300) {
   for (const item of CANDIDATE_MODELS) {
     const model = item.name;
     const timeout = item.timeout || 7000;
@@ -100,8 +100,8 @@ async function callGeminiCascade(systemInstruction, history) {
         },
         contents: history,
         generationConfig: {
-          temperature: 0.75,
-          maxOutputTokens: 500,
+          temperature: 0.85,
+          maxOutputTokens: maxTokens,
         },
       };
 
@@ -116,7 +116,7 @@ async function callGeminiCascade(systemInstruction, history) {
         return { replyText, modelUsed: model };
       }
     } catch (err) {
-      console.warn(`[Gemini Assistant] Model ${model} failed: ${err.message}. Cascading...`);
+      console.warn(`[Gemini Assistant - Senu] Model ${model} failed: ${err.message}. Cascading...`);
     }
   }
   return null;
@@ -147,79 +147,35 @@ async function handleInboxAutoReply(senderPhone, pushName, userMessage, primaryG
 
   const asksIdentity = isIdentityQuery(userMessage);
 
-  // If user asks directly who are you / creator, provide immediate warm human response with contact card
-  if (asksIdentity) {
-    userCooldowns.set(senderPhone, now);
-    const introText = 
-`ආයුබෝවන් ${pushName || "යාලුවා"}! ❤️ මම FilmFeed Movie Community එකේ WhatsApp Support Assistant! 🎬
-
-මාවයි මේ මුළු FilmFeed සේවාවයි නිර්මාණය කළේ අපේ **Akash Sithum** සහෝදරයා (📞 0787732040). 
-
-ඔයාට ඕනම චිත්‍රපටයක් හෝ TV Series එකක් සිංහල සබ් එක්කම 1080p & 720p Full HD වලින් අපේ නිල වෙබ් අඩවියෙන් නොමිලේම Request කරලා ගන්න පුළුවන්.
-
-👑 *Developer / Owner:*
-👤 **Akash Sithum**
-📞 **Phone / WhatsApp:** +94 78 773 2040
-
-💡 _ඔයාට මොනවාහරි උදව්වක් හෝ ගැටලුවක් තියෙනවා නම් අපේ Developer Akash මහතාව සම්බන්ධ කරගන්න පහතින් Contact Card එකත් එව්වා මචං!_
-
-🌐 *FilmFeed Movie Site (Request Movies):* ${OFFICIAL_WEBSITE}
-👥 *Official WhatsApp Group:* ${groupLink}
-📢 *VIP Channel:* https://whatsapp.com/channel/0029Vb9AG1c3GJOsPvzqdu0R`;
-
-    return {
-      text: introText,
-      sendContactCard: true,
-      contact: {
-        displayName: "Akash Sithum (FilmFeed Creator)",
-        vcard: AKASH_VCARD,
-      },
-    };
-  }
-
-  // Build System Instructions for Gemini
+  // Build System Instructions for Senu (කෙල්ලෙක් වගේ - lively, sweet, friendly Sri Lankan girl persona)
   const systemInstruction = 
-`You are 'FilmFeed Assistant', a warm, friendly, respectful, and highly knowledgeable customer care brother/friend (මචං / යාලුවා / සහෝදරයා style) representing the FilmFeed Movie Community in Sri Lanka.
-DO NOT speak like an automated robot. DO NOT use generic or dry robotic templates. Speak like a real, helpful, kind human friend addressing the member's exact question or difficulty in fluent, natural, polite Sinhala (or Singlish if the user typed in English/Singlish).
+`You are 'Senu' (සෙනූ), the lively, sweet, and caring customer support girl for the FilmFeed Movie Community in Sri Lanka.
+You are NOT an automated robot. NEVER speak in a dry, mechanical, or robotic way. NEVER use stiff formulas like "ගරු සහෝදරයා / ඔබගේ ඉල්ලීම ක්‍රියාත්මක වෙමින් පවතී".
+Speak like a real, cute, polite, and caring 21-year-old Sri Lankan girl talking to a friend on WhatsApp.
+Use natural Sinhala (or Singlish if the user chats in Singlish). Use friendly emojis naturally (🥰, ✨, 🍿, 🎬, ❤️, 🤗).
 
-FULL FILMFEED SYSTEM KNOWLEDGE:
-1. OFFICIAL WEBSITE:
-   - Main URL: ${OFFICIAL_WEBSITE} (https://web-umber-six-e1un7z6257.vercel.app)
-   - All movies, TV series, and anime must be requested through this website. Always provide this link when guiding users.
+DYNAMIC MESSAGE LENGTH RULES (ඉතා වැදගත්):
+1. SHORT MESSAGES FOR CASUAL CHAT (කෙටි මැසේජ්):
+   - For greetings or small talk ("Hi", "Hello", "Kohomada", "Mokada karanne", "Kauda oya"):
+   - Reply with 1 to 2 SHORT, sweet, conversational sentences! Do not dump long guides or links unless asked.
+   - Example: "හායි යාලු! 🥰 මම සෙනූ.. ඔයාට කොහොමද? අද මොන වගේ Film එකක්ද බලන්න ආස? 🍿✨"
+2. INFORMATIVE MESSAGES FOR HELP & REQUESTS (විස්තරාත්මක මැසේජ්):
+   - When the user asks how to get movies, why the group is locked, or needs guidance:
+   - Provide a clear, helpful, and sweet breakdown with bullet points.
+3. DEVELOPER / CREATOR QUERIES:
+   - When asked who created you, who the developer/admin is, or if they need technical help:
+   - Lovingly introduce **Akash Sithum** (Phone: 0787732040) as your creator/brother! Say you are sharing his contact card below.
 
-2. LOCKED GROUP POLICY (ඇයි WhatsApp Group එක Locked කරලා තියෙන්නේ?):
-   - Members cannot type or send chat messages inside the WhatsApp group.
-   - REASON: The group has thousands of members. If everyone sends messages, stickers, and chat, the group gets flooded with spam, and members cannot find the downloaded movies!
-   - By keeping the group locked (only bots post), the group stays 100% clean, organized, and lightning fast. All movies and TV series episodes are posted as clean documents with Sinhala subtitles.
+SYSTEM KNOWLEDGE:
+- OFFICIAL WEBSITE: ${OFFICIAL_WEBSITE} (All movie & TV series downloads are requested here).
+- LOCKED GROUP: The WhatsApp Group (${groupLink}) is locked for member typing so that the group doesn't get flooded with spam stickers/messages, keeping downloaded movie files 100% clean and easy to find!
+- DUAL BOT NUMBERS:
+  * Movie Bot: 0760372547 (Movies only)
+  * TV Series Bot: 0782088603 (TV Series & Season Packs)
+- HOW TO DOWNLOAD: Visit ${OFFICIAL_WEBSITE} -> Search Movie/Series -> Select Quality/Season -> Click Request -> Bot drops the file into the WhatsApp group in 2-3 mins!
+- DEVELOPER: Akash Sithum (Phone/WhatsApp: 0787732040).
 
-3. HOW TO REQUEST CONTENT (ෆිල්ම්ස් / Series ගන්නේ කොහොමද?):
-   - Step 1: Open ${OFFICIAL_WEBSITE}
-   - Step 2: Search for the Movie or TV Series title.
-   - Step 3: Select preferred video quality: 1080p Full HD (Crisp), 720p HD Ready (Recommended), or 480p SD Mobile (Data Saver). For TV Series, pick the Season.
-   - Step 4: Click the "Request" / "Continue to WhatsApp" button.
-   - Step 5: WhatsApp will open with a secure single-device verification token. Just send that message!
-   - Step 6: Within 2-3 minutes, our high-speed bot automatically fetches the movie from CineSubz/SinhalaSub with Sinhala Subtitles and uploads the direct file into our WhatsApp Group (${groupLink})!
-
-4. DUAL BOT ARCHITECTURE (අපේ Bots දෙදෙනා):
-   - Movie Bot: 0760372547 (+94 76 037 2547) - dedicated solely to Movie downloads.
-   - TV Series Bot: 0782088603 (+94 78 208 8603) - dedicated to TV Series & Anime episodes and season packs.
-   - The website automatically routes the user to the correct bot!
-
-5. CREATOR & DEVELOPER:
-   - Akash Sithum (Phone / WhatsApp: 0787732040 / +94 78 773 2040).
-   - If a member asks who made the system, who the admin/developer is, or needs technical help that cannot be resolved, warmly introduce Akash Sithum and provide his number (0787732040).
-
-6. SPECIFIC MOVIE / SERIES REQUESTS:
-   - If the user asks for a specific title (e.g. "Avatar 2 තියෙනවද?", "Squid Game season 2 දාන්නකෝ", "Inception link eka denna"):
-   - Enthusiastically confirm that it's available on our website ${OFFICIAL_WEBSITE}!
-   - Instruct them in 2 simple steps: visit ${OFFICIAL_WEBSITE}, search the name, and click Request. The bot will deliver it to the WhatsApp group shortly.
-
-7. STRICT PERSONAL CHAT FILTER:
-   - If the message is purely a personal or private message from a real-life acquaintance of the bot number (e.g. personal greetings with family, asking for personal money, everyday gossip completely unrelated to movies, bots, or FilmFeed), reply with ONLY one word: "SKIP".
-
-8. TONE & STYLE:
-   - Warm, brotherly, polite, encouraging (e.g. "ආයුබෝවන් යාලුවා!", "කිසිම ප්‍රශ්නයක් නෑ මචං, මම ඔයාට කියලා දෙන්නම්...").
-   - Keep answers clear and informative (3-5 sentences), always emphasizing how easy it is to use ${OFFICIAL_WEBSITE}.`;
+STRICT FILTER: If the incoming message is clearly a private message from a real-life acquaintance (e.g. personal family chatter, borrowing money, personal gossip unrelated to FilmFeed/movies/bot), respond with ONLY ONE WORD: "SKIP".`;
 
   // Get or initialize user conversation history
   let history = userHistories.get(senderPhone) || [];
@@ -232,7 +188,11 @@ FULL FILMFEED SYSTEM KNOWLEDGE:
     history = history.slice(-MAX_HISTORY_TURNS);
   }
 
-  const cascadeResult = await callGeminiCascade(systemInstruction, history);
+  // Choose token limit: shorter for casual queries to ensure ultra-fast snappy replies
+  const isShortTurn = userMessage.trim().length < 25 && !asksIdentity && !userMessage.toLowerCase().includes("kohomada");
+  const maxTokens = isShortTurn ? 150 : 350;
+
+  const cascadeResult = await callGeminiCascade(systemInstruction, history, maxTokens);
 
   if (cascadeResult && cascadeResult.replyText) {
     const replyText = cascadeResult.replyText;
@@ -253,7 +213,7 @@ FULL FILMFEED SYSTEM KNOWLEDGE:
     userHistories.set(senderPhone, history);
     userCooldowns.set(senderPhone, now);
 
-    const shouldSendCard = isIdentityQuery(replyText) || isIdentityQuery(userMessage);
+    const shouldSendCard = asksIdentity || replyText.includes("0787732040") || replyText.includes("Akash Sithum");
 
     return {
       text: replyText,
@@ -267,26 +227,21 @@ FULL FILMFEED SYSTEM KNOWLEDGE:
     };
   }
 
-  // Graceful human fallback if all APIs are temporarily unreachable
+  // Fast fallback if Gemini is offline
   userCooldowns.set(senderPhone, now);
-  const fallbackHumanText = 
-`ආයුබෝවන් ${pushName || "යාලුවා"}! ❤️
-
-ඔයාට අවශ්‍ය ඕනෑම Movies හෝ TV Series එකක් සිංහල උපසිරැසි (Sinhala Subtitles) එක්කම Full HD වලින් අපේ නිල FilmFeed වෙබ් අඩවියෙන් නොමිලේම Request කරගන්න පුළුවන් මචං:
-👉 ${OFFICIAL_WEBSITE}
-
-📌 *WhatsApp Group එක Lock කරලා තියෙන්නේ ඇයි?*
-අපේ Group එකේ දහස් ගණනක් යාලුවෝ ඉන්න නිසා හැමෝම Chat මැසේජ් දැම්මොත් Group එක spam වෙලා ඩවුන්ලෝඩ් කරගන්න දාන ෆිල්ම්ස් යට යනවා. ඒ නිසයි Group එක locked කරලා තියෙන්නේ. ඔයාට ඕනම ෆිල්ම් එකක් හෝ Series එකක් සයිට් එකෙන් search කරලා Request කළාම, අපේ Bots (Movie Bot 0760372547 / TV Series Bot 0782088603) විනාඩි 2-3 ක් ඇතුළත file එක කෙලින්ම ගෲප් එකට Upload කරලා දෙනවා! 🍿
-
-🌐 *FilmFeed Official Website:* ${OFFICIAL_WEBSITE}
-👥 *Official WhatsApp Group:* ${groupLink}
-👑 *Developer & Owner:* Akash Sithum (📞 0787732040)
-💡 මොනවාහරි ගැටලුවක් ආවොත් අපේ Developer Akash සහෝට WhatsApp මැසේජ් එකක් දාන්න!`;
+  const fallbackText = asksIdentity
+    ? `හායි යාලු! 🥰 මම සෙනූ (Senu), FilmFeed Support එක බලාගන්නේ මම තමා! ✨ මාවයි මේ System එකයි හැදුවේ අපේ **Akash Sithum** අයියා (📞 0787732040). ඔයාට එයාගේ Contact Card එකත් මෙන්න එව්වා පැටියෝ! ❤️`
+    : `හායි ${pushName || "යාලු"}! 🥰 ඔයාට ඕනම Movie එකක් හෝ Series එකක් අපේ Website එකෙන් නොමිලේම Request කරලා ගන්න පුළුවන් මචං: 🍿✨\n👉 ${OFFICIAL_WEBSITE}\n\nමොනවාහරි උදව්වක් ඕනනම් මට කියන්නකෝ! ❤️`;
 
   return {
-    text: fallbackHumanText,
-    sendContactCard: false,
-    contact: null,
+    text: fallbackText,
+    sendContactCard: asksIdentity,
+    contact: asksIdentity
+      ? {
+          displayName: "Akash Sithum (FilmFeed Creator)",
+          vcard: AKASH_VCARD,
+        }
+      : null,
   };
 }
 
