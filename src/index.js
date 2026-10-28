@@ -18,7 +18,6 @@ const axios = require("axios");
 const CloudSession = require("./cloud_session");
 const { broadcastDailyNews } = require("./daily_news");
 const { registerBotInFirestore } = require("./firebase_sync");
-const { handleInboxAutoReply } = require("./gemini_assistant");
 
 const PORT = process.env.PORT || 7860;
 const BOT_PHONE = process.env.BOT_PHONE || "94760372547";
@@ -58,11 +57,35 @@ const messageCache = new Map();
 const MAX_MESSAGE_CACHE = 2000;
 
 // --------------------------------------------------------------------------
-// Request Queue System (FIFO)
+// Processed Message ID Deduplication (Prevent Duplicate Baileys Delivery)
+// --------------------------------------------------------------------------
+const processedMessageIds = new Set();
+const MAX_PROCESSED_IDS = 2000;
+
+function isDuplicateMessage(msgId) {
+  if (!msgId) return false;
+  if (processedMessageIds.has(msgId)) return true;
+  processedMessageIds.add(msgId);
+  if (processedMessageIds.size > MAX_PROCESSED_IDS) {
+    const firstKey = processedMessageIds.values().next().value;
+    processedMessageIds.delete(firstKey);
+  }
+  return false;
+}
+
+// --------------------------------------------------------------------------
+// Request Queue System (FIFO - Strict Concurrency Lock)
 // --------------------------------------------------------------------------
 const requestQueue = [];
 let isProcessingQueue = false;
 let currentProcessingItem = null;
+
+function triggerQueue() {
+  if (isProcessingQueue || requestQueue.length === 0 || !waSocket) return;
+  processQueue().catch((err) => {
+    logger.error({ err }, "Unhandled error during processQueue");
+  });
+}
 
 // --------------------------------------------------------------------------
 // User Request Stats Tracker
@@ -1410,11 +1433,9 @@ ${getPromoFooter()}`,
   } finally {
     isProcessingQueue = false;
     currentProcessingItem = null;
-    setTimeout(() => {
-      if (!isProcessingQueue && requestQueue.length > 0) {
-        processQueue();
-      }
-    }, 2000);
+    if (requestQueue.length > 0) {
+      setTimeout(triggerQueue, 1500);
+    }
   }
 }
 
@@ -1430,1064 +1451,493 @@ const botSockets = {
   series: null,
 };
 
-function attachMessageEvents(sock, instanceBotPhone, instanceBotName) {
-    sock.ev.on("messages.upsert", async (m) => {
-      const waSocket = sock;
-      // Only process new incoming messages — skip history sync replays on startup
-      if (m.type !== "notify") return;
-      if (!m.messages || m.messages.length === 0) return;
-  
-      for (const msg of m.messages) {
-        if (!msg.message) continue;
-  
-        try {
-          const remoteJid = msg.key.remoteJid || "";
-          const fromMe = Boolean(msg.key.fromMe);
-  
-          // Unwrap potential layers: ephemeral, viewOnce, document captions
-          let innerMsg = msg.message;
-          if (innerMsg?.ephemeralMessage?.message) innerMsg = innerMsg.ephemeralMessage.message;
-          if (innerMsg?.viewOnceMessage?.message) innerMsg = innerMsg.viewOnceMessage.message;
-          if (innerMsg?.viewOnceMessageV2?.message) innerMsg = innerMsg.viewOnceMessageV2.message;
-          if (innerMsg?.documentWithCaptionMessage?.message) innerMsg = innerMsg.documentWithCaptionMessage.message;
-  
-          const rawText =
-            innerMsg?.conversation ||
-            innerMsg?.extendedTextMessage?.text ||
-            innerMsg?.imageMessage?.caption ||
-            innerMsg?.videoMessage?.caption ||
-            "";
-  
-          const text = rawText.trim();
-          if (!text) continue;
-  
-          const isCommandText = /^[!/.](?:req|game|vip|unvip|unban|ban|unlimit|reset|stats|done|verify)/i.test(text) || text.includes("!req");
-  
-          // Skip bot's own automated messages (only allow commands sent from owner account)
-          if (fromMe && !isCommandText) continue;
-  
-          const isGroup = remoteJid.endsWith("@g.us");
-          const participant = msg.key.participant || "";
-  
-          let requesterPhone = "";
-          let requesterLid = "";
-          let requesterJid = "";
-  
-          if (fromMe) {
-            requesterPhone = BOT_PHONE;
-            requesterJid = `${BOT_PHONE}@s.whatsapp.net`;
-          } else if (isGroup) {
-            if (participant.endsWith("@s.whatsapp.net")) {
-              requesterPhone = participant.split("@")[0].replace(/:\d+/, "");
-              requesterJid = `${requesterPhone}@s.whatsapp.net`;
-            } else if (participant.endsWith("@lid")) {
-              requesterLid = participant.replace(/:\d+/, "");
-            }
-          } else {
-            if (remoteJid.endsWith("@s.whatsapp.net")) {
-              requesterPhone = remoteJid.split("@")[0].replace(/:\d+/, "");
-              requesterJid = `${requesterPhone}@s.whatsapp.net`;
-            } else if (remoteJid.endsWith("@lid")) {
-              requesterLid = remoteJid.replace(/:\d+/, "");
-            }
-          }
-  
-          // If user reached via LID, resolve their real phone from group participants
-          if (requesterLid && !requesterPhone) {
-            const resolved = await resolveRealPhoneFromGroups(waSocket, requesterLid);
-            if (resolved) {
-              requesterPhone = resolved;
-              requesterJid = `${requesterPhone}@s.whatsapp.net`;
-            }
-          }
-  
-          const rawPhone = requesterPhone || (remoteJid.includes("@") ? remoteJid.split("@")[0].replace(/:\d+/, "") : "");
-          const cleanPhone = (rawPhone && rawPhone.length >= 9 && rawPhone.length <= 15) ? rawPhone : (fromMe ? BOT_PHONE : "");
-          const cleanJid = cleanPhone ? `${cleanPhone}@s.whatsapp.net` : null;
-          const senderPhone = cleanPhone || (requesterLid ? requesterLid.split("@")[0].replace(/:\d+/, "") : rawPhone) || BOT_PHONE;
-  
-          const isAdmin = fromMe || cleanPhone === "94760372547" || cleanPhone === BOT_PHONE || senderPhone === "94760372547" || senderPhone === BOT_PHONE;
-  
-          const pushName = msg.pushName || (cleanPhone ? `+${cleanPhone}` : "Movie Fan");
-          const mentionTag = cleanPhone ? `@${cleanPhone}` : `@${pushName}`;
-          const mentionDisplay = cleanPhone ? `@${cleanPhone} (${pushName})` : `@${pushName}`;
-          const mentionsList = [requesterJid, requesterLid, cleanJid, (isGroup ? participant : remoteJid)].filter(Boolean);
-  
-          // Log every incoming message for debugging
-          console.log(`📩 [Msg Received] from: ${pushName} (${senderPhone}) | jid: ${remoteJid} | fromMe: ${fromMe} | isAdmin: ${isAdmin}:\n${text}`);
-  
-          // ------------------------------------------------------------------
-          // ANTI-VIEWONCE INTERCEPTOR (Auto-Capture & Forward to Owner DM)
-          // ------------------------------------------------------------------
-          const isViewOnceMsg = Boolean(
-            msg.message?.viewOnceMessage ||
-            msg.message?.viewOnceMessageV2 ||
-            msg.message?.viewOnceMessageV2Extension
-          );
-  
-          if (isViewOnceMsg) {
-            const voContent =
-              msg.message?.viewOnceMessage?.message ||
-              msg.message?.viewOnceMessageV2?.message ||
-              msg.message?.viewOnceMessageV2Extension?.message;
-  
-            const mediaType = voContent?.imageMessage
-              ? "image"
-              : voContent?.videoMessage
-              ? "video"
-              : voContent?.audioMessage
-              ? "audio"
-              : null;
-  
-            if (mediaType && voContent[mediaType + "Message"]) {
-              (async () => {
-                try {
-                  const stream = await downloadContentFromMessage(voContent[mediaType + "Message"], mediaType);
-                  let buffer = Buffer.from([]);
-                  for await (const chunk of stream) {
-                    buffer = Buffer.concat([buffer, chunk]);
-                  }
-                  const ownerTargetJid = `${BOT_PHONE}@s.whatsapp.net`;
-                  const voCaption = `👁️ *[FILMFEED ANTI-VIEWONCE CAPTURED]*\n━━━━━━━━━━━━━━━━━━━━\n👤 *Sender:* ${pushName} (+${senderPhone})\n📍 *Chat:* ${isGroup ? "Group Chat" : "Direct Chat"}\n🕒 *Time:* ${new Date().toLocaleTimeString()}\n💬 *Caption:* ${voContent[mediaType + "Message"]?.caption || "None"}\n━━━━━━━━━━━━━━━━━━━━\n⚡ *FILMFEED Cloud Bot Engine*`;
-  
-                  if (mediaType === "image") {
-                    await waSocket.sendMessage(ownerTargetJid, { image: buffer, caption: voCaption, contextInfo: getMetaAiContext() });
-                  } else if (mediaType === "video") {
-                    await waSocket.sendMessage(ownerTargetJid, { video: buffer, caption: voCaption, contextInfo: getMetaAiContext() });
-                  } else if (mediaType === "audio") {
-                    await waSocket.sendMessage(ownerTargetJid, { audio: buffer, mimetype: "audio/mp4", ptt: true, contextInfo: getMetaAiContext() });
-                  }
-                  logger.info(`👁️ [Anti-ViewOnce] Extracted and forwarded ${mediaType} from ${senderPhone} to owner DM`);
-                } catch (voErr) {
-                  logger.error({ voErr }, "Anti-ViewOnce extraction error");
-                }
-              })();
-            }
-          }
-  
-          // ------------------------------------------------------------------
-          // ANTI-DELETE INTERCEPTOR (Message Ring Cache & Revoke Detection)
-          // ------------------------------------------------------------------
-          const msgId = msg.key?.id;
-          if (msgId && text) {
-            if (messageCache.size >= MAX_MESSAGE_CACHE) {
-              const oldestKey = messageCache.keys().next().value;
-              messageCache.delete(oldestKey);
-            }
-            messageCache.set(msgId, {
-              text,
-              sender: senderPhone,
-              pushName,
-              isGroup,
-              remoteJid,
-              timestamp: Date.now(),
-            });
-          }
-  
-          // Detect Revoked / Deleted Messages
-          if (msg.message?.protocolMessage && msg.message.protocolMessage.type === 0) {
-            const revokedId = msg.message.protocolMessage.key?.id;
-            if (revokedId && messageCache.has(revokedId)) {
-              const cached = messageCache.get(revokedId);
-              const alertMsg = 
-  `🗑️ *[FILMFEED ANTI-DELETE DETECTED]*
-  ━━━━━━━━━━━━━━━━━━━━
-  👤 *Sender:* ${cached.pushName} (+${cached.sender})
-  📍 *Chat:* ${cached.isGroup ? "Group Chat" : "Private Chat"}
-  🕒 *Deleted At:* ${new Date().toLocaleTimeString()}
-  💬 *Recovered Text:*
-  ${cached.text}
-  ━━━━━━━━━━━━━━━━━━━━
-  ⚡ *FILMFEED Anti-Delete Shield*`;
-  
-              await waSocket.sendMessage(remoteJid, {
-                text: alertMsg,
-                contextInfo: getMetaAiContext(),
-              });
-              logger.info(`🗑️ [Anti-Delete] Recovered revoked message: "${cached.text}" from ${cached.sender}`);
-            }
-            continue;
-          }
-  
-          // ------------------------------------------------------------------
-          // POWER COMMANDS SUITE (.menu, .movie, .ai, .song, .settings, etc.)
-          // ------------------------------------------------------------------
-          const lowerText = text.toLowerCase().trim();
-          const cmdMatch = lowerText.match(/^[./!](\w+)(?:\s+(.*))?$/s);
-  
-          if (cmdMatch) {
-            const cmdName = cmdMatch[1];
-            const cmdArgs = (cmdMatch[2] || "").trim();
-  
-            // 1. .menu / .help / .alive
-            if (["menu", "help", "alive", "start"].includes(cmdName)) {
-              const menuMsg = 
-  `⚡ *FILMFEED MINI — ALL-IN-ONE BOT ENGINE* ⚡
-  ━━━━━━━━━━━━━━━━━━━━
-  👋 *ආයුබෝවන් ${pushName}!*
-  🤖 *Bot Status:* 🟢 ACTIVE 24/7 (Cloud Runner)
-  👑 *Master:* +${BOT_PHONE}
-  ━━━━━━━━━━━━━━━━━━━━
-  
-  🎬 *[MOVIE & SERIES COMMANDS]*
-  • *.movie [නම]* : CineSubz 4K direct download link & online stream
-  • *.cinesub [link]* : Direct CineSubz download link
-  • *.sinhalasub [නම]* : SinhalaSub download mirror
-  • *.stream [නම]* : 4K FilmFeed online player link
-  
-  👁️ *[SUPER-WHATSAPP PRIVACY]*
-  • *.antiviewonce* : View-Once photos/videos auto-forward to DM
-  • *.antidelete* : Recover deleted messages & media
-  • *.getdp [@user]* : Download HD profile picture
-  • *.tempmail* : Generate disposable email & receive OTPs
-  
-  🤖 *[AI & UTILITIES]*
-  • *.ai [ප්‍රශ්නය]* : Free Gemini 2.0 Flash AI answers
-  • *.song [නම]* : 320kbps MP3 audio download with album art
-  • *.tt [link]* : TikTok video without watermark
-  • *.fb [link]* : Facebook HD video downloader
-  • *.ig [link]* : Instagram Reels & Stories downloader
-  • *.s* : Reply to photo/video to make WhatsApp sticker
-  • *.take [pack] | [author]* : Change sticker metadata
-  
-  🛡️ *[GROUP MANAGEMENT]*
-  • *.hidetag [message]* : Invisible tag for all group members
-  • *.tagall* : Mention all group members
-  • *.antilink [on/off]* : Auto-delete links & kick spammers
-  • *.kick [@user]* : Remove member from group
-  
-  ⚙️ *[CUSTOMIZATION & WEB PANEL]*
-  • *.settings* : View & configure bot settings
-  • *.setpass [password]* : Set web panel login password
-  • 🔗 *Settings Web Panel:* https://filmfeed-website.vercel.app/bot/settings
-  • 🔗 *Pair Another Bot:* https://filmfeed-website.vercel.app/bot
-  
-  ━━━━━━━━━━━━━━━━━━━━
-  🌐 *Website:* https://filmfeed-website.vercel.app
-  📢 *VIP Channel:* https://whatsapp.com/channel/0029Vb9AG1c3GJOsPvzqdu0R
-  > 🌍 *FILMFEED DEV COMMUNITY*`;
-  
-              await waSocket.sendMessage(remoteJid, {
-                text: menuMsg,
-                contextInfo: getMetaAiContext(mentionsList),
-              });
-              continue;
-            }
-  
-            // 2. .ai [query]
-            if (["ai", "gemini", "gpt", "ask"].includes(cmdName)) {
-              if (!cmdArgs) {
-                await waSocket.sendMessage(remoteJid, {
-                  text: `🤖 *[FILMFEED Gemini AI]*\nකරුණාකර ඔබගේ ප්‍රශ්නය ඇතුලත් කරන්න.\nඋදාහරණ: *.ai what is quantum computing* හෝ *.ai සිංහලෙන් කතා කරන්න*`,
-                  contextInfo: getMetaAiContext(mentionsList),
-                });
-              } else {
-                try {
-                  const aiRes = await axios.get(`https://api.allorigins.win/raw?url=${encodeURIComponent(`https://text.pollinations.ai/${encodeURIComponent(cmdArgs)}`)}`, { timeout: 20000 });
-                  const reply = aiRes.data || "Could not generate response.";
-                  await waSocket.sendMessage(remoteJid, {
-                    text: `🤖 *[Nexus Gemini AI]*\n━━━━━━━━━━━━━━━━━━━━\n${reply}\n━━━━━━━━━━━━━━━━━━━━\n⚡ *Powered by Gemini Flash*`,
-                    contextInfo: getMetaAiContext(mentionsList),
-                  });
-                } catch (_) {
-                  await waSocket.sendMessage(remoteJid, {
-                    text: `⚠️ AI සේවාව තාවකාලිකව කාර්යබහුලයි. කරුණාකර සුළු මොහොතකින් නැවත උත්සාහ කරන්න.`,
-                    contextInfo: getMetaAiContext(mentionsList),
-                  });
-                }
-              }
-              continue;
-            }
-  
-            // 3. .movie [name] / .cinesub [name]
-            if (["movie", "cinesub", "sinhalasub", "film"].includes(cmdName)) {
-              if (!cmdArgs) {
-                await waSocket.sendMessage(remoteJid, {
-                  text: `🎬 *[CineSubz 4K Downloader]*\nකරුණාකර චිත්‍රපටයේ නම ලබා දෙන්න.\nඋදාහරණ: *.movie Inception* හෝ *.cinesub Oppenheimer*`,
-                  contextInfo: getMetaAiContext(mentionsList),
-                });
-              } else {
-                await waSocket.sendMessage(remoteJid, {
-                  text: `🔍 *[CineSubz Engine]* Searching for: *${cmdArgs}*...\n4K Direct Links & Online Stream සූදානම් වෙමින් පවතී...`,
-                  contextInfo: getMetaAiContext(mentionsList),
-                });
-              }
-              continue;
-            }
-  
-            // 4. .hidetag [message]
-            if (["hidetag", "htag"].includes(cmdName) && isGroup) {
-              if (!isAdmin) {
-                await waSocket.sendMessage(remoteJid, { text: "❌ මෙම command එක භාවිත කළ හැක්කේ Admin අයට පමණි.", contextInfo: getMetaAiContext(mentionsList) });
-              } else {
-                try {
-                  const groupMeta = await waSocket.groupMetadata(remoteJid);
-                  const participants = groupMeta.participants.map((p) => p.id);
-                  await waSocket.sendMessage(remoteJid, {
-                    text: cmdArgs || "📢 *Attention Everyone!*",
-                    mentions: participants,
-                    contextInfo: getMetaAiContext(participants),
-                  });
-                } catch (_) {}
-              }
-              continue;
-            }
-  
-            // 5. .tagall
-            if (["tagall"].includes(cmdName) && isGroup) {
-              if (!isAdmin) {
-                await waSocket.sendMessage(remoteJid, { text: "❌ මෙම command එක භාවිත කළ හැක්කේ Admin අයට පමණි.", contextInfo: getMetaAiContext(mentionsList) });
-              } else {
-                try {
-                  const groupMeta = await waSocket.groupMetadata(remoteJid);
-                  const participants = groupMeta.participants.map((p) => p.id);
-                  let tagText = `📢 *[TAG ALL MEMBERS]*\n💬 *Message:* ${cmdArgs || 'None'}\n━━━━━━━━━━━━━━━━━━━━\n`;
-                  participants.forEach((p, idx) => {
-                    tagText += `${idx + 1}. @${p.split("@")[0]}\n`;
-                  });
-                  await waSocket.sendMessage(remoteJid, {
-                    text: tagText,
-                    mentions: participants,
-                    contextInfo: getMetaAiContext(participants),
-                  });
-                } catch (_) {}
-              }
-              continue;
-            }
-  
-            // 6. .settings / .setpass
-            if (["settings", "config"].includes(cmdName)) {
-              const settingsMsg = 
-  `⚙️ *[FILMFEED MINI SETTINGS]*
-  ━━━━━━━━━━━━━━━━━━━━
-  📱 *Your Number:* +${senderPhone}
-  🌐 *Web Settings Panel:*
-  👉 https://filmfeed-website.vercel.app/bot/settings
-  
-  🔑 *Password Set කරන්න:*
-  *.setpass [your-new-password]*
-  
-  💡 Web Settings Panel එකට ගොස් ඔබට කැමති නම, Prefix සහ Custom Footers වෙනස් කරගත හැක!
-  ━━━━━━━━━━━━━━━━━━━━`;
-              await waSocket.sendMessage(remoteJid, { text: settingsMsg, contextInfo: getMetaAiContext(mentionsList) });
-              continue;
-            }
-  
-            if (["setpass", "password"].includes(cmdName)) {
-              if (!cmdArgs) {
-                await waSocket.sendMessage(remoteJid, { text: "⚠️ කරුණාකර password එකක් ඇතුලත් කරන්න. උදාහරණ: *.setpass mysecret123*", contextInfo: getMetaAiContext(mentionsList) });
-              } else {
-                const allStats = getUserStats();
-                if (!allStats[senderPhone]) allStats[senderPhone] = { count: 0, name: pushName, firstSeen: new Date().toISOString() };
-                allStats[senderPhone].webPassword = cmdArgs;
-                saveUserStats(allStats);
-                await waSocket.sendMessage(remoteJid, {
-                  text: `✅ *[Password Saved!]*\nඔබගේ Web Settings Password එක සාර්ථකව set කරන ලදී.\n🌐 Web Panel එකට පිවිසෙන්න:\n👉 https://filmfeed-website.vercel.app/bot/settings`,
-                  contextInfo: getMetaAiContext(mentionsList),
-                });
-              }
-              continue;
-            }
-  
-            // 7. .postnews / .dailynews (Daily Cinema News Broadcast to Channel & Groups)
-            if (["postnews", "dailynews", "channelnews"].includes(cmdName)) {
-              if (!isAdmin) {
-                await waSocket.sendMessage(remoteJid, { text: "❌ මෙම command එක භාවිත කළ හැක්කේ Admin අයට පමණි.", contextInfo: getMetaAiContext(mentionsList) });
-              } else {
-                await waSocket.sendMessage(remoteJid, { text: "⏳ Trending Cinema News සහ 4K Poster එක සකසමින් පවතී... කරුණාකර රැඳී සිටින්න...", contextInfo: getMetaAiContext(mentionsList) });
-                const success = await broadcastDailyNews(waSocket, resolvedNewsletterJid, [remoteJid, ...TARGET_GROUP_JIDS]);
-                if (success) {
-                  await waSocket.sendMessage(remoteJid, { text: "✅ Daily Cinema News update successfully published to Channel and Groups! 🎬", contextInfo: getMetaAiContext(mentionsList) });
-                } else {
-                  await waSocket.sendMessage(remoteJid, { text: "⚠️ Failed to broadcast daily news. Please check connection / TMDb status.", contextInfo: getMetaAiContext(mentionsList) });
-                }
-              }
-              continue;
-            }
-          }
-  
-          // Admin Management Commands
-          if (isAdmin && text.startsWith("!")) {
-            const parts = text.split(/\s+/);
-            const adminCmd = parts[0].toLowerCase();
-            const targetPhone = parts[1] ? parts[1].replace(/[^0-9]/g, "") : (cleanPhone || BOT_PHONE);
-  
-            if (adminCmd === "!unban" && targetPhone) {
-              const allStats = getUserStats();
-              if (allStats[targetPhone]) {
-                allStats[targetPhone].isBanned = false;
-                allStats[targetPhone].duplicateCount = 0;
-                saveUserStats(allStats);
-                await waSocket.sendMessage(remoteJid, { text: `✅ User +${targetPhone} has been UNBANNED successfully.` });
-                continue;
-              }
-            } else if (adminCmd === "!ban" && targetPhone) {
-              const allStats = getUserStats();
-              if (!allStats[targetPhone]) allStats[targetPhone] = { count: 0, name: "User", firstSeen: new Date().toISOString() };
-              allStats[targetPhone].isBanned = true;
-              allStats[targetPhone].bannedAt = new Date().toISOString();
-              allStats[targetPhone].banReason = parts.slice(2).join(" ") || "Manually banned by Admin";
-              saveUserStats(allStats);
-              await waSocket.sendMessage(remoteJid, { text: `🚫 User +${targetPhone} has been BANNED.` });
-              continue;
-            } else if (adminCmd === "!vip") {
-              const allStats = getUserStats();
-              if (!allStats[targetPhone]) allStats[targetPhone] = { count: 0, name: "User", firstSeen: new Date().toISOString() };
-              allStats[targetPhone].isVip = true;
-              allStats[targetPhone].dailyCount = 0;
-              allStats[targetPhone].isBanned = false;
-              saveUserStats(allStats);
-              await waSocket.sendMessage(remoteJid, { text: `👑 VIP status ACTIVATED for +${targetPhone}. Unlimited requests enabled! 🚀` });
-              continue;
-            } else if (adminCmd === "!unvip") {
-              const allStats = getUserStats();
-              if (allStats[targetPhone]) {
-                allStats[targetPhone].isVip = false;
-                saveUserStats(allStats);
-                await waSocket.sendMessage(remoteJid, { text: `❌ VIP status REVOKED for +${targetPhone}.` });
-                continue;
-              }
-            } else if (adminCmd === "!unlimit" || adminCmd === "!reset") {
-              const allStats = getUserStats();
-              if (parts[1]?.toLowerCase() === "all") {
-                for (const k of Object.keys(allStats)) {
-                  allStats[k].dailyCount = 0;
-                }
-                saveUserStats(allStats);
-                await waSocket.sendMessage(remoteJid, { text: `🔄 All user daily limits have been RESET to 0/6!` });
-              } else {
-                if (!allStats[targetPhone]) allStats[targetPhone] = { count: 0, name: "User", firstSeen: new Date().toISOString() };
-                allStats[targetPhone].dailyCount = 0;
-                saveUserStats(allStats);
-                await waSocket.sendMessage(remoteJid, { text: `🔄 Daily limit for +${targetPhone} has been RESET to 0/6!` });
-              }
-              continue;
-            } else if (adminCmd === "!stats") {
-              const allStats = getUserStats();
-              const u = allStats[targetPhone];
-              if (u) {
-                checkAndResetDaily(u);
-                await waSocket.sendMessage(remoteJid, {
-                  text: `📊 *[User Info: +${targetPhone}]*\nName: ${u.name}\nDaily: ${u.dailyCount}/6\nTotal: ${u.count}\nVIP: ${u.isVip ? "YES 👑" : "NO"}\nBanned: ${u.isBanned ? "YES 🚫" : "NO"}`,
-                });
-                continue;
-              }
-            }
-          }
-  
-          // ------------------------------------------------------------------
-          // Check for Group Join Verification Command: !done / done / verify
-          // ------------------------------------------------------------------
-          const lowerTrimmed = text.trim().toLowerCase();
-          if (["!done", "done", ".done", "/done", "verify", "!verify", "join", "!join"].includes(lowerTrimmed)) {
-            const pendingKey = cleanPhone || requesterLid || senderPhone;
-            const pending = pendingGroupRequests.get(pendingKey);
-            if (!pending) {
-              await waSocket.sendMessage(remoteJid, {
-                text: `👋 ආයුබෝවන් *${pushName}*!\nඔබට දැනට Pending වූ Movie Request එකක් නොමැත.\nවෙබ් අඩවියෙන් හෝ *!req <movie_url>* මඟින් ඔබට අවශ්‍ය චිත්‍රපටය Request කරන්න. 🎬`,
-              });
-              continue;
-            }
-  
-            // Force-refresh to check if user has joined any of our target groups
-            const userGroups = await checkUserGroups(waSocket, cleanPhone, requesterJid, requesterLid, true);
-            if (userGroups.length === 0) {
-              const inviteLinks = [];
-              for (const jid of TARGET_GROUP_JIDS) {
-                const link = await getGroupInviteLink(waSocket, jid);
-                const meta = await getCachedGroupMetadata(waSocket, jid);
-                inviteLinks.push({ title: meta?.subject || "FilmFeed Cinema Group", link });
-              }
-              const linksText = inviteLinks
-                .filter((x) => x.link)
-                .map((x) => `🔗 *${x.title}:*\n👉 ${x.link}`)
-                .join("\n\n");
-  
-              await waSocket.sendMessage(remoteJid, {
-                text: `❌ *[FilmFeed 4K] තහවුරු කරගත නොහැකි විය!*\n\n*${pushName}*, ඔබ තවමත් අපගේ කිසිදු WhatsApp සමූහයකට (Group) Join වී නොමැති බව පෙනේ.\n\nකරුණාකර පහත Link එකෙන් Group එකට Join වී නැවත *!done* ලෙස එවන්න:\n\n${linksText || "Admin අමතන්න: +94 76 037 2547"}`,
-              });
-              continue;
-            }
-  
-            // User is verified!
-            const taskItem = pending.taskItem;
-            taskItem.targetGroups = userGroups.map((g) => g.jid);
-            taskItem.mentionTag = mentionTag;
-            taskItem.mentionDisplay = mentionDisplay;
-            taskItem.mentionsList = mentionsList;
-            pendingGroupRequests.delete(pendingKey);
-  
-            const groupNames = userGroups.map((g) => `*${g.subject}*`).join(", ");
-            await waSocket.sendMessage(remoteJid, {
-              text: `✅ *[FilmFeed 4K • තහවුරු කිරීම සාර්ථකයි!]*\n\nස්තූතියි *${pushName}*! ඔබ ${groupNames} සමූහය හා සම්බන්ධ වී ඇති බව තහවුරු විය. 🎉\n\n🚀 ඔබ ඉල්ලූ *${taskItem.isSeriesSeason ? `TV Series (Season ${taskItem.seasonNumber})` : "චිත්‍රපටය"}* දැන් බාගත කිරීම ආරම්භ වේ!\n📦 චිත්‍රපටය ඔබ සිටින Group එකට පමණක් Upload වනු ඇත. 🍿`,
-            });
-  
-            const isBusy = isProcessingQueue || requestQueue.length > 0;
-            const queuePosition = requestQueue.length + (isProcessingQueue ? 1 : 0);
-  
-            if (isBusy) {
-              requestQueue.push(taskItem);
-              logger.info(`Task added to queue at #${queuePosition} for ${pushName} after group verification`);
-            } else {
-              requestQueue.push(taskItem);
-              processQueue();
-            }
-            continue;
-          }
-  
-          // Skip bot's own non-command messages
-          if (fromMe && !isCommandText) continue;
-  
-          // Reject FitGirl or Game Repacks requests explicitly
-          if (text.includes("fitgirl-repacks.site") || text.match(/^[!/.]?(?:req_game|game)\b/i)) {
-            await waSocket.sendMessage(remoteJid, {
-              text: `⚠️ *[FilmFeed Auto-Bot]*\n━━━━━━━━━━━━━━━━━━━━\nGame Repacks සේවාව අත්හිටුවා ඇත. FilmFeed Auto-Bot මඟින් Movies සහ TV Series පමණක් ලබාගත හැක. 🍿`,
-              contextInfo: getMetaAiContext(mentionsList),
-            });
-            continue;
-          }
-  
-          let commandFound = false;
-          let isSeriesSeason = false;
-          let seasonNumber = 1;
-          let movieUrl = "";
-          let quality = "720p";
-          let token = "";
-  
-          const textLines = text.split("\n");
-  
-          // 1. Line-by-line check for commands
-          for (const rawLine of textLines) {
-            const line = rawLine.trim();
-            if (!line) continue;
-  
-            // 1A. Season Command: !req_season, /season, .season, or !req <url> | S1
-            const sMatch =
-              line.match(/^[!/.]?(?:req_season|season)\s+([^\s|]+)(?:\s*\|\s*[Ss]?(\d+))?(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i) ||
-              line.match(/^[!/.]?req(?:uest)?\s+([^\s|]+)\s*\|\s*[Ss](\d+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
-  
-            if (sMatch && (sMatch[1].startsWith("http") || sMatch[1].includes("cinesubz") || sMatch[1].includes("sinhalasub") || sMatch[1].includes("baiscopes") || sMatch[1].includes("anime") || sMatch[1].includes("cartoons"))) {
-              commandFound = true;
-              isSeriesSeason = true;
-              movieUrl = sMatch[1].trim();
-              seasonNumber = sMatch[2] ? parseInt(sMatch[2].trim(), 10) : 1;
-              quality = sMatch[3] ? sMatch[3].trim() : "720p";
-              token = sMatch[4] ? sMatch[4].trim() : "";
-              break;
-            }
-  
-            // 1B. Movie Command: !req <url> | <quality> | <token>
-            const rMatch = line.match(/^[!/.]?req(?:uest)?\s+(https?:\/\/[^\s|]+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
-            if (rMatch) {
-              commandFound = true;
-              movieUrl = rMatch[1].trim();
-              quality = rMatch[2] ? rMatch[2].trim() : "720p";
-              token = rMatch[3] ? rMatch[3].trim() : "";
-              if (movieUrl.includes("/tvshows/")) {
-                isSeriesSeason = true;
-                seasonNumber = 1;
-              }
-              break;
-            }
-          }
-  
-          // 2. Fallback: Search anywhere for a CineSubz, SinhalaSub, Baiscopes, Anime or Cartoons URL
-          if (!commandFound) {
-            const urlMatch = text.match(/(https?:\/\/[^\s|]*(?:cinesubz|sinhalasub|baiscopes|animekaizen|cartoons)[^\s|\n]*)/i);
-            if (urlMatch) {
-              commandFound = true;
-              movieUrl = urlMatch[1].trim();
-              quality = "720p";
-              token = "DIRECT";
-              if (movieUrl.includes("/tvshows/")) {
-                isSeriesSeason = true;
-                seasonNumber = 1;
-              }
-            }
-          }
-  
-          if (!commandFound || !movieUrl) {
-            // If in private chat (DM) and not from bot itself, check for intelligent Senu Auto-Reply
-            if (!isGroup && !fromMe) {
-              try {
-                // Show Senu WhatsApp composing typing indicator
-                try {
-                  await sock.sendPresenceUpdate("composing", remoteJid);
-                } catch (_) {}
+function attachMessageEvents(sock) {
+  sock.ev.on("messages.upsert", async (m) => {
+    // Only process new incoming messages — skip history sync replays on startup
+    if (m.type !== "notify") return;
+    if (!m.messages || m.messages.length === 0) return;
 
-                const aiResult = await handleInboxAutoReply(senderPhone, pushName, text, primaryGroupLink);
-                if (aiResult && aiResult.text) {
-                  // Human-like typing delay based on message length (800ms to 2000ms)
-                  const typingDelay = Math.min(2000, Math.max(800, Math.floor(aiResult.text.length * 12)));
-                  await new Promise((r) => setTimeout(r, typingDelay));
+    for (const msg of m.messages) {
+      if (!msg.message) continue;
 
-                  await sock.sendMessage(remoteJid, {
-                    text: aiResult.text,
-                    contextInfo: getMetaAiContext(mentionsList),
-                  });
-
-                  // Send Akash Sithum vCard if identity/developer was queried
-                  if (aiResult.sendContactCard && aiResult.contact) {
-                    await sock.sendMessage(remoteJid, {
-                      contacts: {
-                        displayName: aiResult.contact.displayName,
-                        contacts: [{ vcard: aiResult.contact.vcard }],
-                      },
-                    });
-                  }
-
-                  try {
-                    await sock.sendPresenceUpdate("paused", remoteJid);
-                  } catch (_) {}
-
-                  logger.info(`[Senu AI Support] Replied to ${pushName || senderPhone}`);
-                } else {
-                  try {
-                    await sock.sendPresenceUpdate("paused", remoteJid);
-                  } catch (_) {}
-                }
-              } catch (aiErr) {
-                logger.warn(`[Senu AI Support] Auto-reply error: ${aiErr.message}`);
-                try {
-                  await sock.sendPresenceUpdate("paused", remoteJid);
-                } catch (_) {}
-              }
-            }
-            continue;
-          }
-  
-          // Normalize domain to cinesubz.lk for fast direct connection
-          movieUrl = movieUrl.replace(/cinesubz\.(net|co)/g, "cinesubz.lk");
-  
-          logger.info(`🎯 Accepted FilmFeed command from ${pushName} (${remoteJid}): URL=${movieUrl} | Q=${quality}`);
-  
-          const replyTarget = remoteJid;
-  
-          // ------------------------------------------------------------------
-          // ANTI-SPAM & USER CONTROL CHECKS
-          // ------------------------------------------------------------------
-          const stats = getUserStats();
-          if (!stats[senderPhone]) {
-            stats[senderPhone] = {
-              count: 0,
-              name: pushName,
-              firstSeen: new Date().toISOString(),
-              history: [],
-              dailyCount: 0,
-              dailyDate: new Date().toISOString().slice(0, 10),
-              isVip: false,
-              isBanned: false,
-              duplicateCount: 0,
-              lastRequestedUrl: "",
-            };
-          }
-          const userRecord = stats[senderPhone];
-          checkAndResetDaily(userRecord);
-  
-          // Auto-grant VIP and clear restrictions for Admin / Owner
-          if (isAdmin) {
-            userRecord.isVip = true;
-            userRecord.isBanned = false;
-            userRecord.duplicateCount = 0;
-            userRecord.dailyCount = 0;
-          }
-  
-          // Auto-grant VIP if request message contains VIP markers
-          if (text.includes("👑 VIP Member") || text.includes("VIP") || token.toUpperCase().includes("VIP") || text.includes("👑")) {
-            userRecord.isVip = true;
-            saveUserStats(stats);
-          }
-  
-          // A. CHECK IF USER IS CURRENTLY BANNED
-          if (!isAdmin && userRecord.isBanned) {
-            logger.warn(`🚫 Ignoring request from BANNED user ${senderPhone} (${pushName})`);
-            const banNotice = 
-  `🚫 *[FilmFeed System - Account BANNED]*
-  ━━━━━━━━━━━━━━━━━━━━
-  👤 *User Phone:* +${senderPhone} (${mentionTag})
-  ⚠️ *තත්ත්වය:* ඔබගේ WhatsApp අංකය FilmFeed පද්ධතියෙන් BAN කර ඇත.
-  📌 *හේතුව (Reason):* ${userRecord.banReason || "Duplicate spam requests for the same movie"}
-  
-  _නැවත සේවාව ලබා ගැනීමට අවශ්‍ය නම් කරුණාකර Admin (+94760372547) අමතන්න._
-  ━━━━━━━━━━━━━━━━━━━━`;
-  
-            await waSocket.sendMessage(replyTarget, {
-              text: banNotice,
-              mentions: mentionsList,
-              contextInfo: getMetaAiContext(mentionsList),
-            });
-            continue;
-          }
-  
-          // B. CHECK DUPLICATE MOVIE REQUEST
-          const cleanUrl = movieUrl.trim().toLowerCase().replace(/\/+$/, "");
-          const prevUrl = (userRecord.lastRequestedUrl || "").trim().toLowerCase().replace(/\/+$/, "");
-  
-          if (!isAdmin && !userRecord.isVip && prevUrl && prevUrl === cleanUrl) {
-            userRecord.duplicateCount = (userRecord.duplicateCount || 1) + 1;
-            userRecord.lastRequestedAt = Date.now();
-  
-            if (userRecord.duplicateCount >= 2) {
-              userRecord.isBanned = true;
-              userRecord.bannedAt = new Date().toISOString();
-              userRecord.banReason = "එකම චිත්‍රපටය නැවත නැවතත් (Duplicate Spam Request) ඉල්ලුම් කිරීම";
-              saveUserStats(stats);
-  
-              logger.warn(`🚨 User ${senderPhone} (${pushName}) BANNED for repeated requests of ${movieUrl}`);
-  
-              const banMessage = 
-  `🚫 *[FilmFeed System - Account BANNED]*
-  ━━━━━━━━━━━━━━━━━━━━
-  👤 *User:* ${mentionTag} (+${senderPhone})
-  ⚠️ *හේතුව (Ban Reason):*
-  ඔබ එකම චිත්‍රපටය නැවත නැවතත් (Duplicate Spam Request) ඉල්ලුම් කිරීම හේතුවෙන් පද්ධතියේ ආරක්ෂාව සඳහා ඔබගේ WhatsApp අංකය ස්වයංක්‍රීයව BAN කරන ලදී!
-  
-  📌 *තත්ත්වය:* ඔබගේ අංකයෙන් ඉදිරියට කිසිදු චිත්‍රපටයක් ලබාගත නොහැක.
-  💡 *විසඳුම:* නැවත සක්‍රීය කර ගැනීමට අවශ්‍ය නම් කරුණාකර FilmFeed Admin (+94760372547) අමතන්න.
-  ━━━━━━━━━━━━━━━━━━━━`;
-  
-              await waSocket.sendMessage(replyTarget, {
-                text: banMessage,
-                mentions: mentionsList,
-                contextInfo: getMetaAiContext(mentionsList),
-              });
-              continue;
-            }
-          } else {
-            userRecord.duplicateCount = 1;
-            userRecord.lastRequestedUrl = cleanUrl;
-            userRecord.lastRequestedAt = Date.now();
-          }
-  
-          // C. CHECK DAILY 6-MOVIE LIMIT FOR NON-VIP
-          const isVipUser = Boolean(
-            isAdmin ||
-            userRecord.isVip ||
-            text.includes("👑 VIP Member") ||
-            text.includes("VIP") ||
-            token.toUpperCase().includes("VIP")
-          );
-  
-          if (!isVipUser && userRecord.dailyCount >= 6) {
-            logger.info(`User ${senderPhone} reached daily limit of 6 movies.`);
-            const limitMessage = 
-  `⚠️ *[FilmFeed 4K • දෛනික සීමාව ඉක්මවා ඇත (Daily Limit Exceeded)]*
-  ━━━━━━━━━━━━━━━━━━━━
-  ආයුබෝවන් *${pushName}* (${mentionTag})!
-  
-  📌 *දෛනික නොමිලේ සීමාව (Daily Free Limit):*
-  ඔබ අද දිනට හිමි නොමිලේ ලබාගත හැකි චිත්‍රපට 6 ක උපරිම සීමාව (*6/6 Movies*) සම්පූර්ණ කර ඇත.
-  
-  📊 *අද දින ඔබ ලබාගත් ප්‍රමාණය:* 6 / 6 චිත්‍රපට
-  ⏳ *නැවත Reset වන වේලාව:* හෙට උදෑසන 12:00 AM (මධ්‍යම රාත්‍රිය)
-  
-  👑 *අසීමිතව (Unlimited) චිත්‍රපට ලබා ගැනීමට අවශ්‍යද?*
-  ඔබට අපගේ *VIP සාමාජිකත්වය (VIP Membership)* සක්‍රීය කරගත හැක:
-  
-  ✨ *VIP සාමාජිකත්වයේ විශේෂ වරප්‍රසාද:*
-  • 🎬 දිනකට කැමති තරම් ඕනෑම චිත්‍රපට සංඛ්‍යාවක් (Unlimited Daily Movies)
-  • 📦 Full TV Series Season Packs එකවර ලබා ගැනීම
-  • ⚡ High-Speed Ultra VIP Queue ප්‍රමුඛතාවය (පෝලිම් නැත)
-  • 🚫 කිසිදු සීමාවකින් තොර වීම
-  
-  👉 *VIP සක්‍රීය කරගැනීමට පිවිසෙන්න:*
-  https://filmfeed-website.vercel.app
-  
-  හෝ Admin අමතන්න: +94 76 037 2547
-  ━━━━━━━━━━━━━━━━━━━━`;
-  
-            await waSocket.sendMessage(replyTarget, {
-              text: limitMessage,
-              mentions: mentionsList,
-              contextInfo: getMetaAiContext(mentionsList),
-            });
-            continue;
-          }
-  
-          const userStats = incrementUserRequest(senderPhone, pushName);
-          const { count, badge } = userStats;
-  
-          // ------------------------------------------------------------------
-          // Check User Group Membership
-          // ------------------------------------------------------------------
-          let userGroups = [];
-          if (isAdmin || isGroup) {
-            userGroups = [{ jid: (isGroup ? remoteJid : TARGET_GROUP_JID), subject: "FilmFeed Cinema Group" }];
-          } else {
-            userGroups = await checkUserGroups(waSocket, cleanPhone, requesterJid, requesterLid, false);
-          }
-  
-          const taskItem = {
-            isSeriesSeason,
-            seasonNumber,
-            movieUrl,
-            quality,
-            token,
-            replyTarget,
-            requesterJid: requesterJid || (cleanPhone ? `${cleanPhone}@s.whatsapp.net` : ""),
-            requesterLid: requesterLid || "",
-            cleanPhone: cleanPhone || "",
-            pushName,
-            mentionTag,
-            mentionDisplay,
-            mentionsList,
-            userStats,
-            targetGroups: userGroups.map((g) => g.jid),
-            createdAt: Date.now(),
-          };
-  
-          if (userGroups.length === 0) {
-            // User is NOT in ANY group! Store pending and prompt with invite links
-            const pendingKey = cleanPhone || requesterLid || senderPhone;
-            pendingGroupRequests.set(pendingKey, { taskItem, createdAt: Date.now() });
-  
-            const inviteLinks = [];
-            for (const jid of TARGET_GROUP_JIDS) {
-              const link = await getGroupInviteLink(waSocket, jid);
-              const meta = await getCachedGroupMetadata(waSocket, jid);
-              inviteLinks.push({ title: meta?.subject || "FilmFeed Cinema Group", link });
-            }
-            const linksText = inviteLinks
-              .filter((x) => x.link)
-              .map((x) => `🔗 *${x.title}:*\n👉 ${x.link}`)
-              .join("\n\n");
-  
-            const joinRequiredMessage =
-  `⚠️ *[FilmFeed 4K • Group Membership Required]*
-  ━━━━━━━━━━━━━━━━━━━━
-  ආයුබෝවන් *${pushName}*! 🎬
-  ඔබ ඉල්ලූ චිත්‍රපටය ලබා ගැනීමට පෙර ඔබ අපගේ නිල WhatsApp සමූහයන්ගෙන් (Groups) එකකට සම්බන්ධ වී සිටිය යුතුය.
-  
-  📥 *චිත්‍රපට හා TV Series Upload කරනු ලබන්නේ අපගේ Groups වලට පමණි!*
-  
-  කරුණාකර පහත Group Link එකෙන් අපගේ සමූහයට එකතු වන්න:
-  ${linksText || "Admin අමතන්න: +94 76 037 2547"}
-  
-  ━━━━━━━━━━━━━━━━━━━━
-  ✅ *Join වූ පසු කුමක් කළ යුතුද?*
-  Group එකට Join වී අවසන් වූ පසු, මෙම චැට් එකට *!done* හෝ *done* ලෙස Reply කරන්න (නැතහොත් Movie Request එක නැවත එවන්න).
-  එවිට ඔබ Group එකේ සිටින බව තහවුරු කරගෙන ඔබ සිටින Group එකට චිත්‍රපටය Auto-Upload වනු ඇත! 🍿`;
-  
-            await waSocket.sendMessage(replyTarget, {
-              text: joinRequiredMessage,
-              mentions: mentionsList,
-              contextInfo: getMetaAiContext(mentionsList),
-            });
-            continue;
-          }
-  
-          // Instant Acknowledgment Message
-          try {
-            await waSocket.sendMessage(replyTarget, {
-              text: `📥 *[FilmFeed Auto-Bot]*\n━━━━━━━━━━━━━━━━━━━━\n*${pushName}*, ඔබගේ ඉල්ලීම පද්ධතියට ලැබුණි! 🎬\n\n📌 *Quality:* ${quality}\n⏳ බාගත කිරීම සඳහා පෝලිමට එක් කරන ලදී...`,
-              mentions: mentionsList,
-              contextInfo: getMetaAiContext(mentionsList),
-            });
-          } catch (_) {}
-  
-          const isBusy = isProcessingQueue || requestQueue.length > 0;
-          const queuePosition = requestQueue.length + (isProcessingQueue ? 1 : 0);
-  
-          if (isBusy) {
-            requestQueue.push(taskItem);
-            logger.info(`Task added to queue at #${queuePosition} for ${pushName}`);
-  
-            const queueMessage = 
-  `⏳ *[FilmFeed Auto-Bot] පෝලිමේ රඳවා ඇත (Queued)*
-  ━━━━━━━━━━━━━━━━━━━━
-  ආයුබෝවන් *${pushName}* (${mentionTag}),
-  දැනට වෙනත් චිත්‍රපටයක් බාගත වෙමින් පවතී.
-  
-  📊 *ඔබගේ පෝලිම් ස්ථානය (Queue Position):* *#${queuePosition}*
-  📦 *ඉල්ලීම:* ${isSeriesSeason ? `TV Series (Season ${seasonNumber})` : "Movie"}
-  🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
-  📺 *Quality:* ${quality}
-  🔑 *Token:* ${token || "DIRECT"}
-  ━━━━━━━━━━━━━━━━━━━━
-  _කලින් ඉල්ලීම අවසන් වූ සැණින් ඔබගේ ඉල්ලීම බාගත කර Group එකට Upload වනු ඇත! ස්තූතියි!_`;
-  
-            await waSocket.sendMessage(replyTarget, {
-              text: queueMessage,
-              mentions: mentionsList,
-              contextInfo: getMetaAiContext(mentionsList),
-            });
-          } else {
-            requestQueue.push(taskItem);
-  
-            const startMessage = 
-  `🚀 *[FilmFeed Auto-Bot] සකසමින් පවතී (Processing)*
-  ━━━━━━━━━━━━━━━━━━━━
-  ආයුබෝවන් *${pushName}* (${mentionTag})!
-  ඔබගේ *${count}* වන ඉල්ලීම ලැබුණා [${badge}].
-  ${isSeriesSeason ? `📺 *TV Series (Season ${seasonNumber}) Pack* සකස් කිරීම ආරම්භ විය...` : "🎬 Direct High-Speed ලින්ක් එක සකසා බාගත කිරීම ආරම්භ විය..."}
-  
-  📺 *Quality:* ${quality}
-  🔑 *Token:* ${token || "DIRECT"}
-  ━━━━━━━━━━━━━━━━━━━━
-  🍿 FilmFeed 4K Cinema Engine`;
-  
-            await waSocket.sendMessage(replyTarget, {
-              text: startMessage,
-              mentions: mentionsList,
-              contextInfo: getMetaAiContext(mentionsList),
-            });
-  
-            processQueue();
-          }
-        } catch (msgErr) {
-          logger.error({ msgErr }, "Error handling incoming WhatsApp message item");
-        }
+      const msgId = msg.key?.id;
+      if (isDuplicateMessage(msgId)) {
+        continue;
       }
-    });
-  }
 
-async function connectBotInstance({ botKey, botPhone, botName, authDir, gistId, gistDesc }) {
-  if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true });
-  const sessionManager = new CloudSession(authDir, process.env.GH_PAT || process.env.GITHUB_TOKEN, gistId, gistDesc);
-  await sessionManager.restore();
+      try {
+        const remoteJid = msg.key.remoteJid || "";
+        const fromMe = Boolean(msg.key.fromMe);
 
-  const { version, isLatest } = await fetchLatestBaileysVersion();
+        // Unwrap potential layers: ephemeral, viewOnce, document captions
+        let innerMsg = msg.message;
+        if (innerMsg?.ephemeralMessage?.message) innerMsg = innerMsg.ephemeralMessage.message;
+        if (innerMsg?.viewOnceMessage?.message) innerMsg = innerMsg.viewOnceMessage.message;
+        if (innerMsg?.documentWithCaptionMessage?.message) innerMsg = innerMsg.documentWithCaptionMessage.message;
 
-  return new Promise((resolve) => {
-    let hasResolved = false;
-    let activeSock = null;
+        // Extract raw text from any message type
+        const text =
+          innerMsg?.conversation ||
+          innerMsg?.extendedTextMessage?.text ||
+          innerMsg?.imageMessage?.caption ||
+          innerMsg?.videoMessage?.caption ||
+          innerMsg?.documentMessage?.caption ||
+          "";
 
-    async function initSocket() {
-      const { state, saveCreds } = await useMultiFileAuthState(authDir);
+        if (!text || typeof text !== "string") continue;
 
-      const sock = makeWASocket({
-        version,
-        logger: pino({ level: "warn" }),
-        printQRInTerminal: false,
-        auth: {
-          creds: state.creds,
-          keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "warn" })),
-        },
-        generateHighQualityLinkPreview: false,
-        browser: Browsers.ubuntu("Chrome"),
-        keepAliveIntervalMs: 25000,
-        syncFullHistory: false,
-        markOnlineOnConnect: true,
-        connectTimeoutMs: 60000,
-        defaultQueryTimeoutMs: 120000,
-        getMessage: async () => undefined,
-      });
+        const isGroup = remoteJid.endsWith("@g.us");
+        const senderJid = isGroup ? (msg.key.participant || remoteJid) : remoteJid;
+        const pushName = msg.pushName || (fromMe ? "Admin" : "Member");
 
-      activeSock = sock;
-      botSockets[botKey] = sock;
-      if (botKey === "movies") waSocket = sock;
+        const rawPhone = senderJid.split("@")[0].replace(/:\d+/, "");
+        const senderPhone = rawPhone.replace(/\D/g, "");
+        const cleanPhone = senderPhone.length === 11 && senderPhone.startsWith("94")
+          ? senderPhone
+          : senderPhone.length === 10 && senderPhone.startsWith("0")
+          ? "94" + senderPhone.slice(1)
+          : senderPhone.length === 9
+          ? "94" + senderPhone
+          : senderPhone;
 
-      sock.ev.on("creds.update", async () => {
-        await saveCreds();
-        sessionManager.scheduleSync();
-      });
+        const requesterJid = (cleanPhone && cleanPhone.length >= 9 && cleanPhone.length <= 13)
+          ? `${cleanPhone}@s.whatsapp.net`
+          : (senderJid.endsWith("@s.whatsapp.net") ? senderJid : "");
+        const requesterLid = (senderJid && senderJid.endsWith("@lid"))
+          ? senderJid
+          : (msg.key.participant && msg.key.participant.endsWith("@lid") ? msg.key.participant : "");
 
-      let lastSeenQR = "";
-      sock.ev.on("connection.update", async (update) => {
-        const { connection, lastDisconnect, qr } = update;
+        const mentionTag = `@${cleanPhone || rawPhone || "user"}`;
+        const mentionDisplay = pushName ? `*${pushName}* (${mentionTag})` : mentionTag;
+        const mentionsList = requesterJid ? [requesterJid] : [];
 
-        if (qr && qr !== lastSeenQR) {
-          lastSeenQR = qr;
-          latestQR = qr;
-          console.log("\n============================================================");
-          console.log(`📱 [${botName} (+${botPhone})] SCAN THIS QR CODE NOW!`);
-          console.log(`👉 Open WhatsApp on ${botPhone} -> Linked Devices -> Link a Device`);
-          console.log("============================================================\n");
-          qrcode.generate(qr, { small: true });
-          console.log("\n============================================================\n");
-        }
+        // Admin check: true if sender phone matches BOT_PHONE, known admin numbers, or sent by bot itself
+        const adminNumbers = ["94760372547", "94787732040", "94782088603"];
+        const isAdmin = fromMe || (cleanPhone && adminNumbers.includes(cleanPhone));
 
-        if (connection === "open") {
-          console.log("\n============================================================");
-          console.log(`✅ [${botName} (+${botPhone})] CONNECTED SUCCESSFULLY!`);
-          console.log("============================================================\n");
-          latestQR = null;
-          await sessionManager.sync();
-          if (!hasResolved) {
-            hasResolved = true;
-            resolve({ sock: activeSock, sessionManager });
+        // ------------------------------------------------------------------
+        // Check for Group Join Verification Command: !done / done / verify
+        // ------------------------------------------------------------------
+        const lowerTrimmed = text.trim().toLowerCase();
+        if (["!done", "done", ".done", "/done", "verify", "!verify", "join", "!join"].includes(lowerTrimmed)) {
+          const pendingKey = cleanPhone || requesterLid || senderPhone;
+          const pending = pendingGroupRequests.get(pendingKey);
+
+          if (pending && pending.taskItem) {
+            const userGroups = await checkUserGroups(waSocket, cleanPhone, requesterJid, requesterLid, true);
+            if (userGroups.length > 0) {
+              const taskItem = pending.taskItem;
+              taskItem.targetGroups = userGroups.map((g) => g.jid);
+              pendingGroupRequests.delete(pendingKey);
+
+              const groupNames = userGroups.map((g) => `*${g.subject}*`).join(", ");
+              await waSocket.sendMessage(remoteJid, {
+                text: `✅ *[FilmFeed 4K • තහවුරු කිරීම සාර්ථකයි!]*\n\nස්තූතියි *${pushName}*! ඔබ ${groupNames} සමූහය හා සම්බන්ධ වී ඇති බව තහවුරු විය. 🎉\n\n🚀 ඔබ ඉල්ලූ *${taskItem.isSeriesSeason ? `TV Series (Season ${taskItem.seasonNumber})` : "චිත්‍රපටය"}* දැන් බාගත කිරීම සඳහා පෝලිමට එක් කරන ලදී! 🍿`,
+              });
+
+              requestQueue.push(taskItem);
+              triggerQueue();
+              continue;
+            } else {
+              await waSocket.sendMessage(remoteJid, {
+                text: `⚠️ *[FilmFeed 4K]* තවමත් ඔබ කිසිදු සමූහයකට (Group) එකතු වී නොමැත. කරුණාකර පළමුව Group එකට එකතු වී නැවත *done* ලෙස එවන්න.`,
+              });
+              continue;
+            }
           }
         }
 
-        if (connection === "close") {
-          const statusCode = lastDisconnect?.error?.output?.statusCode;
-          const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
-          console.warn(`[${botName}] Connection closed (code: ${statusCode}). Reconnecting: ${!isLoggedOut}`);
+        // Parse commands
+        let commandFound = false;
+        let isSeriesSeason = false;
+        let seasonNumber = 1;
+        let movieUrl = "";
+        let quality = "720p";
+        let token = "";
 
-          if (isLoggedOut) {
-            try { fs.rmSync(authDir, { recursive: true, force: true }); } catch (_) {}
-            await sessionManager.clearVault();
-            console.log(`[${botName}] Logged out. Re-initializing for fresh QR in 5s...`);
-            setTimeout(initSocket, 5000);
-          } else {
-            console.log(`[${botName}] Reconnecting socket in 3s...`);
-            setTimeout(initSocket, 3000);
+        const textLines = text.split("\n");
+
+        for (const rawLine of textLines) {
+          const line = rawLine.trim();
+          if (!line) continue;
+
+          // Season Command: !req_season, /season, .season, or !req <url> | S1
+          const sMatch =
+            line.match(/^[!/.]?(?:req_season|season)\s+([^\s|]+)(?:\s*\|\s*[Ss]?(\d+))?(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i) ||
+            line.match(/^[!/.]?req(?:uest)?\s+([^\s|]+)\s*\|\s*[Ss](\d+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
+
+          if (sMatch && (sMatch[1].startsWith("http") || sMatch[1].includes("cinesubz") || sMatch[1].includes("sinhalasub") || sMatch[1].includes("baiscopes") || sMatch[1].includes("anime") || sMatch[1].includes("cartoons"))) {
+            commandFound = true;
+            isSeriesSeason = true;
+            movieUrl = sMatch[1].trim();
+            seasonNumber = sMatch[2] ? parseInt(sMatch[2].trim(), 10) : 1;
+            quality = sMatch[3] ? sMatch[3].trim() : "720p";
+            token = sMatch[4] ? sMatch[4].trim() : "";
+            break;
+          }
+
+          // Movie Command: !req <url> | <quality> | <token>
+          const rMatch = line.match(/^[!/.]?req(?:uest)?\s+(https?:\/\/[^\s|]+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
+          if (rMatch) {
+            commandFound = true;
+            movieUrl = rMatch[1].trim();
+            quality = rMatch[2] ? rMatch[2].trim() : "720p";
+            token = rMatch[3] ? rMatch[3].trim() : "";
+            if (movieUrl.includes("/tvshows/")) {
+              isSeriesSeason = true;
+              seasonNumber = 1;
+            }
+            break;
           }
         }
-      });
 
-      attachMessageEvents(sock, botPhone, botName);
+        // Fallback: Search anywhere for CineSubz, SinhalaSub, Baiscopes, Anime or Cartoons URL
+        if (!commandFound) {
+          const urlMatch = text.match(/(https?:\/\/[^\s|]*(?:cinesubz|sinhalasub|baiscopes|animekaizen|cartoons)[^\s|\n]*)/i);
+          if (urlMatch) {
+            commandFound = true;
+            movieUrl = urlMatch[1].trim();
+            quality = "720p";
+            token = "DIRECT";
+            if (movieUrl.includes("/tvshows/")) {
+              isSeriesSeason = true;
+              seasonNumber = 1;
+            }
+          }
+        }
 
-      if (state.creds.registered) {
-        console.log(`[${botName}] Existing session found; awaiting connection...`);
+        // If not a command or movie/series link, skip immediately (No Auto-Chat interference!)
+        if (!commandFound || !movieUrl) {
+          continue;
+        }
+
+        // Normalize domain to cinesubz.lk
+        movieUrl = movieUrl.replace(/cinesubz\.(net|co)/g, "cinesubz.lk");
+        const cleanUrl = movieUrl.trim().toLowerCase().replace(/\/+$/, "");
+
+        logger.info(`🎯 Accepted FilmFeed request from ${pushName} (${remoteJid}): URL=${movieUrl} | Q=${quality} | Type=${isSeriesSeason ? `Series S${seasonNumber}` : "Movie"}`);
+
+        const replyTarget = remoteJid;
+
+        // User stats
+        const stats = getUserStats();
+        if (!stats[senderPhone]) {
+          stats[senderPhone] = {
+            count: 0,
+            name: pushName,
+            firstSeen: new Date().toISOString(),
+            history: [],
+            dailyCount: 0,
+            dailyDate: new Date().toISOString().slice(0, 10),
+            isVip: false,
+            isBanned: false,
+          };
+        }
+        const userRecord = stats[senderPhone];
+        checkAndResetDaily(userRecord);
+
+        if (isAdmin) {
+          userRecord.isVip = true;
+          userRecord.isBanned = false;
+        }
+
+        if (text.includes("👑 VIP Member") || text.includes("VIP") || token.toUpperCase().includes("VIP") || text.includes("👑")) {
+          userRecord.isVip = true;
+          saveUserStats(stats);
+        }
+
+        // Check if user is manually banned by admin
+        if (!isAdmin && userRecord.isBanned) {
+          logger.warn(`🚫 Ignoring request from BANNED user ${senderPhone} (${pushName})`);
+          await waSocket.sendMessage(replyTarget, {
+            text: `🚫 *[FilmFeed System - Account Suspended]*\n\n👤 *User:* +${senderPhone}\n⚠️ ඔබගේ ගිණුම තාවකාලිකව අත්හිටුවා ඇත. කරුණාකර Admin (+94760372547) අමතන්න.`,
+            mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
+          });
+          continue;
+        }
+
+        // Check if exact movie is ALREADY active or queued (Friendly notice, NO BANS!)
+        const isAlreadyQueuedOrActive =
+          (currentProcessingItem && currentProcessingItem.cleanUrl === cleanUrl) ||
+          requestQueue.some((item) => item.cleanUrl === cleanUrl && item.senderPhone === senderPhone);
+
+        if (isAlreadyQueuedOrActive) {
+          await waSocket.sendMessage(replyTarget, {
+            text: `⏳ *[FilmFeed Auto-Bot]*\n━━━━━━━━━━━━━━━━━━━━\nආයුබෝවන් *${pushName}*! ඔබ ඉල්ලූ මෙම චිත්‍රපටය දැනටමත් පෝලිමේ (Queue) සැකසෙමින් පවතී. කරුණාකර සුළු මොහොතක් රැඳී සිටින්න. 🍿`,
+            mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
+          });
+          continue;
+        }
+
+        // Daily limit check for Non-VIP (6 movies per day)
+        const isVipUser = Boolean(isAdmin || userRecord.isVip);
+        if (!isVipUser && userRecord.dailyCount >= 6) {
+          logger.info(`User ${senderPhone} reached daily limit of 6 movies.`);
+          const limitMessage =
+`⚠️ *[FilmFeed 4K • දෛනික සීමාව ඉක්මවා ඇත (Daily Limit Exceeded)]*
+━━━━━━━━━━━━━━━━━━━━
+ආයුබෝවන් *${pushName}* (${mentionTag})!
+ඔබ අද දිනට හිමි නොමිලේ ලබාගත හැකි චිත්‍රපට 6 ක උපරිම සීමාව (*6/6 Movies*) සම්පූර්ණ කර ඇත.
+
+⏳ *නැවත Reset වන වේලාව:* හෙට උදෑසන 12:00 AM
+👑 *අසීමිතව ලබා ගැනීමට VIP සක්‍රීය කරගන්න:*
+👉 https://web-umber-six-e1un7z6257.vercel.app
+━━━━━━━━━━━━━━━━━━━━`;
+
+          await waSocket.sendMessage(replyTarget, {
+            text: limitMessage,
+            mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
+          });
+          continue;
+        }
+
+        const userStats = incrementUserRequest(senderPhone, pushName);
+        const { count, badge } = userStats;
+
+        // Check Group Membership
+        let userGroups = [];
+        if (isAdmin || isGroup) {
+          userGroups = [{ jid: (isGroup ? remoteJid : TARGET_GROUP_JID), subject: "FilmFeed Cinema Group" }];
+        } else {
+          userGroups = await checkUserGroups(waSocket, cleanPhone, requesterJid, requesterLid, false);
+        }
+
+        const taskItem = {
+          isSeriesSeason,
+          seasonNumber,
+          movieUrl,
+          cleanUrl,
+          quality,
+          token,
+          replyTarget,
+          senderPhone,
+          requesterJid: requesterJid || (cleanPhone ? `${cleanPhone}@s.whatsapp.net` : ""),
+          requesterLid: requesterLid || "",
+          cleanPhone: cleanPhone || "",
+          pushName,
+          mentionTag,
+          mentionDisplay,
+          mentionsList,
+          userStats,
+          targetGroups: userGroups.map((g) => g.jid),
+          createdAt: Date.now(),
+        };
+
+        if (userGroups.length === 0) {
+          const pendingKey = cleanPhone || requesterLid || senderPhone;
+          pendingGroupRequests.set(pendingKey, { taskItem, createdAt: Date.now() });
+
+          const inviteLinks = [];
+          for (const jid of TARGET_GROUP_JIDS) {
+            const link = await getGroupInviteLink(waSocket, jid);
+            const meta = await getCachedGroupMetadata(waSocket, jid);
+            inviteLinks.push({ title: meta?.subject || "FilmFeed Cinema Group", link });
+          }
+          const linksText = inviteLinks
+            .filter((x) => x.link)
+            .map((x) => `🔗 *${x.title}:*\n👉 ${x.link}`)
+            .join("\n\n");
+
+          const joinRequiredMessage =
+`⚠️ *[FilmFeed 4K • Group Membership Required]*
+━━━━━━━━━━━━━━━━━━━━
+ආයුබෝවන් *${pushName}*! 🎬
+චිත්‍රපට හා TV Series Upload කරනු ලබන්නේ අපගේ Groups වලට පමණි.
+කරුණාකර පහත Group Link එකෙන් අපගේ සමූහයට එකතු වන්න:
+
+${linksText || "Admin අමතන්න: +94 76 037 2547"}
+
+━━━━━━━━━━━━━━━━━━━━
+✅ *Join වූ පසු:* මෙම චැට් එකට *done* ලෙස Reply කරන්න! 🍿`;
+
+          await waSocket.sendMessage(replyTarget, {
+            text: joinRequiredMessage,
+            mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
+          });
+          continue;
+        }
+
+        // Add to queue
+        requestQueue.push(taskItem);
+        const queuePosition = requestQueue.length + (isProcessingQueue ? 1 : 0);
+
+        if (isProcessingQueue) {
+          logger.info(`Task added to queue at #${queuePosition} for ${pushName}`);
+          const queueMessage =
+`⏳ *[FilmFeed Auto-Bot] පෝලිමේ රඳවා ඇත (Queued)*
+━━━━━━━━━━━━━━━━━━━━
+ආයුබෝවන් *${pushName}* (${mentionTag}),
+දැනට වෙනත් චිත්‍රපටයක් බාගත වෙමින් පවතී.
+
+📊 *ඔබගේ පෝලිම් ස්ථානය (Queue Position):* *#${queuePosition}*
+📦 *ඉල්ලීම:* ${isSeriesSeason ? `TV Series (Season ${seasonNumber})` : "Movie"}
+🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
+📺 *Quality:* ${quality}
+🔑 *Token:* ${token || "DIRECT"}
+━━━━━━━━━━━━━━━━━━━━
+_කලින් ඉල්ලීම අවසන් වූ සැණින් ඔබගේ ඉල්ලීම බාගත කර Group එකට Upload වනු ඇත!_`;
+
+          await waSocket.sendMessage(replyTarget, {
+            text: queueMessage,
+            mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
+          });
+        } else {
+          const startMessage =
+`🚀 *[FilmFeed Auto-Bot] සකසමින් පවතී (Processing)*
+━━━━━━━━━━━━━━━━━━━━
+ආයුබෝවන් *${pushName}* (${mentionTag})!
+ඔබගේ *${count}* වන ඉල්ලීම ලැබුණා [${badge}].
+${isSeriesSeason ? `📺 *TV Series (Season ${seasonNumber}) Pack* සකස් කිරීම ආරම්භ විය...` : "🎬 Direct High-Speed ලින්ක් එක සකසා බාගත කිරීම ආරම්භ විය..."}
+
+📺 *Quality:* ${quality}
+🔑 *Token:* ${token || "DIRECT"}
+━━━━━━━━━━━━━━━━━━━━
+🍿 FilmFeed 4K Cinema Engine`;
+
+          await waSocket.sendMessage(replyTarget, {
+            text: startMessage,
+            mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
+          });
+        }
+
+        triggerQueue();
+      } catch (msgErr) {
+        logger.error({ msgErr }, "Error handling incoming WhatsApp message item");
       }
     }
-
-    initSocket().catch((err) => {
-      console.error(`[${botName}] Socket init failure:`, err);
-      setTimeout(initSocket, 5000);
-    });
   });
 }
 
-async function startDualBot() {
+// --------------------------------------------------------------------------
+// Master Bot Initialization (Single Continuous 24/7 Controller)
+// --------------------------------------------------------------------------
+async function startBot() {
   console.log("\n============================================================");
-  console.log("🚀 STARTING FILMFEED DUAL-BOT CONTROLLER (SINGLE WORKFLOW)");
+  console.log("🚀 STARTING FILMFEED MASTER BOT (0760372547) - 24/7 ONLINE");
+  console.log("🎬 Movies + TV Series Engine (Single Master Controller)");
   console.log("============================================================\n");
 
-  // Step 1: Connect Movie Bot (0760372547)
-  console.log("🎬 [STEP 1/2] Initializing Bot 1: Movie Bot (+94760372547)...");
-  const movieBot = await connectBotInstance({
-    botKey: "movies",
-    botPhone: "94760372547",
-    botName: "Movie Bot",
-    authDir: path.join(__dirname, "../auth_info"),
-    gistId: "8f37b6dbcf07ff6fab07b21cc8cbe05b",
-    gistDesc: "filmfeed-whatsapp-auth-vault-v1",
-  });
-  botSockets.movies = movieBot.sock;
-  waSocket = movieBot.sock;
+  const sessionManager = new CloudSession(
+    AUTH_DIR,
+    process.env.GH_PAT || process.env.GITHUB_TOKEN,
+    process.env.SESSION_VAULT_ID || "8f37b6dbcf07ff6fab07b21cc8cbe05b",
+    "filmfeed-whatsapp-auth-vault-v1"
+  );
+  await sessionManager.restore();
 
-  console.log("⏳ Waiting 3 seconds before initializing Series Bot...");
-  await new Promise((r) => setTimeout(r, 3000));
+  const { version, isLatest } = await fetchLatestBaileysVersion();
+  logger.info(`Starting Baileys v${version.join(".")} (Latest: ${isLatest})`);
 
-  // Step 2: Connect Series Bot (0782088603)
-  console.log("📺 [STEP 2/2] Initializing Bot 2: Series Bot (+94782088603)...");
-  const seriesBot = await connectBotInstance({
-    botKey: "series",
-    botPhone: "94782088603",
-    botName: "Series Bot",
-    authDir: path.join(__dirname, "../auth_info_series"),
-    gistId: "15c720ccf151481eaa15e9e843d31a54",
-    gistDesc: "filmfeed-whatsapp-auth-vault-series",
-  });
-  botSockets.series = seriesBot.sock;
+  let reconnectAttempts = 0;
 
-  console.log("\n============================================================");
-  console.log("🎉 BOTH FILMFEED BOTS ARE CONNECTED & ACTIVE IN 1 WORKFLOW!");
-  console.log("🎬 Bot 1 (+94760372547): MOVIE ENGINE ACTIVE");
-  console.log("📺 Bot 2 (+94782088603): TV SERIES ENGINE ACTIVE");
-  console.log("============================================================\n");
+  async function initSocket() {
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+
+    const sock = makeWASocket({
+      version,
+      logger: pino({ level: process.env.BAILEYS_LOG_LEVEL || "warn" }),
+      printQRInTerminal: false,
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "warn" })),
+      },
+      generateHighQualityLinkPreview: false,
+      browser: Browsers.ubuntu("Chrome"),
+      keepAliveIntervalMs: 25000,
+      syncFullHistory: false,
+      markOnlineOnConnect: true,
+      connectTimeoutMs: 60000,
+      defaultQueryTimeoutMs: 120000,
+      getMessage: async () => undefined,
+    });
+
+    waSocket = sock;
+
+    sock.ev.on("creds.update", async () => {
+      await saveCreds();
+      sessionManager.scheduleSync();
+    });
+
+    let lastSeenQR = "";
+    sock.ev.on("connection.update", async (update) => {
+      const { connection, lastDisconnect, qr } = update;
+
+      if (qr && qr !== lastSeenQR) {
+        lastSeenQR = qr;
+        latestQR = qr;
+        console.log("\n============================================================");
+        console.log("📱 [FilmFeed Master Bot (0760372547)] SCAN QR CODE WITH WHATSAPP:");
+        console.log("👉 WhatsApp on 0760372547 -> Linked Devices -> Link a Device");
+        console.log("============================================================\n");
+        qrcode.generate(qr, { small: true });
+        console.log("\n============================================================\n");
+      }
+
+      if (connection === "open") {
+        console.log("\n============================================================");
+        console.log("✅ FILMFEED MASTER BOT (0760372547) CONNECTED SUCCESSFULLY!");
+        console.log("🎬 Movies & TV Series 24/7 Engine Active");
+        console.log("============================================================\n");
+        isConnected = true;
+        latestQR = null;
+        reconnectAttempts = 0;
+        await sessionManager.sync();
+
+        triggerQueue();
+      }
+
+      if (connection === "close") {
+        isConnected = false;
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
+        console.warn(`[Master Bot] Connection closed (code: ${statusCode}). Reconnecting: ${!isLoggedOut}`);
+
+        if (isLoggedOut) {
+          try { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); } catch (_) {}
+          await sessionManager.clearVault();
+          console.log("[Master Bot] Logged out. Restarting for fresh QR in 5s...");
+          setTimeout(initSocket, 5000);
+        } else {
+          reconnectAttempts++;
+          const delay = Math.min(30000, 2000 * reconnectAttempts);
+          console.log(`[Master Bot] Reconnecting socket in ${delay / 1000}s (attempt #${reconnectAttempts})...`);
+          setTimeout(initSocket, delay);
+        }
+      }
+    });
+
+    attachMessageEvents(sock);
+
+    if (state.creds.registered) {
+      console.log("[Master Bot] Existing session found in vault; connecting...");
+    }
+  }
+
+  await initSocket();
+
+  // Periodic vault sync every 15 minutes
+  setInterval(async () => {
+    if (isConnected) {
+      try {
+        await sessionManager.sync();
+      } catch (_) {}
+    }
+  }, 15 * 60 * 1000);
 
   // 4.5 Hours Graceful Runner Rotation (prevents hard kills by GitHub Actions)
   const RUNNER_LIFETIME_HOURS = parseFloat(process.env.RUNNER_LIFETIME_HOURS || "4.5");
   if (RUNNER_LIFETIME_HOURS > 0) {
     const lifetimeMs = RUNNER_LIFETIME_HOURS * 60 * 60 * 1000;
     setTimeout(async () => {
-      console.log(`⏰ [Rotation] Scheduled ${RUNNER_LIFETIME_HOURS}h runner rotation. Syncing vaults...`);
+      console.log(`⏰ [Rotation] Scheduled ${RUNNER_LIFETIME_HOURS}h runner rotation. Syncing vault...`);
       try {
-        await movieBot.sessionManager.sync();
-        await seriesBot.sessionManager.sync();
+        await sessionManager.sync();
       } catch (_) {}
       console.log("👋 Exiting cleanly for next continuous runner.");
       process.exit(0);
@@ -2495,4 +1945,4 @@ async function startDualBot() {
   }
 }
 
-startDualBot().catch((err) => logger.error({ err }, "Dual bot startup failed"));
+startBot().catch((err) => logger.error({ err }, "Bot startup failed"));

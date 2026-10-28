@@ -62,6 +62,7 @@ class CloudSession {
     if (
       process.env.RESET_SESSION === "true" ||
       process.env.FORCE_NEW_QR === "true" ||
+      process.env.RESET_BOT === "true" ||
       (this.gistDesc.includes("series") && process.env.RESET_SERIES_BOT === "true") ||
       (!this.gistDesc.includes("series") && process.env.RESET_MOVIE_BOT === "true")
     ) {

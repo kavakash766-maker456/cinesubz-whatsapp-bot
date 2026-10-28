@@ -3,13 +3,8 @@ name: FilmFeed WhatsApp Bot 24/7
 on:
   workflow_dispatch:
     inputs:
-      reset_movie_bot:
-        description: 'Force New QR Code for Movie Bot (0760372547)'
-        required: false
-        type: boolean
-        default: false
-      reset_series_bot:
-        description: 'Force New QR Code for TV Series Bot (0782088603)'
+      reset_bot:
+        description: 'Force New QR Code for Bot (0760372547)'
         required: false
         type: boolean
         default: false
@@ -58,25 +53,23 @@ jobs:
         run: |
           npm install
 
-      - name: Run FilmFeed Dual Bot Engine (Movies 0760372547 + Series 0782088603)
+      - name: Run FilmFeed Bot Engine (0760372547)
         env:
-          BOT_PHONE_MOVIES: "94760372547"
-          BOT_PHONE_SERIES: "94782088603"
+          BOT_PHONE: "94760372547"
           TARGET_GROUP_JID: "120363419930344447@g.us"
           TARGET_GROUP_JIDS: "120363419930344447@g.us,120363428509877949@g.us"
           LOG_LEVEL: "info"
           GH_PAT: ${{ secrets.GH_PAT }}
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
-          SESSION_VAULT_ID_MOVIES: "8f37b6dbcf07ff6fab07b21cc8cbe05b"
-          SESSION_VAULT_ID_SERIES: "15c720ccf151481eaa15e9e843d31a54"
-          RESET_MOVIE_BOT: ${{ inputs.reset_movie_bot || 'false' }}
-          RESET_SERIES_BOT: ${{ inputs.reset_series_bot || 'false' }}
+          SESSION_VAULT_ID: "8f37b6dbcf07ff6fab07b21cc8cbe05b"
+          RESET_BOT: ${{ inputs.reset_bot || 'false' }}
+          AUTH_DIR: "auth_info"
           RUNNER_LIFETIME_HOURS: "4.5"
         run: |
-          mkdir -p auth_info auth_info_series temp
+          mkdir -p auth_info temp
           START_TIME=$(date +%s)
           while true; do
-            echo "🚀 Starting FilmFeed Dual Bot Engine..."
+            echo "🚀 Starting FilmFeed Bot Engine..."
             node src/index.js
             EXIT_CODE=$?
             NOW=$(date +%s)
