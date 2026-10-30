@@ -1692,7 +1692,26 @@ function attachMessageEvents(sock) {
     if (!m.messages || m.messages.length === 0) return;
 
     for (const msg of m.messages) {
-      if (!msg.message) continue;
+      // Automatic Self-Healing: Purge corrupted session files on decryption failures / Bad MAC
+      if (!msg.message) {
+        const remoteJid = msg.key?.remoteJid || "";
+        const sender = msg.key?.participant || remoteJid;
+        const targetId = sender ? sender.split("@")[0].split(":")[0] : "";
+        if (targetId && targetId.length >= 5) {
+          try {
+            const staleFiles = fs.readdirSync(AUTH_DIR).filter(
+              (f) => f.startsWith("session-") && f.includes(targetId)
+            );
+            if (staleFiles.length > 0) {
+              logger.warn(`[Self-Healing] Purging ${staleFiles.length} corrupt session ratchets for ${targetId} to force clean re-handshake`);
+              for (const sf of staleFiles) {
+                try { fs.unlinkSync(path.join(AUTH_DIR, sf)); } catch (_) {}
+              }
+            }
+          } catch (_) {}
+        }
+        continue;
+      }
 
       const msgId = msg.key?.id;
       if (isDuplicateMessage(msgId)) {
@@ -2241,7 +2260,7 @@ async function startBot() {
       syncFullHistory: false,
       markOnlineOnConnect: true,
       connectTimeoutMs: 60000,
-      defaultQueryTimeoutMs: 120000,
+      defaultQueryTimeoutMs: 180000,
       mediaUploadTimeoutMs: 600000,
       getMessage: async () => undefined,
     });
