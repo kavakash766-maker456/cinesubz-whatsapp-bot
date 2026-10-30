@@ -92,8 +92,8 @@ class CloudSession {
       }
 
       let contentStr = fileObj.content;
-      if (!contentStr && fileObj.raw_url) {
-        console.log("[CloudSession] Content truncated in API; fetching from raw_url...");
+      if ((fileObj.truncated || !contentStr) && fileObj.raw_url) {
+        console.log("[CloudSession] Content truncated in API; fetching full vault from raw_url...");
         const rawRes = await axios.get(fileObj.raw_url, {
           headers: this.getHeaders(),
           httpsAgent: ipv4Agent,
