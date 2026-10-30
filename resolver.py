@@ -236,18 +236,44 @@ def _opener(cookie_jar=None):
     return urllib.request.build_opener(*handlers)
 
 
+HTTP_SESSION = None
+
+def get_http_session():
+    global HTTP_SESSION
+    if HTTP_SESSION is None:
+        import requests
+        HTTP_SESSION = requests.Session()
+        HTTP_SESSION.headers.update({
+            "User-Agent": UA,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Referer": "https://cinesubz.lk/",
+            "Connection": "keep-alive",
+        })
+    return HTTP_SESSION
+
+
 def http_get(url, opener=None, headers=None, timeout=TIMEOUT):
     # Normalize cinesubz.net / cinesubz.co to cinesubz.lk for fast direct access
     clean_url = re.sub(r"https?://(www\.)?cinesubz\.(net|co)/", "https://cinesubz.lk/", url)
-    try:
-        import requests
-        h = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml,*/*"}
-        if headers:
-            h.update(headers)
-        r = requests.get(clean_url, headers=h, timeout=min(timeout, 15))
-        return r.content, dict(r.headers), str(r.url)
-    except Exception:
-        pass
+    import time
+    sess = get_http_session()
+    h = {}
+    if headers:
+        h.update(headers)
+
+    for attempt in range(1, 4):
+        try:
+            r = sess.get(clean_url, headers=h, timeout=min(timeout, 20))
+            if r.status_code == 200:
+                return r.content, dict(r.headers), str(r.url)
+            elif r.status_code in (301, 302, 303, 307, 308) and r.headers.get("Location"):
+                redir_url = urllib.parse.urljoin(clean_url, r.headers["Location"])
+                return http_get(redir_url, opener, headers, timeout)
+        except Exception:
+            if attempt == 3:
+                break
+            time.sleep(0.5 * attempt)
 
     h = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml,*/*"}
     h.update(headers or {})
@@ -404,13 +430,24 @@ def scrape_movie(url: str, log=sys.stderr.write):
                 )
 
     # TV series pages carry no download links themselves; they list episodes
-    # (<a class="episode-link" href=".../episodes/show-1x2/" data-season data-episode>)
+    # Support .episode-link, .ep-item, or any a[href*="/episodes/"]
     episodes = []
-    for a in root.find_all(cls="episode-link"):
-        href = a.attrs.get("href", "")
-        if not href:
+    seen_ep_urls = set()
+    for a in root.find_all(tag="a"):
+        href = a.attrs.get("href", "").strip()
+        cls_name = str(a.attrs.get("class", ""))
+        if not href or href in seen_ep_urls:
             continue
+        is_ep = "episode-link" in cls_name or "/episodes/" in href or "episode" in cls_name
+        if not is_ep:
+            continue
+        if href.endswith("/episodes/") or href.endswith("/episodes"):
+            continue
+
+        seen_ep_urls.add(href)
         ep_title_n = a.find(cls="ep-title")
+        ep_title = ep_title_n.text().strip() if ep_title_n else a.text().strip()
+
         try:
             season = int(a.attrs.get("data-season") or 0)
         except (TypeError, ValueError):
@@ -419,14 +456,37 @@ def scrape_movie(url: str, log=sys.stderr.write):
             ep_num = int(a.attrs.get("data-episode") or 0)
         except (TypeError, ValueError):
             ep_num = 0
+
+        # Fallback regex extraction from href and title
+        if season == 0 or ep_num == 0:
+            m_se = (
+                re.search(r"[-_]s(\d+)e(\d+)", href, re.I)
+                or re.search(r"(\d+)x(\d+)", href, re.I)
+                or re.search(r"s(\d+)e(\d+)", ep_title, re.I)
+                or re.search(r"(\d+)x(\d+)", ep_title, re.I)
+            )
+            if m_se:
+                if season == 0: season = int(m_se.group(1))
+                if ep_num == 0: ep_num = int(m_se.group(2))
+            else:
+                m_s = re.search(r"season[-_]?(\d+)", href, re.I) or re.search(r"season\s*(\d+)", ep_title, re.I)
+                m_e = re.search(r"episode[-_]?(\d+)", href, re.I) or re.search(r"ep(?:isode)?\s*(\d+)", ep_title, re.I)
+                if m_s and season == 0: season = int(m_s.group(1))
+                if m_e and ep_num == 0: ep_num = int(m_e.group(1))
+
+        if season == 0:
+            season = 1
+
         episodes.append(
             {
                 "season": season,
                 "episode": ep_num,
-                "title": ep_title_n.text() if ep_title_n else "",
+                "title": ep_title or f"Episode {ep_num or len(episodes) + 1}",
                 "url": urllib.parse.urljoin(final_url, href),
             }
         )
+
+    episodes.sort(key=lambda x: (x["season"], x["episode"]))
 
     return {
         "source_url": url,
@@ -1112,6 +1172,29 @@ def main():
             except Exception:
                 pass
 
+        # If an individual episode URL was given (e.g. /episodes/show-1x1/), discover parent series page
+        if "/episodes/" in args.url:
+            try:
+                ep_body, _, _ = http_get(args.url)
+                ep_html = ep_body.decode("utf-8", "replace")
+                m_parent = re.search(r'href=["\'](https?://cinesubz\.[^"\']*(?:tvshows|series)[^"\']*)["\']', ep_html, re.I)
+                if m_parent:
+                    p_url = m_parent.group(1).strip()
+                    if not p_url.endswith(("/tvshows/", "/series/", "/tvshows", "/series")):
+                        p_data = scrape_movie(p_url)
+                        if p_data.get("episodes"):
+                            out = {
+                                "success": True,
+                                "title": p_data["details"].get("title", "TV Series"),
+                                "poster": p_data["banner"].get("poster"),
+                                "backdrop": p_data["banner"].get("backdrop"),
+                                "episodes": p_data.get("episodes") or [],
+                            }
+                            print(json.dumps(out, ensure_ascii=False, indent=2))
+                            return
+            except Exception:
+                pass
+
         data = scrape_movie(args.url)
         out = {
             "success": bool(data.get("episodes")),
@@ -1120,6 +1203,13 @@ def main():
             "backdrop": data["banner"].get("backdrop"),
             "episodes": data.get("episodes") or [],
         }
+
+        # If still no episodes on episode URL, treat single episode as season 1 ep 1
+        if not out["episodes"] and "/episodes/" in args.url:
+            ep_title = data["details"].get("title") or args.url.rstrip("/").split("/")[-1].replace("-", " ")
+            out["success"] = True
+            out["episodes"] = [{"season": 1, "episode": 1, "title": ep_title, "url": args.url}]
+
         if not out["episodes"]:
             # If CineSubz returned 0 episodes, try SinhalaSub search fallback
             clean_title = data["details"].get("title") or args.url.rstrip("/").split("/")[-1].replace("-", " ")

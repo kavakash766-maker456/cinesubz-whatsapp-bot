@@ -109,11 +109,95 @@ function saveUserStats(stats) {
   }
 }
 
+// --------------------------------------------------------------------------
+// Group Upload Deduplication (Same Day Protection)
+// --------------------------------------------------------------------------
+const DAILY_UPLOADS_FILE = path.join(AUTH_DIR, "daily_uploads.json");
+
+function getDailyUploads() {
+  try {
+    if (fs.existsSync(DAILY_UPLOADS_FILE)) {
+      return JSON.parse(fs.readFileSync(DAILY_UPLOADS_FILE, "utf8"));
+    }
+  } catch (e) {
+    logger.error({ e }, "Error reading daily uploads file");
+  }
+  return {};
+}
+
+function saveDailyUploads(uploads) {
+  try {
+    fs.writeFileSync(DAILY_UPLOADS_FILE, JSON.stringify(uploads, null, 2), "utf8");
+  } catch (e) {
+    logger.error({ e }, "Error saving daily uploads file");
+  }
+}
+
+function normalizeKey(str) {
+  if (!str) return "";
+  return String(str)
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/www\./, "")
+    .replace(/cinesubz\.(net|co|lk)/, "")
+    .replace(/sinhalasub\.(net|co|lk)/, "")
+    .replace(/[^a-z0-9]/g, "")
+    .trim();
+}
+
+function isAlreadyUploadedToday(cleanUrl, title = "", seasonNumber = null) {
+  const uploads = getDailyUploads();
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayItems = uploads[todayStr] || [];
+
+  const targetKeyUrl = normalizeKey(cleanUrl);
+  const targetKeyTitle = normalizeKey(title);
+
+  return todayItems.some((item) => {
+    if (seasonNumber && item.seasonNumber && item.seasonNumber !== seasonNumber) {
+      return false;
+    }
+    const itemKeyUrl = normalizeKey(item.url || item.cleanUrl);
+    const itemKeyTitle = normalizeKey(item.title);
+
+    if (targetKeyUrl && itemKeyUrl && targetKeyUrl === itemKeyUrl) return true;
+    if (targetKeyTitle && itemKeyTitle && targetKeyTitle === itemKeyTitle && targetKeyTitle.length >= 4) return true;
+    return false;
+  });
+}
+
+function recordDailyUpload(cleanUrl, title, isSeriesSeason = false, seasonNumber = null) {
+  const uploads = getDailyUploads();
+  const todayStr = new Date().toISOString().slice(0, 10);
+  if (!uploads[todayStr]) {
+    uploads[todayStr] = [];
+  }
+
+  // Prune history older than 3 days
+  for (const dateKey of Object.keys(uploads)) {
+    if (dateKey !== todayStr) {
+      const diffDays = (new Date(todayStr) - new Date(dateKey)) / (1000 * 60 * 60 * 24);
+      if (diffDays > 3) delete uploads[dateKey];
+    }
+  }
+
+  uploads[todayStr].push({
+    url: cleanUrl,
+    title: title || "",
+    isSeriesSeason: Boolean(isSeriesSeason),
+    seasonNumber: seasonNumber || null,
+    timestamp: Date.now(),
+  });
+  saveDailyUploads(uploads);
+  logger.info(`[Daily Upload Archive] Recorded today's group upload: ${title || cleanUrl} (Series: ${isSeriesSeason})`);
+}
+
 function checkAndResetDaily(userRecord) {
   const todayStr = new Date().toISOString().slice(0, 10);
   if (userRecord.dailyDate !== todayStr) {
     userRecord.dailyDate = todayStr;
     userRecord.dailyCount = 0;
+    userRecord.requestedUrls = [];
   }
 }
 
@@ -623,7 +707,14 @@ async function getPosterThumbnail(posterSource, thumbnailB64 = null) {
 /**
  * Create stunning branded cinema poster with FilmFeed golden gradient banner & requester avatar
  */
-async function createPosterWithRequesterAvatar(posterSource, requesterJid, fallbackJid = null, requesterName = "VIP Member") {
+async function createPosterWithRequesterAvatar(
+  posterSource,
+  requesterJid,
+  fallbackJid = null,
+  requesterName = "VIP Member",
+  storyline = null,
+  backdropSource = null
+) {
   if (!posterSource || !waSocket) {
     return posterSource;
   }
@@ -646,7 +737,9 @@ async function createPosterWithRequesterAvatar(posterSource, requesterJid, fallb
 
   const timestamp = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
   const tempPosterPath = path.join(TEMP_DIR, `poster_raw_${timestamp}.jpg`);
+  const tempBackdropPath = path.join(TEMP_DIR, `backdrop_raw_${timestamp}.jpg`);
   const tempAvatarPath = path.join(TEMP_DIR, `avatar_raw_${timestamp}.jpg`);
+  const tempStoryPath = path.join(TEMP_DIR, `story_${timestamp}.txt`);
   const tempOutPath = path.join(TEMP_DIR, `branded_poster_${timestamp}.jpg`);
 
   try {
@@ -666,7 +759,28 @@ async function createPosterWithRequesterAvatar(posterSource, requesterJid, fallb
       return posterSource;
     }
 
-    // 2. Fetch avatar if available
+    // 2. Fetch backdrop if available
+    let hasBackdrop = false;
+    const bdSrc = backdropSource || posterSource;
+    if (typeof bdSrc === "string" && bdSrc.startsWith("http")) {
+      try {
+        const bRes = await axios.get(bdSrc, {
+          responseType: "arraybuffer",
+          timeout: 10000,
+          headers: { "User-Agent": "Mozilla/5.0" },
+        });
+        fs.writeFileSync(tempBackdropPath, Buffer.from(bRes.data));
+        hasBackdrop = true;
+      } catch (_) {}
+    } else if (Buffer.isBuffer(bdSrc)) {
+      fs.writeFileSync(tempBackdropPath, bdSrc);
+      hasBackdrop = true;
+    } else if (typeof bdSrc === "string" && fs.existsSync(bdSrc)) {
+      fs.copyFileSync(bdSrc, tempBackdropPath);
+      hasBackdrop = true;
+    }
+
+    // 3. Fetch avatar if available
     let hasAvatar = false;
     if (avatarUrl) {
       try {
@@ -680,13 +794,20 @@ async function createPosterWithRequesterAvatar(posterSource, requesterJid, fallb
       } catch (_) {}
     }
 
+    // 4. Save storyline text to temp file
+    if (storyline) {
+      fs.writeFileSync(tempStoryPath, String(storyline), "utf8");
+    }
+
     const cleanName = (requesterName || "VIP Member").replace(/[\r\n\t]/g, " ").trim();
     const avatarArg = hasAvatar ? tempAvatarPath : "NONE";
+    const storyArg = fs.existsSync(tempStoryPath) ? tempStoryPath : "NONE";
+    const backdropArg = hasBackdrop ? tempBackdropPath : "NONE";
 
     await new Promise((resolve, reject) => {
       execFile(
         "python",
-        [POSTER_STYLER_SCRIPT, "brand", tempPosterPath, avatarArg, cleanName, tempOutPath],
+        [POSTER_STYLER_SCRIPT, "brand", tempPosterPath, avatarArg, cleanName, tempOutPath, storyArg, backdropArg],
         (err) => {
           if (err) return reject(err);
           resolve();
@@ -697,7 +818,7 @@ async function createPosterWithRequesterAvatar(posterSource, requesterJid, fallb
     if (fs.existsSync(tempOutPath)) {
       const outputBuffer = fs.readFileSync(tempOutPath);
       logger.info(
-        `[Poster PiP] Branded poster created successfully: ${outputBuffer.length} bytes (avatar: ${hasAvatar})`
+        `[Poster PiP] 16:9 Branded cinema poster created: ${outputBuffer.length} bytes (avatar: ${hasAvatar})`
       );
       return outputBuffer;
     }
@@ -705,7 +826,9 @@ async function createPosterWithRequesterAvatar(posterSource, requesterJid, fallb
     logger.warn(`[Poster PiP] Branded poster styling failed: ${err.message}. Falling back to original.`);
   } finally {
     try { if (fs.existsSync(tempPosterPath)) fs.unlinkSync(tempPosterPath); } catch (_) {}
+    try { if (fs.existsSync(tempBackdropPath)) fs.unlinkSync(tempBackdropPath); } catch (_) {}
     try { if (fs.existsSync(tempAvatarPath)) fs.unlinkSync(tempAvatarPath); } catch (_) {}
+    try { if (fs.existsSync(tempStoryPath)) fs.unlinkSync(tempStoryPath); } catch (_) {}
     try { if (fs.existsSync(tempOutPath)) fs.unlinkSync(tempOutPath); } catch (_) {}
   }
 
@@ -878,7 +1001,7 @@ async function processQueue() {
     // ----------------------------------------------------------------------
     if (isSeriesSeason) {
       await waSocket.sendMessage(replyTarget, {
-        text: `🚀 *[FilmFeed TV Series Engine]*\n━━━━━━━━━━━━━━━━━━━━\n*${pushName}*, ඔබ ඉල්ලූ Season ${seasonNumber} පැක් එක සැකසීම ආරම්භ විය!\nසියලුම Episodes එකින් එක Download වී Group එකට Upload වනු ඇත. 🍿`,
+        text: `🎬 *FILMFEED CINEMA • TV SERIES DESK*\n──────────────────────\nගරු *${pushName}*, ඔබ ඉල්ලූ *Season ${seasonNumber}* කතා මාලාව සැකසීම ආරම්භ විය.\nසියලුම Episodes එකින් එක පිළිවෙළින් Group එක වෙත Upload කෙරේ. 🍿\n──────────────────────`,
         mentions: mentionsList,
         contextInfo: getMetaAiContext(mentionsList),
       });
@@ -890,6 +1013,13 @@ async function processQueue() {
       if (seasonNumber) {
         const seasonEps = episodes.filter((ep) => ep.season === seasonNumber);
         if (seasonEps.length > 0) episodes = seasonEps;
+        else {
+          // Check if any episode title contains season string
+          const sTitleEps = episodes.filter((ep) =>
+            new RegExp(`(?:s0?${seasonNumber}|season\\s*0?${seasonNumber})`, "i").test(ep.title || ep.url)
+          );
+          if (sTitleEps.length > 0) episodes = sTitleEps;
+        }
       }
 
       if (episodes.length === 0) {
@@ -902,7 +1032,7 @@ async function processQueue() {
 
       if (episodes.length === 0) {
         await waSocket.sendMessage(replyTarget, {
-          text: `❌ *[FilmFeed TV Series]* Season ${seasonNumber} සඳහා Episodes සොයාගත නොහැකි විය.`,
+          text: `⚠️ *FILMFEED CINEMA • SYSTEM NOTICE*\n──────────────────────\nසමාවන්න, Season ${seasonNumber} සඳහා Episodes සබැඳි සොයාගත නොහැකි විය.\nකරුණාකර නිවැරදි Season අංකය සමඟ නැවත උත්සාහ කරන්න.\n──────────────────────`,
           mentions: mentionsList,
           contextInfo: getMetaAiContext(mentionsList),
         });
@@ -964,23 +1094,27 @@ async function processQueue() {
           if (!seasonPosterSent) {
             const seasonCaption = 
 `🎬 *${showTitle} (Season ${seasonNumber})*
-━━━━━━━━━━━━━━━━━━━━
-📦 *Pack Type:* Complete Season Batch
-🔢 *Total Episodes:* ${totalEpisodes} Episodes
-👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
-🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
-🌟 *Quality:* ${quality}
-${tmdb?.voteAverage ? `⭐ *TMDb Rating:* ${tmdb.voteAverage.toFixed(1)}/10\n` : ""}${tmdb?.releaseDate ? `📅 *Air Date:* ${tmdb.releaseDate}\n` : ""}🔑 *Token:* ${token || "VIP_SEASON"}
-⚡ *Subtitle:* Sinhala Subtitles Included
-━━━━━━━━━━━━━━━━━━━━
+──────────────────────
+• Release: Complete Season Batch (${totalEpisodes} Episodes)
+• Requester: ${currentTask.mentionDisplay || mentionTag}
+• Quality: ${quality} [Sinhala Subtitles]
+${tmdb?.voteAverage ? `• Rating: ⭐ ${tmdb.voteAverage.toFixed(1)}/10\n` : ""}${tmdb?.releaseDate ? `• Air Date: 📅 ${tmdb.releaseDate}\n` : ""}──────────────────────
 📝 *Storyline / සාරාංශය:*
 ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 
-📥 _Episode 1 සිට ${totalEpisodes} දක්වා පිළිවෙළින් Group එකට Upload වනු ඇත!_\n${getPromoFooter()}`;
+📥 _Episode 1 සිට ${totalEpisodes} දක්වා සියලුම කොටස් පිළිවෙළින් පහතින් ලැබෙනු ඇත._
+${getPromoFooter()}`;
 
             const effectivePoster = posterUrl || backdropUrl;
             if (effectivePoster) {
-              const pipPoster = await createPosterWithRequesterAvatar(effectivePoster, requesterIdentifier, fallbackIdentifier, pushName);
+              const pipPoster = await createPosterWithRequesterAvatar(
+                effectivePoster,
+                requesterIdentifier,
+                fallbackIdentifier,
+                pushName,
+                overview,
+                backdropUrl
+              );
               await broadcastToGroups({
                 image: Buffer.isBuffer(pipPoster) ? pipPoster : { url: effectivePoster },
                 caption: seasonCaption,
@@ -995,6 +1129,8 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
               });
             }
             seasonPosterSent = true;
+            // Record in daily upload archive
+            recordDailyUpload(movieUrl, showTitle, true, seasonNumber);
           }
 
           const fileBuffer = fs.readFileSync(tempFilePath);
@@ -1007,12 +1143,11 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
             fileName: `${epTitle} [${resolvedQuality}] [FilmFeed].mp4`,
             caption: 
 `🎬 *${epTitle}* (${resolvedQuality})
-━━━━━━━━━━━━━━━━━━━━
-👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
-📦 *Season:* Season ${seasonNumber} [Episode ${epIndex}/${totalEpisodes}]
-⚡ *Status:* Uploaded Successfully
-━━━━━━━━━━━━━━━━━━━━
-🍿 FilmFeed TV Series Engine
+──────────────────────
+• Series: ${showTitle} [Season ${seasonNumber}]
+• Progress: Episode ${epIndex} of ${totalEpisodes}
+• Requester: ${currentTask.mentionDisplay || mentionTag}
+──────────────────────
 ${getPromoFooter()}`,
             mentions: mentionsList,
             ...(epThumbnail ? { jpegThumbnail: epThumbnail } : {}),
@@ -1088,14 +1223,13 @@ ${getPromoFooter()}`,
 
       const initialQueueMsg = await waSocket.sendMessage(replyTarget, {
         text: 
-`🚀 *[FilmFeed Auto-Bot]*
-━━━━━━━━━━━━━━━━━━━━
-*${pushName}*, ඔබගේ වාරය පැමිණියා!
-චිත්‍රපටය බාගත කිරීම දැන් ආරම්භ වේ...
-
-📺 *Quality:* ${quality}
-🔑 *Token:* ${token || "DIRECT"}
-━━━━━━━━━━━━━━━━━━━━`,
+`🎬 *FILMFEED CINEMA • PROCESSING*
+──────────────────────
+• Title / Query: *${movieUrl.split("/").filter(Boolean).pop().replace(/[-_]/g, " ")}*
+• Requester: *${pushName}* (${mentionTag})
+• Quality: *${quality}*
+──────────────────────
+චිත්‍රපටය බාගත කිරීම ආරම්භ විය. සුළු මොහොතකින් Group එක වෙත Upload කෙරේ.`,
         mentions: mentionsList,
         contextInfo: getMetaAiContext(mentionsList),
       });
@@ -1105,7 +1239,7 @@ ${getPromoFooter()}`,
 
       if (!movieData.success || !movieData.direct_url) {
         await waSocket.sendMessage(replyTarget, {
-          text: `❌ *[FilmFeed Auto-Bot]* Error: ${movieData.error || "චිත්‍රපට ලින්ක් එක ලබා ගැනීමට නොහැකි විය."}`,
+          text: `⚠️ *FILMFEED CINEMA • SYSTEM NOTICE*\n──────────────────────\nසමාවන්න, අදාළ චිත්‍රපට සබැඳිය ලබාගැනීමට නොහැකි විය: ${movieData.error || "Link resolution error"}\nකරුණාකර වෙනත් සබැඳියක් හෝ Quality එකක් සමඟ උත්සාහ කරන්න.\n──────────────────────`,
           mentions: mentionsList,
           contextInfo: getMetaAiContext(mentionsList),
         });
@@ -1271,14 +1405,15 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
       if (liveStatusMsg?.key) {
         await waSocket.sendMessage(replyTarget, {
           text: 
-`🎬 *[FilmFeed Downloader]*
+`🎬 *FILMFEED CINEMA • BROADCASTING*
 ━━━━━━━━━━━━━━━━━━━━
-📌 *චිත්‍රපටය:* *${title}* (${resolvedQuality})
-👤 *Requested By:* ${pushName} [${badge}]
-✅ *Download:* 100% සම්පූර්ණයි (${finalSizeMB}MB)
-📤 *Uploading:* WhatsApp සමූහය වෙත යවමින් පවතී...
-⚡ *Status:* Group Broadcast in Progress
-━━━━━━━━━━━━━━━━━━━━`,
+📌 *Title:* *${title}*
+🌟 *Format:* ${resolvedQuality} • ${finalSizeMB}MB
+👤 *Requester:* ${pushName} [${badge}]
+✅ *Integrity:* 100% Verified
+📤 *Upload:* Dispatching to Official Groups...
+━━━━━━━━━━━━━━━━━━━━
+⚡ _Broadcasting high-definition media pack..._`,
           edit: liveStatusMsg.key,
           contextInfo: getMetaAiContext(mentionsList),
         }).catch(() => {});
@@ -1290,7 +1425,7 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
 `🎬 *${title}*
 ━━━━━━━━━━━━━━━━━━━━
 👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
-🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
+🎯 *Member Tier:* ${badge}
 🌟 *Quality:* ${resolvedQuality} (${finalSizeMB}MB)
 ${tmdb?.voteAverage ? `⭐ *TMDb Rating:* ${tmdb.voteAverage.toFixed(1)}/10\n` : ""}${tmdb?.releaseDate ? `📅 *Release Date:* ${tmdb.releaseDate}\n` : ""}🔑 *Token:* ${token || "DIRECT"}
 ⚡ *Audio / Sub:* Sinhala Subtitles Included
@@ -1298,11 +1433,11 @@ ${tmdb?.voteAverage ? `⭐ *TMDb Rating:* ${tmdb.voteAverage.toFixed(1)}/10\n` :
 📝 *Storyline / සාරාංශය:*
 ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 
-🍿 _චිත්‍රපටය පහතින් Document එකක් ලෙස ලැබෙනු ඇත!_\n${getPromoFooter()}`;
+🍿 _The release is arriving below as a high-definition document!_\n${getPromoFooter()}`;
 
       const effectivePoster = posterUrl || backdropUrl;
       if (effectivePoster) {
-        const pipPoster = await createPosterWithRequesterAvatar(effectivePoster, requesterIdentifier, fallbackIdentifier, pushName);
+        const pipPoster = await createPosterWithRequesterAvatar(effectivePoster, requesterIdentifier, fallbackIdentifier, pushName, overview, backdropUrl);
         await broadcastToGroups({
           image: Buffer.isBuffer(pipPoster) ? pipPoster : { url: effectivePoster },
           caption: caption,
@@ -1317,6 +1452,9 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
         });
       }
 
+      // Record daily upload for deduplication
+      recordDailyUpload(movieUrl, title, false, null);
+
       // 4. Upload Document to all groups with Movie Poster Thumbnail & Meta AI Styling
       logger.info(`Uploading ${finalSizeMB}MB document to WhatsApp groups...`);
       const fileBuffer = fs.readFileSync(tempFilePath);
@@ -1327,13 +1465,13 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
         mimetype: "video/mp4",
         fileName: `${title} [${resolvedQuality}] [FilmFeed].mp4`,
         caption: 
-`🎬 *${title}* (${resolvedQuality})
+`🎬 *${title}*
 ━━━━━━━━━━━━━━━━━━━━
-👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
-🎯 *User Stats:* ${count} වන සාර්ථක නිකුතුව! [${badge}]
-⚡ *Status:* Group Broadcast Completed
+🌟 *Quality:* ${resolvedQuality} • ${finalSizeMB}MB
+👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag} [${badge}]
+⚡ *Status:* Official Cinema Release
 ━━━━━━━━━━━━━━━━━━━━
-🍿 FilmFeed 4K Auto-Bot Engine
+🍿 _FilmFeed Cinema Media Engine_
 ${getPromoFooter()}`,
         mentions: mentionsList,
         ...(thumbBuffer ? { jpegThumbnail: thumbBuffer } : {}),
@@ -1408,16 +1546,16 @@ ${getPromoFooter()}`,
 
       await waSocket.sendMessage(replyTarget, {
         text: 
-`🎉 *[FilmFeed Auto-Bot]* සාර්ථකයි!
+`🎬 *FILMFEED CINEMA • RELEASE COMPLETE*
 ━━━━━━━━━━━━━━━━━━━━
-👤 *සාමාජිකයා:* ${pushName} [${updatedStats.badge}]
-🎬 *නිකුත් වූ චිත්‍රපටය:* *${title}* (${resolvedQuality})
-📦 *ප්‍රමාණය:* ${finalSizeMB}MB
-⚡ *තත්ත්වය:* සමූහය වෙත සාර්ථකව යවන ලදී (Broadcast Complete)
+📌 *Title:* *${title}*
+🌟 *Format:* ${resolvedQuality} • ${finalSizeMB}MB
+👤 *Requester:* ${pushName} [${updatedStats.badge}]
+⚡ *Status:* Group Broadcast Successful
 
-📜 *ඔබ මෙතෙක් ලබාගත් චිත්‍රපට ලැයිස්තුව (${updatedStats.count}):*${historyText}
+📜 *Member History (${updatedStats.count}):*${historyText}
 ━━━━━━━━━━━━━━━━━━━━
-🍿 FilmFeed Group එකෙන් දැන්ම Download කරගන්න!
+🍿 _The movie is now available in your official FilmFeed group._
 👉 Website: https://filmfeed-website.vercel.app`,
         mentions: mentionsList,
         contextInfo: getMetaAiContext(mentionsList),
@@ -1427,7 +1565,7 @@ ${getPromoFooter()}`,
   } catch (err) {
     logger.error({ err }, "Error processing queued task");
     await waSocket.sendMessage(replyTarget, {
-      text: `⚠️ *[FilmFeed Auto-Bot]* දෝෂයක් සිදු විය: ${err.message}`,
+      text: `⚠️ *FILMFEED CINEMA • SYSTEM NOTICE*\n━━━━━━━━━━━━━━━━━━━━\n❌ Error processing request: ${err.message}`,
       contextInfo: getMetaAiContext(mentionsList),
     });
   } finally {
@@ -1532,7 +1670,7 @@ function attachMessageEvents(sock) {
 
               const groupNames = userGroups.map((g) => `*${g.subject}*`).join(", ");
               await waSocket.sendMessage(remoteJid, {
-                text: `✅ *[FilmFeed 4K • තහවුරු කිරීම සාර්ථකයි!]*\n\nස්තූතියි *${pushName}*! ඔබ ${groupNames} සමූහය හා සම්බන්ධ වී ඇති බව තහවුරු විය. 🎉\n\n🚀 ඔබ ඉල්ලූ *${taskItem.isSeriesSeason ? `TV Series (Season ${taskItem.seasonNumber})` : "චිත්‍රපටය"}* දැන් බාගත කිරීම සඳහා පෝලිමට එක් කරන ලදී! 🍿`,
+                text: `✅ *FILMFEED CINEMA • MEMBERSHIP VERIFIED*\n━━━━━━━━━━━━━━━━━━━━\nWelcome *${pushName}*! Membership for ${groupNames} confirmed.\n\n🚀 Your request for *${taskItem.isSeriesSeason ? `TV Series (Season ${taskItem.seasonNumber}) Pack` : "Movie"}* has been queued for processing! 🍿`,
               });
 
               requestQueue.push(taskItem);
@@ -1540,14 +1678,16 @@ function attachMessageEvents(sock) {
               continue;
             } else {
               await waSocket.sendMessage(remoteJid, {
-                text: `⚠️ *[FilmFeed 4K]* තවමත් ඔබ කිසිදු සමූහයකට (Group) එකතු වී නොමැත. කරුණාකර පළමුව Group එකට එකතු වී නැවත *done* ලෙස එවන්න.`,
+                text: `⚠️ *FILMFEED CINEMA • NOTICE*\n━━━━━━━━━━━━━━━━━━━━\nMembership in our official WhatsApp group could not be verified yet. Please tap the group invite link, join the group, and reply *done* to continue.`,
               });
               continue;
             }
           }
         }
 
-        // Parse commands
+        // ------------------------------------------------------------------
+        // Parse Commands: Flexible TV Series & Movie Recognition
+        // ------------------------------------------------------------------
         let commandFound = false;
         let isSeriesSeason = false;
         let seasonNumber = 1;
@@ -1561,37 +1701,41 @@ function attachMessageEvents(sock) {
           const line = rawLine.trim();
           if (!line) continue;
 
-          // Season Command: !req_season, /season, .season, or !req <url> | S1
-          const sMatch =
-            line.match(/^[!/.]?(?:req_season|season)\s+([^\s|]+)(?:\s*\|\s*[Ss]?(\d+))?(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i) ||
-            line.match(/^[!/.]?req(?:uest)?\s+([^\s|]+)\s*\|\s*[Ss](\d+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
+          // Check if line starts with a command prefix
+          const cmdMatch = line.match(/^[!/.]?(?:req_season|season|req(?:uest)?)\s+(.+)/i);
+          if (cmdMatch) {
+            const rawParts = cmdMatch[1].split("|").map((p) => p.trim()).filter(Boolean);
+            if (rawParts.length > 0 && (rawParts[0].startsWith("http") || rawParts[0].includes("cinesubz") || rawParts[0].includes("sinhalasub") || rawParts[0].includes("baiscopes") || rawParts[0].includes("anime") || rawParts[0].includes("cartoons"))) {
+              commandFound = true;
+              movieUrl = rawParts[0];
 
-          if (sMatch && (sMatch[1].startsWith("http") || sMatch[1].includes("cinesubz") || sMatch[1].includes("sinhalasub") || sMatch[1].includes("baiscopes") || sMatch[1].includes("anime") || sMatch[1].includes("cartoons"))) {
-            commandFound = true;
-            isSeriesSeason = true;
-            movieUrl = sMatch[1].trim();
-            seasonNumber = sMatch[2] ? parseInt(sMatch[2].trim(), 10) : 1;
-            quality = sMatch[3] ? sMatch[3].trim() : "720p";
-            token = sMatch[4] ? sMatch[4].trim() : "";
-            break;
-          }
+              const isExplicitSeasonCmd = /^[!/.]?(?:req_season|season)/i.test(line);
 
-          // Movie Command: !req <url> | <quality> | <token>
-          const rMatch = line.match(/^[!/.]?req(?:uest)?\s+(https?:\/\/[^\s|]+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
-          if (rMatch) {
-            commandFound = true;
-            movieUrl = rMatch[1].trim();
-            quality = rMatch[2] ? rMatch[2].trim() : "720p";
-            token = rMatch[3] ? rMatch[3].trim() : "";
-            if (movieUrl.includes("/tvshows/")) {
-              isSeriesSeason = true;
-              seasonNumber = 1;
+              // Process parameters after URL
+              const params = rawParts.slice(1);
+              for (const p of params) {
+                const sMatch = p.match(/^(?:s|season\s*)?(\d{1,3})$/i);
+                const qMatch = p.match(/^(?:360p|480p|720p|1080p|2160p|4k|sd|hd|fhd)$/i);
+
+                if (sMatch && (isExplicitSeasonCmd || !p.toLowerCase().endsWith("p"))) {
+                  seasonNumber = parseInt(sMatch[1], 10);
+                  isSeriesSeason = true;
+                } else if (qMatch || /^\d{3,4}p$/i.test(p)) {
+                  quality = p;
+                } else if (!token) {
+                  token = p;
+                }
+              }
+
+              if (isExplicitSeasonCmd) {
+                isSeriesSeason = true;
+              }
+              break;
             }
-            break;
           }
         }
 
-        // Fallback: Search anywhere for CineSubz, SinhalaSub, Baiscopes, Anime or Cartoons URL
+        // Fallback: Search anywhere in message text for CineSubz, SinhalaSub, Baiscopes, Anime or Cartoons URL
         if (!commandFound) {
           const urlMatch = text.match(/(https?:\/\/[^\s|]*(?:cinesubz|sinhalasub|baiscopes|animekaizen|cartoons)[^\s|\n]*)/i);
           if (urlMatch) {
@@ -1599,16 +1743,25 @@ function attachMessageEvents(sock) {
             movieUrl = urlMatch[1].trim();
             quality = "720p";
             token = "DIRECT";
-            if (movieUrl.includes("/tvshows/")) {
-              isSeriesSeason = true;
-              seasonNumber = 1;
-            }
           }
         }
 
-        // If not a command or movie/series link, skip immediately (No Auto-Chat interference!)
+        // If not a command or recognized media link, ignore immediately
         if (!commandFound || !movieUrl) {
           continue;
+        }
+
+        // Check if URL inherently belongs to a TV series or episode
+        const isSeriesUrl = /\/(?:tvshows|tv-series|series|episodes)\//i.test(movieUrl) || movieUrl.includes("anime") || movieUrl.includes("cartoons");
+        if (isSeriesUrl) {
+          isSeriesSeason = true;
+          // Extract season from episode URL if not already explicitly specified
+          if (seasonNumber === 1) {
+            const epSeasonMatch = movieUrl.match(/(?:s|season[-_]?)(\d{1,2})e\d+/i) || movieUrl.match(/[-_](\d{1,2})x\d+/i) || movieUrl.match(/season[-_]?(\d{1,2})/i);
+            if (epSeasonMatch) {
+              seasonNumber = parseInt(epSeasonMatch[1], 10);
+            }
+          }
         }
 
         // Normalize domain to cinesubz.lk
@@ -1629,8 +1782,10 @@ function attachMessageEvents(sock) {
             history: [],
             dailyCount: 0,
             dailyDate: new Date().toISOString().slice(0, 10),
+            requestedUrls: [],
             isVip: false,
             isBanned: false,
+            banExpires: null,
           };
         }
         const userRecord = stats[senderPhone];
@@ -1639,6 +1794,7 @@ function attachMessageEvents(sock) {
         if (isAdmin) {
           userRecord.isVip = true;
           userRecord.isBanned = false;
+          userRecord.banExpires = null;
         }
 
         if (text.includes("👑 VIP Member") || text.includes("VIP") || token.toUpperCase().includes("VIP") || text.includes("👑")) {
@@ -1646,45 +1802,154 @@ function attachMessageEvents(sock) {
           saveUserStats(stats);
         }
 
-        // Check if user is manually banned by admin
+        // ------------------------------------------------------------------
+        // Check 1: User Ban Status (5-Hour Spam Ban or Admin Suspension)
+        // ------------------------------------------------------------------
         if (!isAdmin && userRecord.isBanned) {
-          logger.warn(`🚫 Ignoring request from BANNED user ${senderPhone} (${pushName})`);
+          if (userRecord.banExpires && Date.now() < userRecord.banExpires) {
+            const remainingMs = userRecord.banExpires - Date.now();
+            const remainingHours = Math.floor(remainingMs / (3600 * 1000));
+            const remainingMins = Math.max(1, Math.ceil((remainingMs % (3600 * 1000)) / (60 * 1000)));
+            logger.warn(`🚫 Request ignored from temporarily banned user ${senderPhone} (${pushName}) - ${remainingHours}h ${remainingMins}m remaining`);
+            await waSocket.sendMessage(replyTarget, {
+              text:
+`🚫 *FILMFEED SECURITY • ACCESS SUSPENDED*
+━━━━━━━━━━━━━━━━━━━━
+👤 *Member:* ${pushName} (+${senderPhone})
+⏳ *Lockout Time:* ${remainingHours}h ${remainingMins}m remaining
+⚠️ *Reason:* Multiple/duplicate automated requests.
+
+Access to bot operations is temporarily locked. Service will automatically resume once the suspension period expires.
+━━━━━━━━━━━━━━━━━━━━
+🎬 *FilmFeed Security Enforcement*`,
+              mentions: mentionsList,
+              contextInfo: getMetaAiContext(mentionsList),
+            });
+            continue;
+          } else if (userRecord.banExpires && Date.now() >= userRecord.banExpires) {
+            // Ban has expired - automatically restore user access
+            userRecord.isBanned = false;
+            userRecord.banExpires = null;
+            saveUserStats(stats);
+            logger.info(`✅ 5-hour ban expired for user ${senderPhone}. Access restored.`);
+          } else {
+            // Permanent admin ban
+            await waSocket.sendMessage(replyTarget, {
+              text: `🚫 *FILMFEED SECURITY • ACCOUNT SUSPENDED*\n━━━━━━━━━━━━━━━━━━━━\n👤 *User:* +${senderPhone}\n⚠️ Your account has been suspended by the administrator. Contact Admin (+94760372547) for assistance.`,
+              mentions: mentionsList,
+              contextInfo: getMetaAiContext(mentionsList),
+            });
+            continue;
+          }
+        }
+
+        // ------------------------------------------------------------------
+        // Check 2: Same-Day Group Upload Deduplication
+        // The same movie or TV series cannot be uploaded to the target group twice within the same calendar day.
+        // ------------------------------------------------------------------
+        if (isAlreadyUploadedToday(cleanUrl, "", isSeriesSeason ? seasonNumber : null)) {
+          logger.info(`Declining request: Already uploaded today -> ${cleanUrl} (Series: ${isSeriesSeason})`);
           await waSocket.sendMessage(replyTarget, {
-            text: `🚫 *[FilmFeed System - Account Suspended]*\n\n👤 *User:* +${senderPhone}\n⚠️ ඔබගේ ගිණුම තාවකාලිකව අත්හිටුවා ඇත. කරුණාකර Admin (+94760372547) අමතන්න.`,
+            text:
+`📁 *FILMFEED ARCHIVE • ALREADY UPLOADED TODAY*
+━━━━━━━━━━━━━━━━━━━━
+📌 *Status:* Available in Group
+🎬 *Release:* ${isSeriesSeason ? `TV Series (Season ${seasonNumber})` : "Movie"}
+
+💡 *Instant Access:*
+This title has already been released to the official group today!
+Please check the group media / documents list to download it immediately without waiting in queue. Duplicate uploads on the same day are declined to protect group storage.
+━━━━━━━━━━━━━━━━━━━━
+🎬 *FilmFeed 4K Cinema Engine*`,
             mentions: mentionsList,
             contextInfo: getMetaAiContext(mentionsList),
           });
           continue;
         }
 
-        // Check if exact movie is ALREADY active or queued (Friendly notice, NO BANS!)
+        // ------------------------------------------------------------------
+        // Check 3: User Spam Ban (5 Hours)
+        // If the same user requests the exact same movie twice, ban them for 5 hours.
+        // ------------------------------------------------------------------
+        const userHasRequestedBefore =
+          !isAdmin && (
+            (userRecord.requestedUrls && userRecord.requestedUrls.includes(cleanUrl)) ||
+            requestQueue.some((item) => item.cleanUrl === cleanUrl && item.senderPhone === senderPhone) ||
+            (currentProcessingItem && currentProcessingItem.cleanUrl === cleanUrl && currentProcessingItem.senderPhone === senderPhone)
+          );
+
+        if (userHasRequestedBefore) {
+          userRecord.isBanned = true;
+          userRecord.banExpires = Date.now() + (5 * 60 * 60 * 1000); // 5 hours from now
+          saveUserStats(stats);
+          logger.warn(`🚫 User ${senderPhone} (${pushName}) banned for 5 hours for duplicate request: ${cleanUrl}`);
+          await waSocket.sendMessage(replyTarget, {
+            text:
+`🚫 *FILMFEED SECURITY • 5-HOUR SPAM BAN*
+━━━━━━━━━━━━━━━━━━━━
+👤 *Member:* ${pushName} (+${senderPhone})
+⏳ *Duration:* 5 Hours Lockout
+⚠️ *Violation:* Duplicate request for the same title detected.
+
+To prevent queue congestion and bot overload, requesting the exact same release twice is strictly prohibited. Your account access has been temporarily suspended for 5 hours.
+━━━━━━━━━━━━━━━━━━━━
+🎬 *FilmFeed Security Enforcement*`,
+            mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
+          });
+          continue;
+        }
+
+        // ------------------------------------------------------------------
+        // Check 4: Check if already queued or actively downloading for another user
+        // ------------------------------------------------------------------
         const isAlreadyQueuedOrActive =
           (currentProcessingItem && currentProcessingItem.cleanUrl === cleanUrl) ||
-          requestQueue.some((item) => item.cleanUrl === cleanUrl && item.senderPhone === senderPhone);
+          requestQueue.some((item) => item.cleanUrl === cleanUrl);
 
         if (isAlreadyQueuedOrActive) {
           await waSocket.sendMessage(replyTarget, {
-            text: `⏳ *[FilmFeed Auto-Bot]*\n━━━━━━━━━━━━━━━━━━━━\nආයුබෝවන් *${pushName}*! ඔබ ඉල්ලූ මෙම චිත්‍රපටය දැනටමත් පෝලිමේ (Queue) සැකසෙමින් පවතී. කරුණාකර සුළු මොහොතක් රැඳී සිටින්න. 🍿`,
+            text:
+`⏳ *FILMFEED CINEMA • PROCESSING QUEUE*
+━━━━━━━━━━━━━━━━━━━━
+📌 *Notice:* This title is currently being prepared for the group.
+⚡ *Status:* In Queue / Downloading
+
+The release will be broadcast directly to your group once ready. No additional request is needed!
+━━━━━━━━━━━━━━━━━━━━
+🎬 *FilmFeed 4K Cinema Engine*`,
             mentions: mentionsList,
             contextInfo: getMetaAiContext(mentionsList),
           });
           continue;
         }
 
-        // Daily limit check for Non-VIP (6 movies per day)
+        // Record URL in user's requested list for duplicate spam prevention
+        if (!userRecord.requestedUrls) {
+          userRecord.requestedUrls = [];
+        }
+        if (!userRecord.requestedUrls.includes(cleanUrl)) {
+          userRecord.requestedUrls.push(cleanUrl);
+          saveUserStats(stats);
+        }
+
+        // ------------------------------------------------------------------
+        // Check 5: Daily Limit Check for Non-VIP (6 movies per day)
+        // ------------------------------------------------------------------
         const isVipUser = Boolean(isAdmin || userRecord.isVip);
         if (!isVipUser && userRecord.dailyCount >= 6) {
           logger.info(`User ${senderPhone} reached daily limit of 6 movies.`);
           const limitMessage =
-`⚠️ *[FilmFeed 4K • දෛනික සීමාව ඉක්මවා ඇත (Daily Limit Exceeded)]*
+`⚠️ *FILMFEED CINEMA • DAILY LIMIT REACHED*
 ━━━━━━━━━━━━━━━━━━━━
-ආයුබෝවන් *${pushName}* (${mentionTag})!
-ඔබ අද දිනට හිමි නොමිලේ ලබාගත හැකි චිත්‍රපට 6 ක උපරිම සීමාව (*6/6 Movies*) සම්පූර්ණ කර ඇත.
+👤 *Member:* ${pushName} (${mentionTag})
+📊 *Usage:* 6 / 6 Daily Requests Used
 
-⏳ *නැවත Reset වන වේලාව:* හෙට උදෑසන 12:00 AM
-👑 *අසීමිතව ලබා ගැනීමට VIP සක්‍රීය කරගන්න:*
+⏳ *Reset Time:* Midnight 12:00 AM
+👑 *Upgrade:* Access unlimited high-speed requests with VIP.
 👉 https://web-umber-six-e1un7z6257.vercel.app
-━━━━━━━━━━━━━━━━━━━━`;
+━━━━━━━━━━━━━━━━━━━━
+🎬 *FilmFeed 4K Cinema Engine*`;
 
           await waSocket.sendMessage(replyTarget, {
             text: limitMessage,
@@ -1694,9 +1959,6 @@ function attachMessageEvents(sock) {
           continue;
         }
 
-        const userStats = incrementUserRequest(senderPhone, pushName);
-        const { count, badge } = userStats;
-
         // Check Group Membership
         let userGroups = [];
         if (isAdmin || isGroup) {
@@ -1704,6 +1966,9 @@ function attachMessageEvents(sock) {
         } else {
           userGroups = await checkUserGroups(waSocket, cleanPhone, requesterJid, requesterLid, false);
         }
+
+        const userStats = incrementUserRequest(senderPhone, pushName);
+        const { count, badge } = userStats;
 
         const taskItem = {
           isSeriesSeason,
@@ -1742,16 +2007,16 @@ function attachMessageEvents(sock) {
             .join("\n\n");
 
           const joinRequiredMessage =
-`⚠️ *[FilmFeed 4K • Group Membership Required]*
+`⚠️ *FILMFEED CINEMA • MEMBERSHIP REQUIRED*
 ━━━━━━━━━━━━━━━━━━━━
-ආයුබෝවන් *${pushName}*! 🎬
-චිත්‍රපට හා TV Series Upload කරනු ලබන්නේ අපගේ Groups වලට පමණි.
-කරුණාකර පහත Group Link එකෙන් අපගේ සමූහයට එකතු වන්න:
+👤 *Member:* ${pushName}
+📌 *Notice:* Movies and TV series are dispatched exclusively to verified community groups.
 
-${linksText || "Admin අමතන්න: +94 76 037 2547"}
+Please join our official group to access downloads:
+${linksText || "👉 Admin: +94 76 037 2547"}
 
 ━━━━━━━━━━━━━━━━━━━━
-✅ *Join වූ පසු:* මෙම චැට් එකට *done* ලෙස Reply කරන්න! 🍿`;
+✅ *Verification:* Once joined, reply *done* in this chat to proceed! 🍿`;
 
           await waSocket.sendMessage(replyTarget, {
             text: joinRequiredMessage,
@@ -1768,18 +2033,16 @@ ${linksText || "Admin අමතන්න: +94 76 037 2547"}
         if (isProcessingQueue) {
           logger.info(`Task added to queue at #${queuePosition} for ${pushName}`);
           const queueMessage =
-`⏳ *[FilmFeed Auto-Bot] පෝලිමේ රඳවා ඇත (Queued)*
+`⏳ *FILMFEED CINEMA • QUEUE POSITION #${queuePosition}*
 ━━━━━━━━━━━━━━━━━━━━
-ආයුබෝවන් *${pushName}* (${mentionTag}),
-දැනට වෙනත් චිත්‍රපටයක් බාගත වෙමින් පවතී.
-
-📊 *ඔබගේ පෝලිම් ස්ථානය (Queue Position):* *#${queuePosition}*
-📦 *ඉල්ලීම:* ${isSeriesSeason ? `TV Series (Season ${seasonNumber})` : "Movie"}
-🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
-📺 *Quality:* ${quality}
+👤 *Requester:* ${pushName} (${mentionTag}) [${badge}]
+📦 *Release:* ${isSeriesSeason ? `TV Series (Season ${seasonNumber}) Pack` : "Feature Film"}
+🌟 *Format:* ${quality} • Sinhala Subtitles
 🔑 *Token:* ${token || "DIRECT"}
+
+⚡ *Queue Status:* Position #${queuePosition}
 ━━━━━━━━━━━━━━━━━━━━
-_කලින් ඉල්ලීම අවසන් වූ සැණින් ඔබගේ ඉල්ලීම බාගත කර Group එකට Upload වනු ඇත!_`;
+_Your request is scheduled and will automatically broadcast upon worker availability._`;
 
           await waSocket.sendMessage(replyTarget, {
             text: queueMessage,
@@ -1788,16 +2051,16 @@ _කලින් ඉල්ලීම අවසන් වූ සැණින් �
           });
         } else {
           const startMessage =
-`🚀 *[FilmFeed Auto-Bot] සකසමින් පවතී (Processing)*
+`🚀 *FILMFEED CINEMA • INITIALIZING DISPATCH*
 ━━━━━━━━━━━━━━━━━━━━
-ආයුබෝවන් *${pushName}* (${mentionTag})!
-ඔබගේ *${count}* වන ඉල්ලීම ලැබුණා [${badge}].
-${isSeriesSeason ? `📺 *TV Series (Season ${seasonNumber}) Pack* සකස් කිරීම ආරම්භ විය...` : "🎬 Direct High-Speed ලින්ක් එක සකසා බාගත කිරීම ආරම්භ විය..."}
-
-📺 *Quality:* ${quality}
+👤 *Requester:* ${pushName} (${mentionTag}) [${badge}]
+📦 *Release:* ${isSeriesSeason ? `TV Series (Season ${seasonNumber}) Pack` : "Feature Film"}
+🌟 *Format:* ${quality} • High-Speed Stream
 🔑 *Token:* ${token || "DIRECT"}
+
+⚡ *Status:* Secure resolver active. Starting download...
 ━━━━━━━━━━━━━━━━━━━━
-🍿 FilmFeed 4K Cinema Engine`;
+🎬 *FilmFeed 4K Cinema Engine*`;
 
           await waSocket.sendMessage(replyTarget, {
             text: startMessage,
