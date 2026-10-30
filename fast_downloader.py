@@ -5,6 +5,8 @@ Accelerates HTTP downloads by up to 10x using parallel byte-range streams (IDM s
 """
 
 import json
+import socket
+socket.setdefaulttimeout(35)
 import os
 import sys
 import time
@@ -19,32 +21,31 @@ UA = (
 
 
 def get_file_info(url: str, headers: dict = None) -> tuple:
-    """Get Content-Length and Range support via HEAD or GET range."""
-    h = {"User-Agent": UA}
+    """Get Content-Length and Range support via GET 0-1 range probe (avoids HEAD timeouts on S3/R2)."""
+    h = {"User-Agent": UA, "Range": "bytes=0-1"}
     if headers:
         h.update(headers)
-    req = urllib.request.Request(url, headers=h, method="HEAD")
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        req = urllib.request.Request(url, headers=h)
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            cr = resp.headers.get("Content-Range", "")
+            if "/" in cr:
+                total_str = cr.split("/")[-1].strip()
+                if total_str.isdigit():
+                    return int(total_str), True
             clen = resp.headers.get("Content-Length")
-            accept_ranges = resp.headers.get("Accept-Ranges", "")
-            size = int(clen) if clen and clen.isdigit() else 0
-            supports_range = (
-                accept_ranges.lower() == "bytes"
-                or size > 5 * 1024 * 1024
-            )
-            return size, supports_range
+            if clen and clen.isdigit():
+                return int(clen), False
     except Exception:
-        # Try range 0-1
         try:
-            h["Range"] = "bytes=0-1"
-            req2 = urllib.request.Request(url, headers=h)
-            with urllib.request.urlopen(req2, timeout=20) as resp:
-                cr = resp.headers.get("Content-Range", "")
-                if "/" in cr:
-                    total = cr.split("/")[-1]
-                    if total.isdigit():
-                        return int(total), True
+            head_h = {"User-Agent": UA}
+            if headers:
+                head_h.update(headers)
+            req_head = urllib.request.Request(url, headers=head_h, method="HEAD")
+            with urllib.request.urlopen(req_head, timeout=8) as h_resp:
+                clen = h_resp.headers.get("Content-Length")
+                if clen and clen.isdigit():
+                    return int(clen), False
         except Exception:
             pass
     return 0, False

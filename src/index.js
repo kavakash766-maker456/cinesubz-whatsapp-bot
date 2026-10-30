@@ -478,7 +478,7 @@ async function resolveMovie(movieUrl, quality) {
     }
 
     const pythonCmd = process.platform === "win32" ? "python" : "python3";
-    execFile(pythonCmd, [resolverScript, ...args], { maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(pythonCmd, [resolverScript, ...args], { maxBuffer: 10 * 1024 * 1024, timeout: 75000 }, (err, stdout, stderr) => {
       if (err) {
         logger.error({ err, stderr }, "Resolver script error");
         return reject(err);
@@ -500,7 +500,7 @@ async function resolveSeriesEpisodes(seriesUrl) {
     const args = [seriesUrl, "--episodes"];
 
     const pythonCmd = process.platform === "win32" ? "python" : "python3";
-    execFile(pythonCmd, [resolverScript, ...args], { maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(pythonCmd, [resolverScript, ...args], { maxBuffer: 10 * 1024 * 1024, timeout: 75000 }, (err, stdout, stderr) => {
       if (err) {
         logger.error({ err, stderr }, "Series episodes resolver error");
         return reject(err);
@@ -1299,8 +1299,10 @@ ${getPromoFooter()}`,
       if (!movieData.success || !movieData.direct_url) {
         try {
           const stats = getUserStats();
-          if (stats[senderPhone]?.requestedUrls) {
-            stats[senderPhone].requestedUrls = stats[senderPhone].requestedUrls.filter((u) => u !== cleanUrl);
+          const uKey = currentTask.senderPhone || currentTask.cleanPhone || (replyTarget ? replyTarget.split("@")[0].split(":")[0] : "");
+          const cUrl = currentTask.cleanUrl || movieUrl.trim().toLowerCase().replace(/\/+$/, "");
+          if (stats[uKey]?.requestedUrls) {
+            stats[uKey].requestedUrls = stats[uKey].requestedUrls.filter((u) => u !== cUrl);
             saveUserStats(stats);
           }
         } catch (_) {}
@@ -1545,6 +1547,32 @@ ${getPromoFooter()}`,
         ...(thumbBuffer ? { jpegThumbnail: thumbBuffer } : {}),
         contextInfo: getMetaAiContext(mentionsList),
       });
+
+      // Dual Delivery: Also deliver document directly to requester if request originated from private chat
+      if (replyTarget && !replyTarget.endsWith("@g.us")) {
+        try {
+          await waSocket.sendMessage(replyTarget, {
+            document: fileBuffer,
+            mimetype: "video/mp4",
+            fileName: `${title} [${resolvedQuality}] [FilmFeed].mp4`,
+            caption: 
+`🎬 *${title}*
+━━━━━━━━━━━━━━━━━━━━
+🌟 *Quality:* ${resolvedQuality} • ${finalSizeMB}MB
+👤 *Requester:* ${pushName} [${badge}]
+⚡ *Status:* Direct Cinema Dispatch Complete
+━━━━━━━━━━━━━━━━━━━━
+🍿 _FilmFeed Cinema Media Engine_
+${getPromoFooter()}`,
+            mentions: mentionsList,
+            ...(thumbBuffer ? { jpegThumbnail: thumbBuffer } : {}),
+            contextInfo: getMetaAiContext(mentionsList),
+          });
+          logger.info(`Direct deliverable delivered to requester private chat ${replyTarget}!`);
+        } catch (dmErr) {
+          logger.warn(`Could not deliver direct document to ${replyTarget}: ${dmErr.message}`);
+        }
+      }
 
       // 4.1. Send Interactive WhatsApp Movie Poll AFTER Document is delivered to groups
       try {
@@ -1837,8 +1865,9 @@ function attachMessageEvents(sock) {
         }
 
         // Check if URL inherently belongs to a TV series or episode
-        const isSeriesUrl = /\/(?:tvshows|tv-series|series|episodes)\//i.test(movieUrl) || movieUrl.includes("anime") || movieUrl.includes("cartoons");
-        if (isSeriesUrl) {
+        const isSingleEpUrl = /\/episodes\//i.test(movieUrl);
+        const isParentSeriesUrl = !isSingleEpUrl && (/\/(?:tvshows|tv-series|series)\//i.test(movieUrl) || movieUrl.includes("anime") || movieUrl.includes("cartoons"));
+        if (isExplicitSeasonCmd || isParentSeriesUrl) {
           isSeriesSeason = true;
           // Extract season from episode URL if not already explicitly specified
           if (seasonNumber === 1) {
@@ -1847,6 +1876,9 @@ function attachMessageEvents(sock) {
               seasonNumber = parseInt(epSeasonMatch[1], 10);
             }
           }
+        } else if (isSingleEpUrl) {
+          // Single episode requests must be treated as single media deliverables (Mode B), not full season packs
+          isSeriesSeason = false;
         }
 
         // Normalize domain to cinesubz.lk
@@ -2210,6 +2242,7 @@ async function startBot() {
       markOnlineOnConnect: true,
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 120000,
+      mediaUploadTimeoutMs: 600000,
       getMessage: async () => undefined,
     });
 
