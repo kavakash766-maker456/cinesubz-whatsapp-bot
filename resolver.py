@@ -279,14 +279,15 @@ def http_get(url, opener=None, headers=None, timeout=TIMEOUT):
             if attempt < 3:
                 time.sleep(0.5 * attempt)
 
-    if opener is not None:
-        h_urllib = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml,*/*"}
-        h_urllib.update(headers or {})
-        req = urllib.request.Request(clean_url, headers=h_urllib)
-        with opener.open(req, timeout=timeout) as r:
+    h_urllib = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml,*/*"}
+    h_urllib.update(headers or {})
+    req = urllib.request.Request(clean_url, headers=h_urllib)
+    op = opener or _opener()
+    try:
+        with op.open(req, timeout=timeout) as r:
             return r.read(), dict(r.headers), r.url
-
-    raise RuntimeError(f"Network error fetching {clean_url}: {last_err}")
+    except Exception as op_err:
+        raise RuntimeError(f"Network error fetching {clean_url}: {last_err or op_err}")
 
 
 def http_get_noredirect(url, timeout=TIMEOUT):
@@ -630,7 +631,14 @@ def _resolve_one(drive_url: str):
     host = f"{parts.scheme}://{parts.netloc}"
     path = parts.path
 
-    sess = get_http_session()
+    import requests
+    sess = requests.Session()
+    sess.headers.update({
+        "User-Agent": UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Connection": "keep-alive",
+    })
 
     try:
         sess.get(host + path, timeout=12)
@@ -853,8 +861,8 @@ def resolve_direct_link(
         or "cinesubz.net/zt-" in movie_url
         or "cinesubz.lk/zt-" in movie_url
         or "/api-" in movie_url
-        or ("cinesubz" in movie_url and ("/api" in movie_url or len(movie_url.split("/")) <= 5))
-    )
+        or ("cinesubz" in movie_url and "/api" in movie_url)
+    ) and not any(k in movie_url for k in ("/movies/", "/tvshows/", "/series/", "/episodes/"))
     if is_zt:
         found_link = None
         try:

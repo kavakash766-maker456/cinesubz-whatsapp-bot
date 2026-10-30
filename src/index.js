@@ -1834,6 +1834,9 @@ function attachMessageEvents(sock) {
 
         // Normalize domain to cinesubz.lk
         movieUrl = movieUrl.replace(/cinesubz\.(net|co)/g, "cinesubz.lk");
+        if (movieUrl.includes("cinesubz.lk") && !movieUrl.endsWith("/") && !movieUrl.includes("?")) {
+          movieUrl += "/";
+        }
         const cleanUrl = movieUrl.trim().toLowerCase().replace(/\/+$/, "");
 
         logger.info(`🎯 Accepted FilmFeed request from ${pushName} (${remoteJid}): URL=${movieUrl} | Q=${quality} | Type=${isSeriesSeason ? `Series S${seasonNumber}` : "Movie"}`);
