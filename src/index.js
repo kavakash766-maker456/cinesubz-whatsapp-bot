@@ -1829,7 +1829,12 @@ async function startBot() {
     process.env.SESSION_VAULT_ID || "8f37b6dbcf07ff6fab07b21cc8cbe05b",
     "filmfeed-whatsapp-auth-vault-v1"
   );
-  await sessionManager.restore();
+  let restored = await sessionManager.restore();
+  if (!restored && process.env.RESET_BOT !== "true") {
+    console.log("⚠️ Initial restore attempt did not complete. Retrying restore in 2s...");
+    await new Promise((r) => setTimeout(r, 2000));
+    restored = await sessionManager.restore();
+  }
 
   const { version, isLatest } = await fetchLatestBaileysVersion();
   logger.info(`Starting Baileys v${version.join(".")} (Latest: ${isLatest})`);

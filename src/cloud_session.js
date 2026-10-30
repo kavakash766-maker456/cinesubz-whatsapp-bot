@@ -72,34 +72,57 @@ class CloudSession {
 
     try {
       console.log(`[CloudSession] Searching for existing WhatsApp session in vault (${this.gistDesc})...`);
-      const gist = await this.findGist();
-      if (!gist) {
-        console.log(`[CloudSession] No existing cloud session found for ${this.gistDesc}. Fresh QR will be generated.`);
-        return false;
+      let contentStr = null;
+
+      // 1. Direct Fast Raw URL (instant ~300ms, avoids Gist API truncation & JSON overhead)
+      if (this.gistId) {
+        try {
+          const directRawUrl = `https://gist.githubusercontent.com/raw/${this.gistId}/${GIST_FILENAME}`;
+          const rawRes = await axios.get(directRawUrl, {
+            headers: this.getHeaders(),
+            httpsAgent: ipv4Agent,
+            timeout: 30000,
+          });
+          if (rawRes.data && typeof rawRes.data === "string" && rawRes.data.length > 500) {
+            contentStr = rawRes.data;
+            console.log(`[CloudSession] Direct raw vault fetched successfully (${contentStr.length} bytes).`);
+          }
+        } catch (rawErr) {
+          console.warn(`[CloudSession] Direct raw fetch fallback: ${rawErr.message}`);
+        }
       }
 
-      const res = await axios.get(`https://api.github.com/gists/${this.gistId}`, {
-        headers: this.getHeaders(),
-        httpsAgent: ipv4Agent,
-        timeout: 15000,
-      });
-      
-      const data = res.data;
-      const fileObj = data.files[GIST_FILENAME];
-      if (!fileObj) {
-        console.warn("[CloudSession] Vault file missing in Gist.");
-        return false;
-      }
+      // 2. Fallback to GitHub Gist REST API
+      if (!contentStr) {
+        const gist = await this.findGist();
+        if (!gist) {
+          console.log(`[CloudSession] No existing cloud session found for ${this.gistDesc}. Fresh QR will be generated.`);
+          return false;
+        }
 
-      let contentStr = fileObj.content;
-      if ((fileObj.truncated || !contentStr) && fileObj.raw_url) {
-        console.log("[CloudSession] Content truncated in API; fetching full vault from raw_url...");
-        const rawRes = await axios.get(fileObj.raw_url, {
+        const res = await axios.get(`https://api.github.com/gists/${this.gistId}`, {
           headers: this.getHeaders(),
           httpsAgent: ipv4Agent,
-          timeout: 25000,
+          timeout: 30000,
         });
-        contentStr = typeof rawRes.data === "string" ? rawRes.data : JSON.stringify(rawRes.data);
+        
+        const data = res.data;
+        const fileObj = data.files[GIST_FILENAME];
+        if (!fileObj) {
+          console.warn("[CloudSession] Vault file missing in Gist.");
+          return false;
+        }
+
+        contentStr = fileObj.content;
+        if ((fileObj.truncated || !contentStr) && fileObj.raw_url) {
+          console.log("[CloudSession] Content truncated in API; fetching full vault from raw_url...");
+          const rawRes = await axios.get(fileObj.raw_url, {
+            headers: this.getHeaders(),
+            httpsAgent: ipv4Agent,
+            timeout: 30000,
+          });
+          contentStr = typeof rawRes.data === "string" ? rawRes.data : JSON.stringify(rawRes.data);
+        }
       }
 
       if (!contentStr) {
