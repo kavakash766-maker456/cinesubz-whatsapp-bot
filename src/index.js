@@ -524,6 +524,8 @@ async function getTmdbMediaDetails(title, isTv = false, year = null) {
     let clean = title
       .replace(/\[.*?\]|\(.*?\)/g, " ")
       .replace(/sinhala\s*subtitles?|sinhala\s*sub|සිංහල\s*උපසිරැසි.*/gi, " ")
+      .replace(/\|.*$/g, " ")
+      .replace(/\b(tv\s*series|series|complete|incomplete|season\s*\d+|s\d+(?:-\d+)?|ep\d+(?:-\d+)?)\b/gi, " ")
       .replace(/\b(1080p|720p|480p|360p|2160p|4k|web-dl|bluray|hdrip|dvdrip|x264|x265|hevc|aac)\b/gi, " ")
       .replace(/[-_.]+/g, " ")
       .trim();
@@ -531,6 +533,7 @@ async function getTmdbMediaDetails(title, isTv = false, year = null) {
     const yMatch = title.match(/\b(19\d\d|20\d\d)\b/);
     const searchYear = year || (yMatch ? yMatch[1] : null);
     clean = clean.replace(/\b(19\d\d|20\d\d)\b/g, "").trim();
+    if (!clean) clean = title.trim();
 
     const endpoint = isTv ? "search/tv" : "search/movie";
     let url = `https://api.themoviedb.org/3/${endpoint}?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(clean)}`;
@@ -544,6 +547,11 @@ async function getTmdbMediaDetails(title, isTv = false, year = null) {
       const retryUrl = `https://api.themoviedb.org/3/${endpoint}?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(clean)}`;
       const retryRes = await axios.get(retryUrl, { timeout: 8000 });
       results = retryRes.data?.results || [];
+    }
+    if (results.length === 0 && isTv) {
+      const multiUrl = `https://api.themoviedb.org/3/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(clean)}`;
+      const multiRes = await axios.get(multiUrl, { timeout: 8000 });
+      results = (multiRes.data?.results || []).filter(r => r.media_type === "tv" || r.media_type === "movie");
     }
 
     if (results.length > 0) {

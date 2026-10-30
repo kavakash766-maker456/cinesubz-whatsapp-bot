@@ -262,6 +262,7 @@ def http_get(url, opener=None, headers=None, timeout=TIMEOUT):
     if headers:
         h.update(headers)
 
+    last_err = None
     for attempt in range(1, 4):
         try:
             r = sess.get(clean_url, headers=h, timeout=min(timeout, 20))
@@ -270,17 +271,21 @@ def http_get(url, opener=None, headers=None, timeout=TIMEOUT):
             elif r.status_code in (301, 302, 303, 307, 308) and r.headers.get("Location"):
                 redir_url = urllib.parse.urljoin(clean_url, r.headers["Location"])
                 return http_get(redir_url, opener, headers, timeout)
-        except Exception:
-            if attempt == 3:
-                break
-            time.sleep(0.5 * attempt)
+            else:
+                last_err = RuntimeError(f"HTTP {r.status_code} fetching {clean_url}")
+        except Exception as e:
+            last_err = e
+            if attempt < 3:
+                time.sleep(0.5 * attempt)
 
-    h = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml,*/*"}
-    h.update(headers or {})
-    req = urllib.request.Request(clean_url, headers=h)
-    op = opener or _opener()
-    with op.open(req, timeout=timeout) as r:
-        return r.read(), dict(r.headers), r.url
+    if opener is not None:
+        h_urllib = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml,*/*"}
+        h_urllib.update(headers or {})
+        req = urllib.request.Request(clean_url, headers=h_urllib)
+        with opener.open(req, timeout=timeout) as r:
+            return r.read(), dict(r.headers), r.url
+
+    raise RuntimeError(f"Network error fetching {clean_url}: {last_err}")
 
 
 def http_get_noredirect(url, timeout=TIMEOUT):
@@ -313,6 +318,20 @@ def http_get_noredirect(url, timeout=TIMEOUT):
 # --------------------------------------------------------------------------
 # step 1: scrape movie / episode / series page
 # --------------------------------------------------------------------------
+def clean_page_title(raw: str) -> str:
+    if not raw:
+        return ""
+    import html as html_mod
+    title = html_mod.unescape(raw).strip()
+    # Strip site branding suffix e.g. " - CineSubz.lk", " | CineSubz", " - CineSubz"
+    title = re.sub(r"\s*[-|–—•]\s*CineSubz(?:\.(?:lk|net|co|com|org))?\b.*$", "", title, flags=re.I).strip()
+    # Strip site branding prefix e.g. "CineSubz.lk - "
+    title = re.sub(r"^cinesubz(?:\.(?:lk|net|co|com|org))?\s*[-|–—•]\s*", "", title, flags=re.I).strip()
+    # Strip trailing Sinhala subtitle tags if appended as suffix
+    title = re.sub(r"\s*[-|–—•]\s*(?:සිංහල\s*උපසිරැසි.*|sinhala\s*subtitles?|sinhala\s*sub)\b.*$", "", title, flags=re.I).strip()
+    return re.sub(r"\s+", " ", title).strip()
+
+
 def scrape_movie(url: str, log=sys.stderr.write):
     body, _, final_url = http_get(url)
     html = body.decode("utf-8", "replace")
@@ -330,20 +349,80 @@ def scrape_movie(url: str, log=sys.stderr.write):
     poster = root.find(cls="poster-img")
     if poster:
         banner["poster"] = (poster.attrs.get("src") or "").strip()
-    if "poster" not in banner:
+    if not banner.get("poster"):
         m = re.search(
             r'property=["\']og:image["\']\s+content=["\']([^"\']+)', html
         ) or re.search(r'content=["\']([^"\']+)["\']\s+property=["\']og:image', html)
         if m:
-            banner.setdefault("poster", m.group(1).strip())
+            banner["poster"] = m.group(1).strip()
+    if not banner.get("backdrop") and banner.get("poster"):
+        banner["backdrop"] = banner["poster"]
 
     details = {}
+    title_cand = ""
+
+    # 1. details-title
     t = first(cls="details-title")
-    if t:
-        details["title"] = t.text()
+    if t and t.text().strip():
+        title_cand = clean_page_title(t.text())
+
+    # 2. entry-title
+    if not title_cand:
+        et = root.find(cls="entry-title")
+        if et and et.text().strip():
+            title_cand = clean_page_title(et.text())
+
+    # 3. h1 tag (excluding generic headings like "Download Links")
+    if not title_cand:
+        for h1_node in root.find_all(tag="h1"):
+            h1_text = h1_node.text().strip()
+            if h1_text and not re.search(r"\b(download|links|direct & telegram)\b", h1_text, re.I):
+                c = clean_page_title(h1_text)
+                if c:
+                    title_cand = c
+                    break
+
+    # 4. og:title meta
+    if not title_cand:
+        m_og_title = (
+            re.search(r'property=["\']og:title["\']\s+content=["\']([^"\']+)', html)
+            or re.search(r'content=["\']([^"\']+)["\']\s+property=["\']og:title', html)
+        )
+        if m_og_title:
+            title_cand = clean_page_title(m_og_title.group(1))
+
+    # 5. <title> HTML tag
+    if not title_cand:
+        t_tag = root.find(tag="title")
+        if t_tag and t_tag.text().strip():
+            title_cand = clean_page_title(t_tag.text())
+        else:
+            m_title_tag = re.search(r"<title>(.*?)</title>", html, re.I | re.S)
+            if m_title_tag:
+                title_cand = clean_page_title(m_title_tag.group(1))
+
+    # 6. Fallback: URL slug
+    if not title_cand:
+        slug = final_url.rstrip("/").split("/")[-1].replace("-", " ")
+        title_cand = clean_page_title(slug).title()
+
+    if title_cand:
+        details["title"] = title_cand
+
     m = re.search(r"\((\d{4})\)", details.get("title", ""))
     if m:
         details["year"] = int(m.group(1))
+    else:
+        m_y = re.search(r"\b(19\d\d|20\d\d)\b", details.get("title", ""))
+        if m_y:
+            details["year"] = int(m_y.group(1))
+        else:
+            y_elem = first(cls="data-year") or first(cls="year") or first(cls="release-year")
+            if y_elem:
+                m_elem = re.search(r"\b(19\d\d|20\d\d)\b", y_elem.text())
+                if m_elem:
+                    details["year"] = int(m_elem.group(1))
+
     q = first(cls="data-quality")
     if q:
         details["quality"] = q.text()
@@ -1185,11 +1264,16 @@ def main():
                         continue
                     p_data = scrape_movie(p_url)
                     if p_data.get("episodes"):
+                        p_title = p_data["details"].get("title")
+                        if not p_title or p_title.strip().lower() in ("series", "tv series", "movie"):
+                            slug = p_url.rstrip("/").split("/")[-1]
+                            slug = re.sub(r"-(?:tv-)?series$", "", slug, flags=re.I)
+                            p_title = slug.replace("-", " ").title()
                         out = {
                             "success": True,
-                            "title": p_data["details"].get("title", "TV Series"),
+                            "title": p_title or "TV Series",
                             "poster": p_data["banner"].get("poster"),
-                            "backdrop": p_data["banner"].get("backdrop"),
+                            "backdrop": p_data["banner"].get("backdrop") or p_data["banner"].get("poster"),
                             "episodes": p_data.get("episodes") or [],
                         }
                         print(json.dumps(out, ensure_ascii=False, indent=2))
@@ -1198,11 +1282,16 @@ def main():
                 pass
 
         data = scrape_movie(args.url)
+        s_title = data["details"].get("title")
+        if not s_title or s_title.strip().lower() in ("series", "tv series", "movie"):
+            slug = args.url.rstrip("/").split("/")[-1]
+            slug = re.sub(r"-(?:tv-)?series$", "", slug, flags=re.I)
+            s_title = slug.replace("-", " ").title()
         out = {
             "success": bool(data.get("episodes")),
-            "title": data["details"].get("title", "Series"),
+            "title": s_title or "Series",
             "poster": data["banner"].get("poster"),
-            "backdrop": data["banner"].get("backdrop"),
+            "backdrop": data["banner"].get("backdrop") or data["banner"].get("poster"),
             "episodes": data.get("episodes") or [],
         }
 
