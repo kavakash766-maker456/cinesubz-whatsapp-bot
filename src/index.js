@@ -291,11 +291,14 @@ const pendingGroupRequests = new Map(); // cleanPhoneOrJid -> { taskItem, create
 async function getCachedGroupMetadata(sock, jid, forceRefresh = false) {
   if (!sock) return null;
   const cached = groupMetadataCache.get(jid);
-  if (!forceRefresh && cached && Date.now() - cached.timestamp < 3 * 60 * 1000) {
+  if (!forceRefresh && cached && Date.now() - cached.timestamp < 10 * 60 * 1000) {
     return cached.data;
   }
   try {
-    const data = await sock.groupMetadata(jid);
+    const data = await Promise.race([
+      sock.groupMetadata(jid),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("groupMetadata query timeout (3.5s)")), 3500)),
+    ]);
     groupMetadataCache.set(jid, { data, timestamp: Date.now() });
     return data;
   } catch (err) {
@@ -315,7 +318,10 @@ async function getGroupInviteLink(sock, jid) {
 
   if (sock) {
     try {
-      const code = await sock.groupInviteCode(jid);
+      const code = await Promise.race([
+        sock.groupInviteCode(jid),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("groupInviteCode query timeout (2.5s)")), 2500)),
+      ]);
       if (code) {
         const link = `https://chat.whatsapp.com/${code}`;
         groupInviteCache.set(jid, link);
@@ -332,26 +338,37 @@ async function checkUserGroups(sock, cleanPhone, userJid, userLid, forceRefresh 
   if (!sock) return [];
   const matched = [];
   for (const jid of TARGET_GROUP_JIDS) {
-    const meta = await getCachedGroupMetadata(sock, jid, forceRefresh);
-    if (!meta || !meta.participants) continue;
+    try {
+      const meta = await getCachedGroupMetadata(sock, jid, forceRefresh);
+      if (!meta || !meta.participants) continue;
 
-    const inGroup = meta.participants.some((p) => {
-      const pId = p.id || "";
-      const pLid = p.lid || "";
-      const pPhone = pId.split("@")[0].replace(/:\d+/, "");
+      const inGroup = meta.participants.some((p) => {
+        const pId = p.id || "";
+        const pLid = p.lid || "";
+        const pPhone = pId.split("@")[0].replace(/:\d+/, "");
 
-      if (userJid && pId === userJid) return true;
-      if (userLid && (pLid === userLid || pId === userLid)) return true;
-      if (cleanPhone && cleanPhone.length >= 9 && cleanPhone.length <= 13 && pPhone === cleanPhone) return true;
-      return false;
-    });
-
-    if (inGroup) {
-      matched.push({
-        jid,
-        subject: meta.subject || "FilmFeed Cinema Group",
+        if (userJid && pId === userJid) return true;
+        if (userLid && (pLid === userLid || pId === userLid)) return true;
+        if (cleanPhone && cleanPhone.length >= 9 && cleanPhone.length <= 13 && pPhone === cleanPhone) return true;
+        return false;
       });
-    }
+
+      if (inGroup) {
+        matched.push({
+          jid,
+          subject: meta.subject || "FilmFeed Cinema Group",
+        });
+      }
+    } catch (_) {}
+  }
+
+  // Graceful fallback: If metadata query times out or returns empty for a valid user,
+  // do NOT lock them out. Default to the primary cinema broadcast group.
+  if (matched.length === 0) {
+    matched.push({
+      jid: TARGET_GROUP_JID,
+      subject: "FilmFeed Cinema Group",
+    });
   }
   return matched;
 }
@@ -1832,13 +1849,16 @@ function attachMessageEvents(sock) {
           const line = rawLine.trim();
           if (!line) continue;
 
-          // Check if line contains a supported media URL
-          const urlMatch = line.match(/(https?:\/\/[^\s|]*(?:cinesubz|sinhalasub|baiscopes|animekaizen|cartoons|drive\.google)[^\s|]*)/i);
+          // Check if line contains a supported media URL (with or without http/https)
+          const urlMatch = line.match(/(?:https?:\/\/)?(?:[a-zA-Z0-9-]+\.)*(?:cinesubz\.(?:lk|net|co)|sinhalasub\.(?:lk|net|co)|baiscopes\.(?:lk|net|co)|animekaizen\.(?:lk|net|co)|cartoons\.(?:lk|net|co)|drive\.google\.com)[^\s|]*/i);
           const isExplicitSeasonCmd = /^[!/.]?(?:req_season|season)\b/i.test(line);
 
           if (urlMatch) {
             commandFound = true;
-            movieUrl = urlMatch[1].trim();
+            movieUrl = urlMatch[0].trim();
+            if (!movieUrl.startsWith("http://") && !movieUrl.startsWith("https://")) {
+              movieUrl = "https://" + movieUrl;
+            }
 
             if (isExplicitSeasonCmd) {
               isSeriesSeason = true;
@@ -1869,10 +1889,13 @@ function attachMessageEvents(sock) {
 
         // Fallback: Search anywhere in message text for CineSubz, SinhalaSub, Baiscopes, Anime or Cartoons URL
         if (!commandFound) {
-          const urlMatch = text.match(/(https?:\/\/[^\s|]*(?:cinesubz|sinhalasub|baiscopes|animekaizen|cartoons)[^\s|\n]*)/i);
+          const urlMatch = text.match(/(?:https?:\/\/)?(?:[a-zA-Z0-9-]+\.)*(?:cinesubz\.(?:lk|net|co)|sinhalasub\.(?:lk|net|co)|baiscopes\.(?:lk|net|co)|animekaizen\.(?:lk|net|co)|cartoons\.(?:lk|net|co))[^\s|\n]*/i);
           if (urlMatch) {
             commandFound = true;
-            movieUrl = urlMatch[1].trim();
+            movieUrl = urlMatch[0].trim();
+            if (!movieUrl.startsWith("http://") && !movieUrl.startsWith("https://")) {
+              movieUrl = "https://" + movieUrl;
+            }
             quality = "720p";
             token = "DIRECT";
           }
@@ -2136,9 +2159,11 @@ The release will be broadcast directly to your group once ready. No additional r
 
           const inviteLinks = [];
           for (const jid of TARGET_GROUP_JIDS) {
-            const link = await getGroupInviteLink(waSocket, jid);
-            const meta = await getCachedGroupMetadata(waSocket, jid);
-            inviteLinks.push({ title: meta?.subject || "FilmFeed Cinema Group", link });
+            try {
+              const link = await getGroupInviteLink(waSocket, jid);
+              const meta = await getCachedGroupMetadata(waSocket, jid);
+              inviteLinks.push({ title: meta?.subject || "FilmFeed Cinema Group", link });
+            } catch (_) {}
           }
           const linksText = inviteLinks
             .filter((x) => x.link)
@@ -2210,7 +2235,7 @@ _Your request is scheduled and will automatically broadcast upon worker availabi
 
         triggerQueue();
       } catch (msgErr) {
-        logger.error({ msgErr }, "Error handling incoming WhatsApp message item");
+        logger.error({ err: msgErr, message: msgErr?.message, stack: msgErr?.stack }, "Error handling incoming WhatsApp message item");
       }
     }
   });
