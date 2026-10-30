@@ -145,6 +145,32 @@ function normalizeKey(str) {
     .trim();
 }
 
+function extractMediaSlug(url, title = "") {
+  if (url) {
+    const parts = String(url).split("?")[0].split("#")[0].split("/").filter(Boolean);
+    const lastPart = parts[parts.length - 1] || "";
+    const clean = lastPart
+      .replace(/sinhala[-_\s]*subtitles?|sinhala[-_\s]*sub|සිංහල[-_\s]*උපසිරැසි.*/gi, "")
+      .replace(/[-_]?(?:19\d\d|20\d\d)[-_]?/g, "")
+      .replace(/(?:tv[-_\s]*series|movie|s\d+e\d+|\d+x\d+)/gi, "")
+      .replace(/[^a-zA-Z0-9]/g, "")
+      .toLowerCase()
+      .trim();
+    if (clean.length >= 3) return clean;
+  }
+  if (title) {
+    const clean = String(title)
+      .replace(/sinhala[-_\s]*subtitles?|sinhala[-_\s]*sub|සිංහල[-_\s]*උපසිරැසි.*/gi, "")
+      .replace(/[-_]?(?:19\d\d|20\d\d)[-_]?/g, "")
+      .replace(/(?:tv[-_\s]*series|movie|s\d+e\d+|\d+x\d+)/gi, "")
+      .replace(/[^a-zA-Z0-9]/g, "")
+      .toLowerCase()
+      .trim();
+    if (clean.length >= 3) return clean;
+  }
+  return "";
+}
+
 function isAlreadyUploadedToday(cleanUrl, title = "", seasonNumber = null) {
   const uploads = getDailyUploads();
   const todayStr = new Date().toISOString().slice(0, 10);
@@ -152,6 +178,7 @@ function isAlreadyUploadedToday(cleanUrl, title = "", seasonNumber = null) {
 
   const targetKeyUrl = normalizeKey(cleanUrl);
   const targetKeyTitle = normalizeKey(title);
+  const targetSlug = extractMediaSlug(cleanUrl, title);
 
   return todayItems.some((item) => {
     if (seasonNumber && item.seasonNumber && item.seasonNumber !== seasonNumber) {
@@ -159,9 +186,11 @@ function isAlreadyUploadedToday(cleanUrl, title = "", seasonNumber = null) {
     }
     const itemKeyUrl = normalizeKey(item.url || item.cleanUrl);
     const itemKeyTitle = normalizeKey(item.title);
+    const itemSlug = item.slug || extractMediaSlug(item.url || item.cleanUrl, item.title);
 
     if (targetKeyUrl && itemKeyUrl && targetKeyUrl === itemKeyUrl) return true;
     if (targetKeyTitle && itemKeyTitle && targetKeyTitle === itemKeyTitle && targetKeyTitle.length >= 4) return true;
+    if (targetSlug && itemSlug && targetSlug === itemSlug && targetSlug.length >= 4) return true;
     return false;
   });
 }
@@ -181,15 +210,18 @@ function recordDailyUpload(cleanUrl, title, isSeriesSeason = false, seasonNumber
     }
   }
 
+  const slug = extractMediaSlug(cleanUrl, title);
+
   uploads[todayStr].push({
     url: cleanUrl,
     title: title || "",
+    slug,
     isSeriesSeason: Boolean(isSeriesSeason),
     seasonNumber: seasonNumber || null,
     timestamp: Date.now(),
   });
   saveDailyUploads(uploads);
-  logger.info(`[Daily Upload Archive] Recorded today's group upload: ${title || cleanUrl} (Series: ${isSeriesSeason})`);
+  logger.info(`[Daily Upload Archive] Recorded today's group upload: ${title || cleanUrl} (Series: ${isSeriesSeason}, S${seasonNumber})`);
 }
 
 function checkAndResetDaily(userRecord) {
@@ -240,12 +272,11 @@ function incrementUserRequest(userId, userName, movieTitle, quality) {
 
   const count = stats[userId].count;
   const history = stats[userId].history || [];
-  let badge = "🌟 New Member";
-  if (count >= 20) badge = "👑 Film Legend (VIP)";
-  else if (count >= 10) badge = "🥇 Elite Cinephile";
-  else if (count >= 5) badge = "🥈 Pro Movie Buff";
-  else if (count >= 2) badge = "🥉 Regular Member";
-  else badge = "✨ First Request (Welcome!)";
+  let badge = "🌟 Verified Member";
+  if (count >= 20) badge = "👑 VIP Cinema Member";
+  else if (count >= 10) badge = "🎬 Senior Cinema Member";
+  else if (count >= 5) badge = "🍿 FilmFeed Member";
+  else badge = "🌟 Verified Member";
 
   return { count, badge, history, isVip: Boolean(stats[userId].isVip), isBanned: Boolean(stats[userId].isBanned) };
 }
@@ -1628,7 +1659,18 @@ function attachMessageEvents(sock) {
         const senderJid = isGroup ? (msg.key.participant || remoteJid) : remoteJid;
         const pushName = msg.pushName || (fromMe ? "Admin" : "Member");
 
-        const rawPhone = senderJid.split("@")[0].replace(/:\d+/, "");
+        let requesterLid = (senderJid && senderJid.endsWith("@lid"))
+          ? senderJid
+          : (msg.key.participant && msg.key.participant.endsWith("@lid") ? msg.key.participant : "");
+
+        let resolvedPhone = null;
+        if (requesterLid) {
+          try {
+            resolvedPhone = await resolveRealPhoneFromGroups(waSocket, requesterLid);
+          } catch (_) {}
+        }
+
+        const rawPhone = (resolvedPhone || senderJid.split("@")[0]).replace(/:\d+/, "");
         const senderPhone = rawPhone.replace(/\D/g, "");
         const cleanPhone = senderPhone.length === 11 && senderPhone.startsWith("94")
           ? senderPhone
@@ -1641,9 +1683,6 @@ function attachMessageEvents(sock) {
         const requesterJid = (cleanPhone && cleanPhone.length >= 9 && cleanPhone.length <= 13)
           ? `${cleanPhone}@s.whatsapp.net`
           : (senderJid.endsWith("@s.whatsapp.net") ? senderJid : "");
-        const requesterLid = (senderJid && senderJid.endsWith("@lid"))
-          ? senderJid
-          : (msg.key.participant && msg.key.participant.endsWith("@lid") ? msg.key.participant : "");
 
         const mentionTag = `@${cleanPhone || rawPhone || "user"}`;
         const mentionDisplay = pushName ? `*${pushName}* (${mentionTag})` : mentionTag;
@@ -1670,7 +1709,7 @@ function attachMessageEvents(sock) {
 
               const groupNames = userGroups.map((g) => `*${g.subject}*`).join(", ");
               await waSocket.sendMessage(remoteJid, {
-                text: `✅ *FILMFEED CINEMA • MEMBERSHIP VERIFIED*\n━━━━━━━━━━━━━━━━━━━━\nWelcome *${pushName}*! Membership for ${groupNames} confirmed.\n\n🚀 Your request for *${taskItem.isSeriesSeason ? `TV Series (Season ${taskItem.seasonNumber}) Pack` : "Movie"}* has been queued for processing! 🍿`,
+                text: `✅ *FILMFEED CINEMA • MEMBERSHIP CONFIRMED*\n━━━━━━━━━━━━━━━━━━━━\nWelcome *${pushName}*! Access for ${groupNames} verified.\n\n🚀 Your request for *${taskItem.isSeriesSeason ? `TV Series (Season ${taskItem.seasonNumber}) Pack` : "Movie"}* has been queued for broadcast! 🍿`,
               });
 
               requestQueue.push(taskItem);
@@ -1678,7 +1717,7 @@ function attachMessageEvents(sock) {
               continue;
             } else {
               await waSocket.sendMessage(remoteJid, {
-                text: `⚠️ *FILMFEED CINEMA • NOTICE*\n━━━━━━━━━━━━━━━━━━━━\nMembership in our official WhatsApp group could not be verified yet. Please tap the group invite link, join the group, and reply *done* to continue.`,
+                text: `⚠️ *FILMFEED CINEMA • MEMBERSHIP REQUIRED*\n━━━━━━━━━━━━━━━━━━━━\nMembership in our official WhatsApp group could not be verified yet. Please tap the group invite link, join the community, and reply *done* to continue.`,
               });
               continue;
             }
@@ -1686,7 +1725,7 @@ function attachMessageEvents(sock) {
         }
 
         // ------------------------------------------------------------------
-        // Parse Commands: Flexible TV Series & Movie Recognition
+        // Parse Commands: Robust Media URL & Parameter Extraction
         // ------------------------------------------------------------------
         let commandFound = false;
         let isSeriesSeason = false;
@@ -1701,37 +1740,38 @@ function attachMessageEvents(sock) {
           const line = rawLine.trim();
           if (!line) continue;
 
-          // Check if line starts with a command prefix
-          const cmdMatch = line.match(/^[!/.]?(?:req_season|season|req(?:uest)?)\s+(.+)/i);
-          if (cmdMatch) {
-            const rawParts = cmdMatch[1].split("|").map((p) => p.trim()).filter(Boolean);
-            if (rawParts.length > 0 && (rawParts[0].startsWith("http") || rawParts[0].includes("cinesubz") || rawParts[0].includes("sinhalasub") || rawParts[0].includes("baiscopes") || rawParts[0].includes("anime") || rawParts[0].includes("cartoons"))) {
-              commandFound = true;
-              movieUrl = rawParts[0];
+          // Check if line contains a supported media URL
+          const urlMatch = line.match(/(https?:\/\/[^\s|]*(?:cinesubz|sinhalasub|baiscopes|animekaizen|cartoons|drive\.google)[^\s|]*)/i);
+          const isExplicitSeasonCmd = /^[!/.]?(?:req_season|season)\b/i.test(line);
 
-              const isExplicitSeasonCmd = /^[!/.]?(?:req_season|season)/i.test(line);
+          if (urlMatch) {
+            commandFound = true;
+            movieUrl = urlMatch[1].trim();
 
-              // Process parameters after URL
-              const params = rawParts.slice(1);
-              for (const p of params) {
-                const sMatch = p.match(/^(?:s|season\s*)?(\d{1,3})$/i);
-                const qMatch = p.match(/^(?:360p|480p|720p|1080p|2160p|4k|sd|hd|fhd)$/i);
-
-                if (sMatch && (isExplicitSeasonCmd || !p.toLowerCase().endsWith("p"))) {
-                  seasonNumber = parseInt(sMatch[1], 10);
-                  isSeriesSeason = true;
-                } else if (qMatch || /^\d{3,4}p$/i.test(p)) {
-                  quality = p;
-                } else if (!token) {
-                  token = p;
-                }
-              }
-
-              if (isExplicitSeasonCmd) {
-                isSeriesSeason = true;
-              }
-              break;
+            if (isExplicitSeasonCmd) {
+              isSeriesSeason = true;
             }
+
+            // Extract the remainder of the line excluding the URL
+            const remainder = line.replace(urlMatch[0], " ").trim();
+            // Split remainder by pipe, comma, or whitespace
+            const tokens = remainder.split(/[|\s,]+/).map((t) => t.trim()).filter(Boolean);
+
+            for (const t of tokens) {
+              if (/^[!/.]?(?:req(?:uest)?|req_season|season)$/i.test(t)) continue;
+              const sMatch = t.match(/^(?:s|season\s*)?(\d{1,3})$/i);
+              const qMatch = t.match(/^(?:360p|480p|720p|1080p|2160p|4k|sd|hd|fhd)$/i);
+
+              if (sMatch && (isExplicitSeasonCmd || !t.toLowerCase().endsWith("p"))) {
+                seasonNumber = parseInt(sMatch[1], 10);
+                isSeriesSeason = true;
+              } else if (qMatch || /^\d{3,4}p$/i.test(t)) {
+                quality = t;
+              } else if (!token) {
+                token = t;
+              }
+            }
+            break;
           }
         }
 

@@ -69,15 +69,15 @@ def generate_thumbnail(input_path, output_path, max_size=(240, 320)):
 
 def create_branded_poster(poster_path, avatar_path, requester_name, output_path, storyline_text=None, backdrop_path=None):
     """
-    Creates a luxury 16:9 cinema announcement card:
-    - Left: Sharp vertical movie poster with FilmFeed golden banner.
-    - Right: Dark blurred backdrop with Storyline / සාරාංශය.
-    - Bottom-Right: Requester's circular WhatsApp DP with double ring frame & badge.
+    Creates a luxury 16:9 cinema announcement card matching reference template:
+    - Left: Full-height sharp vertical movie poster with FilmFeed golden banner.
+    - Right: Dark blurred backdrop with centered Storyline / සාරාංශය.
+    - Bottom-Right: Requester's circular WhatsApp DP with double ring frame & pill badge.
     """
     try:
         W, H = 1280, 720
+        poster_w = int(H * 0.64)  # ~460px width for 2:3 vertical poster covering full height
 
-        # Read storyline if passed as a file path
         storyline = storyline_text or ""
         if os.path.exists(storyline):
             try:
@@ -88,101 +88,99 @@ def create_branded_poster(poster_path, avatar_path, requester_name, output_path,
 
         storyline = re.sub(r"\s+", " ", storyline).strip()
         if not storyline or storyline.lower() == "none":
-            storyline = "A high-octane cinema experience featuring Sinhala subtitles, 5.1 crystal surround audio, and premium 4K master visuals."
+            storyline = "A high-octane cinema experience featuring Sinhala subtitles, 5.1 surround audio, and premium master visuals."
 
         # 1. Background: Blurred Backdrop
-        bg_source = backdrop_path if (backdrop_path and os.path.exists(backdrop_path)) else poster_path
+        bg_source = backdrop_path if (backdrop_path and os.path.exists(backdrop_path) and backdrop_path != "NONE") else poster_path
         with Image.open(bg_source) as bg_img:
             bg = bg_img.convert("RGBA")
             bg = ImageOps.fit(bg, (W, H), method=Image.Resampling.LANCZOS)
-            bg = bg.filter(ImageFilter.GaussianBlur(32))
+            bg = bg.filter(ImageFilter.GaussianBlur(36))
 
         # Dark cinema glass vignette overlay
-        overlay = Image.new("RGBA", (W, H), (10, 12, 18, 195))
+        overlay = Image.new("RGBA", (W, H), (10, 12, 18, 185))
         bg = Image.alpha_composite(bg, overlay)
-        draw = ImageDraw.Draw(bg)
 
-        # 2. Left Side: Movie Poster (Portrait, approx 433 x 650)
-        poster_margin = 35
-        poster_h = H - (poster_margin * 2) # 650
-        poster_w = int(poster_h * (2.0 / 3.0)) # 433
-
+        # 2. Left Side: Full-height Movie Poster (0 to poster_w, 0 to H)
         with Image.open(poster_path) as p_img:
             p_img = p_img.convert("RGBA")
-            p_img = ImageOps.fit(p_img, (poster_w, poster_h), method=Image.Resampling.LANCZOS)
+            p_img = ImageOps.fit(p_img, (poster_w, H), method=Image.Resampling.LANCZOS)
 
             # Poster bottom golden banner
-            p_overlay = Image.new("RGBA", (poster_w, poster_h), (0, 0, 0, 0))
+            p_overlay = Image.new("RGBA", (poster_w, H), (0, 0, 0, 0))
             p_draw = ImageDraw.Draw(p_overlay)
-            banner_h = int(poster_h * 0.10)
-            banner_top = poster_h - banner_h
+            banner_h = int(H * 0.10)
+            banner_top = H - banner_h
             for y in range(banner_h):
-                alpha = int(230 * (y / banner_h) ** 0.8)
+                alpha = int(240 * (y / banner_h) ** 0.8)
                 p_draw.line([(0, banner_top + y), (poster_w, banner_top + y)], fill=(8, 10, 15, alpha))
 
+            # Golden accent line
             p_draw.rectangle([(0, banner_top), (poster_w, banner_top + 3)], fill=(245, 197, 24, 255))
-            brand_font = get_font(13, bold=True)
+            brand_font = get_font(14, bold=True)
             brand_text = "FILMFEED 4K CINEMA  •  SINHALA SUBTITLES"
             b_bbox = p_draw.textbbox((0, 0), brand_text, font=brand_font)
             bw = b_bbox[2] - b_bbox[0]
             p_draw.text(((poster_w - bw) // 2, banner_top + int(banner_h * 0.35)), brand_text, fill=(255, 255, 255, 240), font=brand_font)
 
-            # Poster outer border
-            p_draw.rectangle([(0, 0), (poster_w - 1, poster_h - 1)], outline=(245, 197, 24, 180), width=2)
+            # Drop shadow / divider on right edge of poster
+            edge_shadow = Image.new("RGBA", (24, H), (0, 0, 0, 0))
+            es_draw = ImageDraw.Draw(edge_shadow)
+            for x in range(24):
+                alpha = int(180 * (1 - (x / 24)))
+                es_draw.line([(x, 0), (x, H)], fill=(0, 0, 0, alpha))
+
             p_final = Image.alpha_composite(p_img, p_overlay)
+            bg.paste(p_final, (0, 0))
+            bg.paste(edge_shadow, (poster_w, 0), edge_shadow)
 
-            # Drop shadow behind poster
-            shadow = Image.new("RGBA", (poster_w + 30, poster_h + 30), (0, 0, 0, 0))
-            s_draw = ImageDraw.Draw(shadow)
-            s_draw.rectangle([(15, 15), (poster_w + 15, poster_h + 15)], fill=(0, 0, 0, 180))
-            shadow = shadow.filter(ImageFilter.GaussianBlur(12))
-            bg.paste(shadow, (poster_margin - 5, poster_margin - 5), shadow)
-            bg.paste(p_final, (poster_margin, poster_margin), p_final)
+        draw = ImageDraw.Draw(bg)
 
-        # 3. Right Side: Storyline & Header
-        right_x = poster_margin + poster_w + 45
-        right_w = W - right_x - 45
+        # 3. Right Side: Centered Storyline & Requester DP
+        right_x = poster_w
+        right_w = W - right_x
+        center_x = right_x + (right_w // 2)
 
-        # Header
-        header_font = get_font(28, bold=True)
-        header_text = "STORYLINE / සාරාංශය"
-        draw.text((right_x + 1, 46), header_text, fill=(0, 0, 0, 180), font=header_font)
-        draw.text((right_x, 45), header_text, fill=(245, 197, 24, 255), font=header_font)
+        # Header: *Storyline / සාරාංශය:*
+        head_font = get_font(26, bold=True)
+        head_text = "*Storyline / සාරාංශය:*"
+        h_bbox = draw.textbbox((0, 0), head_text, font=head_font)
+        hw = h_bbox[2] - h_bbox[0]
+        draw.text((center_x - (hw // 2), 40), head_text, fill=(255, 255, 255, 255), font=head_font, stroke_width=2, stroke_fill=(0, 0, 0, 220))
 
-        # Accent line under header
-        draw.line([(right_x, 88), (right_x + 120, 88)], fill=(245, 197, 24, 255), width=3)
-
-        # Storyline text rendering
-        story_font = get_font(21, bold=False)
+        # Storyline Text: Multi-line, center-aligned, with stroke outline
+        story_font = get_font(21, bold=True)
         clean_story = storyline
-        if len(clean_story) > 360:
-            clean_story = clean_story[:360].rsplit(" ", 1)[0] + "..."
+        if len(clean_story) > 300:
+            clean_story = clean_story[:300].rsplit(" ", 1)[0] + "..."
 
-        lines = wrap_text_to_width(draw, clean_story, story_font, right_w)
+        max_text_w = right_w - 70
+        lines = wrap_text_to_width(draw, clean_story, story_font, max_text_w)
         display_lines = lines[:6]
         if len(lines) > 6 and not display_lines[-1].endswith("..."):
             display_lines[-1] = display_lines[-1].rstrip(". ") + "..."
 
-        curr_y = 108
-        line_height = 32
+        curr_y = 85
+        line_h = 32
         for line in display_lines:
-            draw.text((right_x + 1, curr_y + 1), line, fill=(0, 0, 0, 200), font=story_font)
-            draw.text((right_x, curr_y), line, fill=(235, 238, 245, 255), font=story_font)
-            curr_y += line_height
+            l_bbox = draw.textbbox((0, 0), line, font=story_font)
+            lw = l_bbox[2] - l_bbox[0]
+            lx = center_x - (lw // 2)
+            draw.text((lx, curr_y), line, fill=(255, 255, 255, 255), font=story_font, stroke_width=2, stroke_fill=(0, 0, 0, 220))
+            curr_y += line_h
 
-        # 4. Bottom Right Area: Requester Profile Picture (DP)
-        avatar_size = 144
-        dp_center_x = W - 140
-        dp_center_y = H - 150
-        dp_x = dp_center_x - (avatar_size // 2)
+        # 4. Requester Avatar (DP) centered in bottom right area (matching user's drawn white circle)
+        avatar_size = 200
+        dp_center_y = int(H * 0.70)  # ~504px
+        dp_x = center_x - (avatar_size // 2)
         dp_y = dp_center_y - (avatar_size // 2)
 
         # Drop shadow behind avatar
-        av_shadow = Image.new("RGBA", (avatar_size + 24, avatar_size + 24), (0, 0, 0, 0))
+        av_shadow = Image.new("RGBA", (avatar_size + 30, avatar_size + 30), (0, 0, 0, 0))
         as_draw = ImageDraw.Draw(av_shadow)
-        as_draw.ellipse((10, 10, avatar_size + 14, avatar_size + 14), fill=(0, 0, 0, 210))
-        av_shadow = av_shadow.filter(ImageFilter.GaussianBlur(10))
-        bg.paste(av_shadow, (dp_x - 12, dp_y - 12), av_shadow)
+        as_draw.ellipse((15, 15, avatar_size + 15, avatar_size + 15), fill=(0, 0, 0, 220))
+        av_shadow = av_shadow.filter(ImageFilter.GaussianBlur(12))
+        bg.paste(av_shadow, (dp_x - 15, dp_y - 15), av_shadow)
 
         # Smooth anti-aliased circular mask
         mask_scale = 2
@@ -204,8 +202,8 @@ def create_branded_poster(poster_path, avatar_path, requester_name, output_path,
             # Elegant VIP Cinema Default Avatar
             def_av = Image.new("RGBA", mask_dim, (18, 22, 32, 255))
             d_draw = ImageDraw.Draw(def_av)
-            d_draw.ellipse((8, 8, mask_dim[0]-8, mask_dim[1]-8), fill=(25, 30, 42, 255), outline=(245, 197, 24, 255), width=6)
-            vip_f = get_font(int(46 * mask_scale), bold=True)
+            d_draw.ellipse((8, 8, mask_dim[0]-8, mask_dim[1]-8), fill=(25, 30, 42, 255), outline=(245, 197, 24, 255), width=8)
+            vip_f = get_font(int(48 * mask_scale), bold=True)
             v_bbox = d_draw.textbbox((0, 0), "VIP", font=vip_f)
             vw = v_bbox[2] - v_bbox[0]
             vh = v_bbox[3] - v_bbox[1]
@@ -216,31 +214,26 @@ def create_branded_poster(poster_path, avatar_path, requester_name, output_path,
         # Double Ring Border (White outer + Gold inner)
         border_img = Image.new("RGBA", mask_dim, (0, 0, 0, 0))
         b_draw = ImageDraw.Draw(border_img)
-        b_draw.ellipse((0, 0, mask_dim[0]-1, mask_dim[1]-1), outline=(255, 255, 255, 255), width=8)
-        b_draw.ellipse((8, 8, mask_dim[0] - 9, mask_dim[1] - 9), outline=(245, 197, 24, 255), width=6)
+        b_draw.ellipse((0, 0, mask_dim[0]-1, mask_dim[1]-1), outline=(255, 255, 255, 255), width=10)
+        b_draw.ellipse((10, 10, mask_dim[0] - 11, mask_dim[1] - 11), outline=(245, 197, 24, 255), width=8)
         border_img = border_img.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
         bg.paste(border_img, (dp_x, dp_y), border_img)
 
-        # Requester Pill Badge
+        # Requester Pill Badge centered under avatar
         pill_font = get_font(15, bold=True)
         req_name = (requester_name or "VIP Member").strip()
-        if len(req_name) > 20:
-            req_name = req_name[:18] + ".."
+        if len(req_name) > 22:
+            req_name = req_name[:20] + ".."
         pill_text = f"REQUESTED BY: {req_name.upper()}"
         p_bbox = draw.textbbox((0, 0), pill_text, font=pill_font)
-        pw = p_bbox[2] - p_bbox[0] + 28
+        pw = p_bbox[2] - p_bbox[0] + 32
         ph = p_bbox[3] - p_bbox[1] + 16
 
-        pill_x = dp_center_x - (pw // 2)
+        pill_x = center_x - (pw // 2)
         pill_y = dp_y + avatar_size + 10
 
-        if pill_x + pw > W - 15:
-            pill_x = W - pw - 15
-        if pill_x < right_x:
-            pill_x = right_x
-
-        draw.rounded_rectangle([(pill_x, pill_y), (pill_x + pw, pill_y + ph)], radius=ph // 2, fill=(12, 14, 20, 240), outline=(245, 197, 24, 230), width=2)
-        draw.text((pill_x + 14, pill_y + 8), pill_text, fill=(255, 255, 255, 255), font=pill_font)
+        draw.rounded_rectangle([(pill_x, pill_y), (pill_x + pw, pill_y + ph)], radius=ph // 2, fill=(12, 14, 20, 240), outline=(245, 197, 24, 240), width=2)
+        draw.text((pill_x + 16, pill_y + 8), pill_text, fill=(255, 255, 255, 255), font=pill_font)
 
         # Convert to RGB and save
         final_img = bg.convert("RGB")

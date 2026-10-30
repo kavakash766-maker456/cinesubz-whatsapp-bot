@@ -434,8 +434,12 @@ def scrape_movie(url: str, log=sys.stderr.write):
     episodes = []
     seen_ep_urls = set()
     for a in root.find_all(tag="a"):
-        href = a.attrs.get("href", "").strip()
+        raw_href = a.attrs.get("href", "").strip()
         cls_name = str(a.attrs.get("class", ""))
+        if not raw_href or "#respond" in raw_href or "#comments" in raw_href:
+            continue
+        # Strip fragment and query for clean url matching
+        href = re.sub(r"[?#].*$", "", raw_href).strip()
         if not href or href in seen_ep_urls:
             continue
         is_ep = "episode-link" in cls_name or "/episodes/" in href or "episode" in cls_name
@@ -444,9 +448,13 @@ def scrape_movie(url: str, log=sys.stderr.write):
         if href.endswith("/episodes/") or href.endswith("/episodes"):
             continue
 
-        seen_ep_urls.add(href)
         ep_title_n = a.find(cls="ep-title")
         ep_title = ep_title_n.text().strip() if ep_title_n else a.text().strip()
+        # Filter out common false-positive buttons
+        if ep_title.lower() in ("cancel", "next", "prev", "previous", "reply", "next episode", "prev episode", "home"):
+            continue
+
+        seen_ep_urls.add(href)
 
         try:
             season = int(a.attrs.get("data-season") or 0)
@@ -543,26 +551,20 @@ def _resolve_one(drive_url: str):
     host = f"{parts.scheme}://{parts.netloc}"
     path = parts.path
 
-    jar = http.cookiejar.CookieJar()
-    op = _opener(jar)
-
-    def get(url, headers=None):
-        h = {"User-Agent": UA}
-        h.update(headers or {})
-        with op.open(urllib.request.Request(url, headers=h), timeout=TIMEOUT) as r:
-            return r.read()
+    sess = get_http_session()
 
     try:
-        get(host + path)
+        sess.get(host + path, timeout=12)
     except Exception:
         return []
 
     try:
-        data = json.loads(
-            get(
-                f"{host}/api/download-data{path}", {"Accept": "application/json"}
-            ).decode()
+        r_api = sess.get(
+            f"{host}/api/download-data{path}",
+            headers={"Accept": "application/json", "Referer": host + path},
+            timeout=12,
         )
+        data = r_api.json()
     except Exception:
         return []
     if not data.get("success"):
@@ -570,7 +572,8 @@ def _resolve_one(drive_url: str):
     target = host + data["redirect"]
 
     try:
-        page = get(target, {"Referer": host + "/"}).decode("utf-8", "replace")
+        r_page = sess.get(target, headers={"Referer": host + "/"}, timeout=12)
+        page = r_page.text
     except Exception:
         return []
     if "dl-links" not in page:
@@ -593,19 +596,17 @@ def _resolve_one(drive_url: str):
     found = []
     for hp in payloads:
         try:
-            req = urllib.request.Request(
+            r_post = sess.post(
                 target,
                 data=bytes.fromhex(hp),
-                method="POST",
                 headers={
-                    "User-Agent": UA,
                     "Content-Type": "application/octet-stream",
                     "Referer": target,
                     "Origin": host,
                 },
+                timeout=12,
             )
-            with op.open(req, timeout=12) as r:
-                raw = r.read()
+            raw = r_post.content
         except Exception:
             continue
         if raw[:1] == b"{":
@@ -617,7 +618,7 @@ def _resolve_one(drive_url: str):
         if final and final not in found:
             found.append(final)
             # Break early once we have found a high-speed direct file download link
-            if any("pixeldrain" in u or "kdrive" in u or "supercloud" in u for u in found):
+            if any(ext in final.lower() for ext in (".mp4", ".mkv", "pixeldrain", "kdrive", "supercloud", "cloudflarestorage", "aws4")):
                 break
     return found
 
@@ -1177,21 +1178,22 @@ def main():
             try:
                 ep_body, _, _ = http_get(args.url)
                 ep_html = ep_body.decode("utf-8", "replace")
-                m_parent = re.search(r'href=["\'](https?://cinesubz\.[^"\']*(?:tvshows|series)[^"\']*)["\']', ep_html, re.I)
-                if m_parent:
-                    p_url = m_parent.group(1).strip()
-                    if not p_url.endswith(("/tvshows/", "/series/", "/tvshows", "/series")):
-                        p_data = scrape_movie(p_url)
-                        if p_data.get("episodes"):
-                            out = {
-                                "success": True,
-                                "title": p_data["details"].get("title", "TV Series"),
-                                "poster": p_data["banner"].get("poster"),
-                                "backdrop": p_data["banner"].get("backdrop"),
-                                "episodes": p_data.get("episodes") or [],
-                            }
-                            print(json.dumps(out, ensure_ascii=False, indent=2))
-                            return
+                all_parents = re.findall(r'href=["\'](https?://cinesubz\.[^"\']*(?:tvshows|series)/[^/"\'\?]+/?)[^"\']*["\']', ep_html, re.I)
+                for p_cand in all_parents:
+                    p_url = p_cand.strip()
+                    if p_url.endswith(("/tvshows/", "/series/", "/tvshows", "/series", "/feed/", "/feed")):
+                        continue
+                    p_data = scrape_movie(p_url)
+                    if p_data.get("episodes"):
+                        out = {
+                            "success": True,
+                            "title": p_data["details"].get("title", "TV Series"),
+                            "poster": p_data["banner"].get("poster"),
+                            "backdrop": p_data["banner"].get("backdrop"),
+                            "episodes": p_data.get("episodes") or [],
+                        }
+                        print(json.dumps(out, ensure_ascii=False, indent=2))
+                        return
             except Exception:
                 pass
 
