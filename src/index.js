@@ -152,7 +152,7 @@ function extractMediaSlug(url, title = "") {
     const clean = lastPart
       .replace(/sinhala[-_\s]*subtitles?|sinhala[-_\s]*sub|සිංහල[-_\s]*උපසිරැසි.*/gi, "")
       .replace(/[-_]?(?:19\d\d|20\d\d)[-_]?/g, "")
-      .replace(/(?:tv[-_\s]*series|movie|s\d+e\d+|\d+x\d+)/gi, "")
+      .replace(/(?:tv[-_\s]*series|movie|s\d+[-_]?e\d+|\d+\s*[x×]\s*\d+|episode[-_\s]*\d+)/gi, "")
       .replace(/[^a-zA-Z0-9]/g, "")
       .toLowerCase()
       .trim();
@@ -162,7 +162,7 @@ function extractMediaSlug(url, title = "") {
     const clean = String(title)
       .replace(/sinhala[-_\s]*subtitles?|sinhala[-_\s]*sub|සිංහල[-_\s]*උපසිරැසි.*/gi, "")
       .replace(/[-_]?(?:19\d\d|20\d\d)[-_]?/g, "")
-      .replace(/(?:tv[-_\s]*series|movie|s\d+e\d+|\d+x\d+)/gi, "")
+      .replace(/(?:tv[-_\s]*series|movie|s\d+[-_]?e\d+|\d+\s*[x×]\s*\d+|episode[-_\s]*\d+)/gi, "")
       .replace(/[^a-zA-Z0-9]/g, "")
       .toLowerCase()
       .trim();
@@ -525,7 +525,9 @@ async function getTmdbMediaDetails(title, isTv = false, year = null) {
       .replace(/\[.*?\]|\(.*?\)/g, " ")
       .replace(/sinhala\s*subtitles?|sinhala\s*sub|සිංහල\s*උපසිරැසි.*/gi, " ")
       .replace(/\|.*$/g, " ")
-      .replace(/\b(tv\s*series|series|complete|incomplete|season\s*\d+|s\d+(?:-\d+)?|ep\d+(?:-\d+)?)\b/gi, " ")
+      .replace(/[:\s]+(?:\d+\s*[x×]\s*\d+|s\d+\s*e\d+|ep(?:isode)?\s*\d+)\b.*/gi, " ")
+      .replace(/\b\d+\s*[x×]\s*\d+\b/gi, " ")
+      .replace(/\b(tv\s*series|series|complete|incomplete|season\s*\d+|s\d+(?:-\d+)?|ep(?:isode)?\s*\d+)\b/gi, " ")
       .replace(/\b(1080p|720p|480p|360p|2160p|4k|web-dl|bluray|hdrip|dvdrip|x264|x265|hevc|aac)\b/gi, " ")
       .replace(/[-_.]+/g, " ")
       .trim();
@@ -1040,7 +1042,14 @@ async function processQueue() {
     // ----------------------------------------------------------------------
     if (isSeriesSeason) {
       await waSocket.sendMessage(replyTarget, {
-        text: `🎬 *FILMFEED CINEMA • TV SERIES DESK*\n──────────────────────\nගරු *${pushName}*, ඔබ ඉල්ලූ *Season ${seasonNumber}* කතා මාලාව සැකසීම ආරම්භ විය.\nසියලුම Episodes එකින් එක පිළිවෙළින් Group එක වෙත Upload කෙරේ. 🍿\n──────────────────────`,
+        text:
+`📺 *FILMFEED CINEMA • TV SERIES DISPATCH*
+━━━━━━━━━━━━━━━━━━━━
+👤 *Requester:* ${pushName} (${mentionTag}) [${badge}]
+📦 *Series:* Season ${seasonNumber} Pack
+⚡ *Status:* Initializing episode queue. Episodes will broadcast sequentially to the group.
+━━━━━━━━━━━━━━━━━━━━
+🎬 *FilmFeed 4K Cinema Engine*`,
         mentions: mentionsList,
         contextInfo: getMetaAiContext(mentionsList),
       });
@@ -1071,7 +1080,13 @@ async function processQueue() {
 
       if (episodes.length === 0) {
         await waSocket.sendMessage(replyTarget, {
-          text: `⚠️ *FILMFEED CINEMA • SYSTEM NOTICE*\n──────────────────────\nසමාවන්න, Season ${seasonNumber} සඳහා Episodes සබැඳි සොයාගත නොහැකි විය.\nකරුණාකර නිවැරදි Season අංකය සමඟ නැවත උත්සාහ කරන්න.\n──────────────────────`,
+          text:
+`⚠️ *FILMFEED CINEMA • SYSTEM NOTICE*
+━━━━━━━━━━━━━━━━━━━━
+📌 *Notice:* Season ${seasonNumber} episodes could not be indexed.
+💡 Please verify the season number and request again via our portal.
+━━━━━━━━━━━━━━━━━━━━
+🎬 *FilmFeed 4K Cinema Engine*`,
           mentions: mentionsList,
           contextInfo: getMetaAiContext(mentionsList),
         });
@@ -1241,15 +1256,17 @@ ${getPromoFooter()}`,
       // Final Season Completion Notification
       await waSocket.sendMessage(replyTarget, {
         text: 
-`🎉 *[FilmFeed TV Series]* සම්පූර්ණයි!
+`🎬 *FILMFEED CINEMA • SERIES PACK COMPLETE*
 ━━━━━━━━━━━━━━━━━━━━
-👤 *සාමාජිකයා:* ${pushName} [${badge}]
+👤 *Requester:* ${pushName} (${mentionTag}) [${badge}]
 📺 *Series:* *${showTitle}* (Season ${seasonNumber})
-📦 *Episodes:* ${uploadedCount}/${totalEpisodes} සාර්ථකව Upload කරන ලදී
-⚡ *තත්ත්වය:* Broadcast Complete
+📦 *Episodes:* ${uploadedCount}/${totalEpisodes} Delivered
+⚡ *Status:* Broadcast Complete
+
+🍿 *Available in your official FilmFeed group.*
+👉 Website: https://web-umber-six-e1un7z6257.vercel.app
 ━━━━━━━━━━━━━━━━━━━━
-🍿 FilmFeed Group එකෙන් දැන්ම නරඹන්න!
-👉 Website: https://filmfeed-website.vercel.app`,
+🎬 *FilmFeed 4K Cinema Engine*`,
         mentions: mentionsList,
         contextInfo: getMetaAiContext(mentionsList),
       });
@@ -1262,13 +1279,14 @@ ${getPromoFooter()}`,
 
       const initialQueueMsg = await waSocket.sendMessage(replyTarget, {
         text: 
-`🎬 *FILMFEED CINEMA • PROCESSING*
-──────────────────────
-• Title / Query: *${movieUrl.split("/").filter(Boolean).pop().replace(/[-_]/g, " ")}*
-• Requester: *${pushName}* (${mentionTag})
-• Quality: *${quality}*
-──────────────────────
-චිත්‍රපටය බාගත කිරීම ආරම්භ විය. සුළු මොහොතකින් Group එක වෙත Upload කෙරේ.`,
+`🚀 *FILMFEED CINEMA • INITIALIZING DISPATCH*
+━━━━━━━━━━━━━━━━━━━━
+👤 *Requester:* ${pushName} (${mentionTag}) [${badge}]
+📦 *Release:* *${movieUrl.split("/").filter(Boolean).pop().replace(/[-_]/g, " ")}*
+🌟 *Format:* ${quality} • High-Speed Stream
+⚡ *Status:* Secure resolver active. Starting download...
+━━━━━━━━━━━━━━━━━━━━
+🎬 *FilmFeed 4K Cinema Engine*`,
         mentions: mentionsList,
         contextInfo: getMetaAiContext(mentionsList),
       });
@@ -1278,7 +1296,13 @@ ${getPromoFooter()}`,
 
       if (!movieData.success || !movieData.direct_url) {
         await waSocket.sendMessage(replyTarget, {
-          text: `⚠️ *FILMFEED CINEMA • SYSTEM NOTICE*\n──────────────────────\nසමාවන්න, අදාළ චිත්‍රපට සබැඳිය ලබාගැනීමට නොහැකි විය: ${movieData.error || "Link resolution error"}\nකරුණාකර වෙනත් සබැඳියක් හෝ Quality එකක් සමඟ උත්සාහ කරන්න.\n──────────────────────`,
+          text: 
+`⚠️ *FILMFEED CINEMA • RESOLUTION NOTICE*
+━━━━━━━━━━━━━━━━━━━━
+📌 *Notice:* Link resolution encountered an issue: ${movieData.error || "Media stream unavailable"}
+💡 *Action:* Please verify the link or select an alternate quality via our web portal.
+━━━━━━━━━━━━━━━━━━━━
+🎬 *FilmFeed 4K Cinema Engine*`,
           mentions: mentionsList,
           contextInfo: getMetaAiContext(mentionsList),
         });
@@ -1309,18 +1333,17 @@ ${getPromoFooter()}`,
         logger.warn(`Movie ${title} size (${sizeInGB}) exceeds 2GB limit! Skipping download.`);
 
         const sizeAlertMsg = 
-`⚠️ *[FilmFeed Auto-Bot] ගොනු විශාලත්ව සීමාව (2GB Limit)*
+`⚠️ *FILMFEED CINEMA • FILE SIZE LIMIT EXCEEDED*
 ━━━━━━━━━━━━━━━━━━━━
-ආයුබෝවන් *${pushName}*,
-ඔබ ඉල්ලූ *${title}* (${resolvedQuality}) චිත්‍රපටයේ ගොනු ප්‍රමාණය: *${sizeInGB}* කි.
+👤 *Requester:* ${pushName} (${mentionTag}) [${badge}]
+📌 *Release:* *${title}* (${resolvedQuality})
+📊 *Detected Size:* ${sizeInGB} (Safe Limit: 1.95 GB)
 
-📌 *WhatsApp නීති රීති අනුව:*
-WhatsApp මඟින් Document එකක් ලෙස එකවර යැවිය හැක්කේ උපරිම *1.95 GB* දක්වා ගොනු පමණි.
-
-💡 *විසඳුම:*
-කරුණාකර වෙබ් අඩවියෙන් *720p* හෝ *480p* Quality එක (2GB ට අඩු) තෝරා නැවත Request කරන්න:
-👉 https://filmfeed-website.vercel.app
-━━━━━━━━━━━━━━━━━━━━`;
+WhatsApp document specifications enforce a 2GB maximum transfer limit.
+💡 *Recommendation:* Please select 720p or 480p format from the portal:
+👉 https://web-umber-six-e1un7z6257.vercel.app
+━━━━━━━━━━━━━━━━━━━━
+🎬 *FilmFeed 4K Cinema Engine*`;
 
         await waSocket.sendMessage(replyTarget, {
           text: sizeAlertMsg,
@@ -1335,13 +1358,12 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
       try {
         liveStatusMsg = await waSocket.sendMessage(replyTarget, {
           text: 
-`🎬 *[FilmFeed Downloader]*
+`⚡ *FILMFEED CINEMA • STREAMING IN PROGRESS*
 ━━━━━━━━━━━━━━━━━━━━
-📌 *චිත්‍රපටය:* *${title}* (${resolvedQuality})
-👤 *Requested By:* ${pushName} [${badge}]
-⏳ *තත්ත්වය:* බාගත කිරීම ආරම්භ විය...
-📥 *Download Progress:* 0%
-⚡ *Server:* High-Speed Ultra Stream
+📌 *Release:* *${title}* (${resolvedQuality})
+👤 *Requester:* ${pushName} [${badge}]
+📥 *Progress:* Initializing high-speed pipeline...
+⚡ *Engine:* Ultra High-Speed CDN
 ━━━━━━━━━━━━━━━━━━━━`,
           mentions: mentionsList,
           contextInfo: getMetaAiContext(mentionsList),
@@ -1382,13 +1404,12 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
             if (liveStatusMsg?.key) {
               waSocket.sendMessage(replyTarget, {
                 text: 
-`🎬 *[FilmFeed Downloader]*
+`⚡ *FILMFEED CINEMA • STREAMING IN PROGRESS*
 ━━━━━━━━━━━━━━━━━━━━
-📌 *චිත්‍රපටය:* *${title}* (${resolvedQuality})
-👤 *Requested By:* ${pushName} [${badge}]
-⏳ *තත්ත්වය:* Telegram හරහා බාගත වෙමින් පවතී...
-📥 *Download Progress:* ${percent}% (${dMB}MB / ${tMB}MB)
-⚡ *Speed:* ${speedText} (MTProto Secure Stream)
+📌 *Release:* *${title}* (${resolvedQuality})
+👤 *Requester:* ${pushName} [${badge}]
+📥 *Progress:* ${percent}% (${dMB}MB / ${tMB}MB)
+⚡ *Transfer Rate:* ${speedText} (MTProto Secure Pipeline)
 ━━━━━━━━━━━━━━━━━━━━`,
                 edit: liveStatusMsg.key,
                 contextInfo: getMetaAiContext(mentionsList),
@@ -1412,13 +1433,12 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
             if (liveStatusMsg?.key) {
               waSocket.sendMessage(replyTarget, {
                 text: 
-`🎬 *[FilmFeed Downloader]*
+`⚡ *FILMFEED CINEMA • STREAMING IN PROGRESS*
 ━━━━━━━━━━━━━━━━━━━━
-📌 *චිත්‍රපටය:* *${title}* (${resolvedQuality})
-👤 *Requested By:* ${pushName} [${badge}]
-⏳ *තත්ත්වය:* බාගත වෙමින් පවතී...
-📥 *Download Progress:* ${percent}% (${dMB}MB / ${tMB}MB)
-⚡ *Speed:* ${speedText} (8x Multi-Stream)
+📌 *Release:* *${title}* (${resolvedQuality})
+👤 *Requester:* ${pushName} [${badge}]
+📥 *Progress:* ${percent}% (${dMB}MB / ${tMB}MB)
+⚡ *Transfer Rate:* ${speedText} (Multi-Stream Pipeline)
 ━━━━━━━━━━━━━━━━━━━━`,
                 edit: liveStatusMsg.key,
                 contextInfo: getMetaAiContext(mentionsList),
@@ -1595,7 +1615,7 @@ ${getPromoFooter()}`,
 📜 *Member History (${updatedStats.count}):*${historyText}
 ━━━━━━━━━━━━━━━━━━━━
 🍿 _The movie is now available in your official FilmFeed group._
-👉 Website: https://filmfeed-website.vercel.app`,
+👉 Website: https://web-umber-six-e1un7z6257.vercel.app`,
         mentions: mentionsList,
         contextInfo: getMetaAiContext(mentionsList),
       });

@@ -7,12 +7,14 @@ Resolves movie metadata, poster, and high-speed direct download link.
 import argparse
 import base64
 import hashlib
+import html
 import http.cookiejar
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -256,7 +258,6 @@ def get_http_session():
 def http_get(url, opener=None, headers=None, timeout=TIMEOUT):
     # Normalize cinesubz.net / cinesubz.co to cinesubz.lk for fast direct access
     clean_url = re.sub(r"https?://(www\.)?cinesubz\.(net|co)/", "https://cinesubz.lk/", url)
-    import time
     sess = get_http_session()
     h = {}
     if headers:
@@ -321,8 +322,7 @@ def http_get_noredirect(url, timeout=TIMEOUT):
 def clean_page_title(raw: str) -> str:
     if not raw:
         return ""
-    import html as html_mod
-    title = html_mod.unescape(raw).strip()
+    title = html.unescape(raw).strip()
     # Strip site branding suffix e.g. " - CineSubz.lk", " | CineSubz", " - CineSubz"
     title = re.sub(r"\s*[-|–—•]\s*CineSubz(?:\.(?:lk|net|co|com|org))?\b.*$", "", title, flags=re.I).strip()
     # Strip site branding prefix e.g. "CineSubz.lk - "
@@ -1148,7 +1148,6 @@ def main():
 
     # Direct Google Drive downloader using gdown
     if args.download_output:
-        import re, os
         file_id = None
         folder_id = None
         g_res = {}
@@ -1213,7 +1212,6 @@ def main():
                 except Exception:
                     pass
 
-                import urllib.request
                 req = urllib.request.Request(g_res["direct_url"], headers={"User-Agent": UA})
                 with urllib.request.urlopen(req, timeout=120) as resp, open(args.download_output, "wb") as out_f:
                     while True:
@@ -1257,10 +1255,14 @@ def main():
             try:
                 ep_body, _, _ = http_get(args.url)
                 ep_html = ep_body.decode("utf-8", "replace")
-                all_parents = re.findall(r'href=["\'](https?://cinesubz\.[^"\']*(?:tvshows|series)/[^/"\'\?]+/?)[^"\']*["\']', ep_html, re.I)
+                all_parents = re.findall(
+                    r'href=["\']((?:https?://[^"\']*)?/(?:tvshows|series)/[^/"\'\?]+/?)[^"\']*["\']',
+                    ep_html,
+                    re.I,
+                )
                 for p_cand in all_parents:
-                    p_url = p_cand.strip()
-                    if p_url.endswith(("/tvshows/", "/series/", "/tvshows", "/series", "/feed/", "/feed")):
+                    p_url = urllib.parse.urljoin(args.url, p_cand.strip())
+                    if p_url.rstrip("/").endswith(("/tvshows", "/series", "/feed")):
                         continue
                     p_data = scrape_movie(p_url)
                     if p_data.get("episodes"):
@@ -1278,6 +1280,31 @@ def main():
                         }
                         print(json.dumps(out, ensure_ascii=False, indent=2))
                         return
+            except Exception:
+                pass
+
+            # Fallback: derive series slug directly from episode URL
+            try:
+                ep_slug = args.url.rstrip("/").split("/")[-1]
+                s_slug = re.sub(r"[-_](?:s?\d+[-_]?e\d+|\d+x\d+|episode[-_]?\d+).*", "", ep_slug, flags=re.I)
+                if s_slug and s_slug != ep_slug:
+                    for cand_slug in (f"{s_slug}-tv-series", s_slug):
+                        cand_url = f"https://cinesubz.lk/tvshows/{cand_slug}/"
+                        try:
+                            cand_data = scrape_movie(cand_url)
+                            if cand_data.get("episodes"):
+                                c_title = cand_data["details"].get("title") or s_slug.replace("-", " ").title()
+                                out = {
+                                    "success": True,
+                                    "title": c_title,
+                                    "poster": cand_data["banner"].get("poster"),
+                                    "backdrop": cand_data["banner"].get("backdrop") or cand_data["banner"].get("poster"),
+                                    "episodes": cand_data.get("episodes") or [],
+                                }
+                                print(json.dumps(out, ensure_ascii=False, indent=2))
+                                return
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
@@ -1339,7 +1366,6 @@ def main():
         try:
             from gdrive_resolver import resolve_gdrive_movie
         except ImportError:
-            import os, sys
             sys.path.insert(0, os.path.dirname(__file__))
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
             from gdrive_resolver import resolve_gdrive_movie
