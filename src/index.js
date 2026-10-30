@@ -724,8 +724,9 @@ async function getPosterThumbnail(posterSource, thumbnailB64 = null) {
       return null;
     }
 
+    const pythonCmd = process.platform === "win32" ? "python" : "python3";
     await new Promise((resolve, reject) => {
-      execFile("python", [POSTER_STYLER_SCRIPT, "thumb", tempInPath, tempOutPath], (err) => {
+      execFile(pythonCmd, [POSTER_STYLER_SCRIPT, "thumb", tempInPath, tempOutPath], (err) => {
         if (err) return reject(err);
         resolve();
       });
@@ -845,9 +846,10 @@ async function createPosterWithRequesterAvatar(
     const storyArg = fs.existsSync(tempStoryPath) ? tempStoryPath : "NONE";
     const backdropArg = hasBackdrop ? tempBackdropPath : "NONE";
 
+    const pythonCmd = process.platform === "win32" ? "python" : "python3";
     await new Promise((resolve, reject) => {
       execFile(
-        "python",
+        pythonCmd,
         [POSTER_STYLER_SCRIPT, "brand", tempPosterPath, avatarArg, cleanName, tempOutPath, storyArg, backdropArg],
         (err) => {
           if (err) return reject(err);
@@ -1295,6 +1297,13 @@ ${getPromoFooter()}`,
       const movieData = await resolveMovie(movieUrl, quality);
 
       if (!movieData.success || !movieData.direct_url) {
+        try {
+          const stats = getUserStats();
+          if (stats[senderPhone]?.requestedUrls) {
+            stats[senderPhone].requestedUrls = stats[senderPhone].requestedUrls.filter((u) => u !== cleanUrl);
+            saveUserStats(stats);
+          }
+        } catch (_) {}
         await waSocket.sendMessage(replyTarget, {
           text: 
 `⚠️ *FILMFEED CINEMA • RESOLUTION NOTICE*
@@ -1717,8 +1726,16 @@ function attachMessageEvents(sock) {
         const mentionsList = requesterJid ? [requesterJid] : [];
 
         // Admin check: true if sender phone matches BOT_PHONE, known admin numbers, or sent by bot itself
-        const adminNumbers = ["94760372547", "94787732040", "94782088603"];
-        const isAdmin = fromMe || (cleanPhone && adminNumbers.includes(cleanPhone));
+        const adminNumbers = ["94760372547", "94787732040", "94782088603", "47485846290620"];
+        const cleanSenderId = senderPhone ? senderPhone.split("@")[0].split(":")[0] : "";
+        const cleanLid = requesterLid ? requesterLid.split("@")[0].split(":")[0] : "";
+        const cleanJid = requesterJid ? requesterJid.split("@")[0].split(":")[0] : "";
+        const isAdmin =
+          fromMe ||
+          (cleanPhone && adminNumbers.includes(cleanPhone)) ||
+          adminNumbers.includes(cleanSenderId) ||
+          adminNumbers.includes(cleanLid) ||
+          adminNumbers.includes(cleanJid);
 
         // ------------------------------------------------------------------
         // Check for Group Join Verification Command: !done / done / verify

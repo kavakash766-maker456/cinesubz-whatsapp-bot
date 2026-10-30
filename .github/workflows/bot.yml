@@ -41,7 +41,8 @@ jobs:
 
       - name: Verify System Dependencies
         run: |
-          ffmpeg -version | head -n 1 || (sudo apt-get update -qq && sudo apt-get install -y ffmpeg)
+          sudo apt-get update -qq && sudo apt-get install -y ffmpeg fonts-noto-core fonts-noto-extra fonts-dejavu fonts-freefont-ttf
+          ffmpeg -version | head -n 1
           openssl version
 
       - name: Install Python Packages
