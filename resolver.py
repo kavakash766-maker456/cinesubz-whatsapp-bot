@@ -605,6 +605,12 @@ def map_zt_href(original: str, zt_html: str) -> str:
 
 
 def get_drive_url(zt_url: str):
+    if not zt_url:
+        return {"kind": "error", "url": None, "reason": "empty zt_url"}
+    if re.match(r"https?://(www\.)?(telegram\.me|t\.me)/", zt_url):
+        return {"kind": "telegram", "url": zt_url, "original": zt_url, "parent_url": None}
+    if any(k in zt_url.lower() for k in ("pixeldrain.com", "drive.google.com", "cloudflarestorage.com", ".mp4", ".mkv")):
+        return {"kind": "direct", "url": zt_url, "urls": [zt_url], "original": zt_url, "parent_url": None}
     body, _, _ = http_get(zt_url)
     html = body.decode("utf-8", "replace")
     m = re.search(r'<a[^>]+id=["\']link["\'][^>]+href=["\']([^"\']+)["\']', html) or re.search(r'<a[^>]+href=["\']([^"\']+)["\'][^>]+id=["\']link["\']', html) or re.search(r'<a id="link" href="([^"]+)"', html)
@@ -627,6 +633,13 @@ def get_drive_url(zt_url: str):
 
 
 def _resolve_one(drive_url: str):
+    if not drive_url:
+        return []
+    m_px = re.search(r"pixeldrain\.com/(?:u|api/file)/([a-zA-Z0-9_-]+)", drive_url)
+    if m_px:
+        return [f"https://pixeldrain.com/api/file/{m_px.group(1)}?download"]
+    if any(k in drive_url.lower() for k in (".mp4", ".mkv", ".avi", ".zip", "cloudflarestorage.com", "supercloud", "kdrive", "workers.dev", "drive.google.com")):
+        return [drive_url]
     parts = urllib.parse.urlsplit(drive_url)
     host = f"{parts.scheme}://{parts.netloc}"
     path = parts.path
@@ -1084,6 +1097,10 @@ def resolve_direct_link(
                 for c in candidates
                 if not re.match(r"https?://(www\.)?(telegram\.me|t\.me)/", c)
             ]
+            if not file_urls and got.get("url"):
+                u_direct = got["url"]
+                if any(ext in u_direct.lower() for ext in (".mp4", ".mkv", ".avi", "pixeldrain.com", "cloudflarestorage.com", "supercloud", "kdrive", "drive.google.com")):
+                    file_urls = [u_direct]
             if file_urls:
                 thumb = make_thumbnail_b64(movie["banner"].get("backdrop") or movie["banner"].get("poster") or movie["details"].get("poster", ""))
                 return {
