@@ -243,8 +243,12 @@ HTTP_SESSION = None
 def get_http_session():
     global HTTP_SESSION
     if HTTP_SESSION is None:
-        import requests
-        HTTP_SESSION = requests.Session()
+        try:
+            from curl_cffi import requests as c_requests
+            HTTP_SESSION = c_requests.Session(impersonate="chrome124")
+        except Exception:
+            import requests
+            HTTP_SESSION = requests.Session()
         HTTP_SESSION.headers.update({
             "User-Agent": UA,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -645,8 +649,12 @@ def _resolve_one(drive_url: str):
     host = f"{parts.scheme}://{parts.netloc}"
     path = parts.path
 
-    import requests
-    sess = requests.Session()
+    try:
+        from curl_cffi import requests as c_requests
+        sess = c_requests.Session(impersonate="chrome124")
+    except Exception:
+        import requests
+        sess = requests.Session()
     sess.headers.update({
         "User-Agent": UA,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",

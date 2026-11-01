@@ -1035,6 +1035,16 @@ ${getPromoFooter()}`,
         }
       }
 
+      if (uploadedCount === 0) {
+        logger.warn(`No episodes were successfully uploaded for ${showTitle} Season ${seasonNumber}. Skipping poll and broadcast.`);
+        await waSocket.sendMessage(replyTarget, {
+          text: `❌ *[FilmFeed TV Series]* Season ${seasonNumber} හි කිසිදු Episode එකක් බාගත කිරීමට හෝ Upload කිරීමට නොහැකි විය.\nකරුණාකර සුළු වේලාවකින් නැවත උත්සාහ කරන්න හෝ වෙනත් Quality එකක් තෝරන්න.`,
+          mentions: mentionsList,
+          contextInfo: getMetaAiContext(mentionsList),
+        });
+        return;
+      }
+
       // Send Interactive Poll after ALL episodes are uploaded
       try {
         await broadcastToGroups({

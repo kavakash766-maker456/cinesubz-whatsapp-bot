@@ -21,7 +21,12 @@ UA = (
 )
 FINAL_LINK_RE = re.compile(r"var\s+zluFinalLink\s*=\s*['\"](.*?)['\"]\s*;")
 
-session = requests.Session()
+try:
+    from curl_cffi import requests as c_requests
+    session = c_requests.Session(impersonate="chrome124")
+except Exception:
+    import requests
+    session = requests.Session()
 session.headers.update({
     "User-Agent": UA,
     "Accept-Language": "en-US,en;q=0.9",
@@ -144,21 +149,22 @@ def resolve_sinhalasub_movie(movie_url: str, requested_quality: str = None) -> d
 
     # Find download links
     link_rows = []
-    for table in soup.select("#links table.links-table"):
+    for table in soup.select("table.links-table, table.zm-links-table, #links table"):
         server = (table.get("id") or "").strip()
-        for tr in table.select("tbody tr"):
-            a = tr.select_one("td .link-opt a[href]")
+        for tr in table.select("tr"):
+            a = tr.select_one("a.zm-dl-btn[href], a[href*='/links/'], td .link-opt a[href]")
             if not a:
                 continue
             short_url = urllib.parse.urljoin(BASE, a["href"].strip())
-            q_cell = tr.select_one("td span.quality") or (tr.select("td")[1] if len(tr.select("td")) > 1 else None)
+            q_cell = tr.select_one(".zm-q, span.quality, .quality") or (tr.select("td")[1] if len(tr.select("td")) > 1 else None)
             quality = q_cell.get_text(" ", strip=True) if q_cell else "720p"
-            size_cell = tr.select("td")[-1].get_text(" ", strip=True) if tr.select("td") else ""
+            size_cell = tr.select_one(".zm-m-size, .size") or (tr.select("td")[-1] if len(tr.select("td")) > 2 else None)
+            size_label = size_cell.get_text(" ", strip=True) if size_cell else ""
             
             link_rows.append({
                 "short_url": short_url,
                 "quality": quality,
-                "size_label": size_cell,
+                "size_label": size_label,
                 "server": server
             })
             
