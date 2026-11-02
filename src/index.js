@@ -790,6 +790,8 @@ async function downloadFile(url, destPath, onProgress) {
           headers: {
             "User-Agent":
               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept-Encoding": "identity",
+            Accept: "*/*",
           },
           timeout: 7200000,
         })
@@ -1006,12 +1008,11 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
             seasonPosterSent = true;
           }
 
-          const fileBuffer = fs.readFileSync(tempFilePath);
           const epThumbnail = await getPosterThumbnail(posterUrl || epData.poster || epData.backdrop, epData.thumbnail_b64);
 
-          // Upload Episode Document to All Target Groups
+          // Upload Episode Document to All Target Groups (streaming directly from disk to prevent OOM)
           await broadcastToGroups({
-            document: fileBuffer,
+            document: { url: tempFilePath },
             mimetype: "video/mp4",
             fileName: `${epTitle} [${resolvedQuality}] [FilmFeed].mp4`,
             caption: 
@@ -1336,13 +1337,12 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
         });
       }
 
-      // 4. Upload Document to all groups with Movie Poster Thumbnail & Meta AI Styling
+      // 4. Upload Document to all groups with Movie Poster Thumbnail & Meta AI Styling (streaming directly from disk)
       logger.info(`Uploading ${finalSizeMB}MB document to WhatsApp groups...`);
-      const fileBuffer = fs.readFileSync(tempFilePath);
       const thumbBuffer = await getPosterThumbnail(posterUrl || effectivePoster, movieData?.thumbnail_b64);
       
       await broadcastToGroups({
-        document: fileBuffer,
+        document: { url: tempFilePath },
         mimetype: "video/mp4",
         fileName: `${title} [${resolvedQuality}] [FilmFeed].mp4`,
         caption: 

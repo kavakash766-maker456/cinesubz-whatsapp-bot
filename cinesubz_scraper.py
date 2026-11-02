@@ -593,7 +593,11 @@ class CineSubzScraper:
 
         # Resolve through csplayer intermediate download page
         direct = self._resolve_csplayer(mapped_url)
-        return direct or mapped_url
+        if direct:
+            return direct
+        if "csplayer" in mapped_url.lower():
+            return None
+        return mapped_url
 
     def _map_zt_href(self, original, zt_html):
         """Apply search/replace mappings found in the zt page's JavaScript."""
@@ -622,9 +626,9 @@ class CineSubzScraper:
         path = parts.path
         sess = _get_session()
 
-        # Session warmup
+        # Session warmup - lightweight ping to establish cookies without buffering full media
         try:
-            sess.get(host + path, timeout=12)
+            sess.get(f"{host}/", headers={"Referer": "https://cinesubz.lk/"}, timeout=6)
         except Exception:
             pass
 
@@ -746,9 +750,12 @@ class CineSubzScraper:
         return details
 
     def _filter_by_quality(self, movie_data, quality):
-        q = quality.lower()
+        q = quality.lower().strip()
+        q_num = q.rstrip("p")
         for d in movie_data.get("downloads", []):
-            if q in (d.get("quality") or "").lower() or q in (d.get("meta") or "").lower():
+            dq = (d.get("quality") or "").lower()
+            meta = (d.get("meta") or "").lower()
+            if q in dq or q in meta or (q_num and (q_num in dq or q_num in meta)):
                 if not d.get("direct_url"):
                     d["direct_url"] = self.resolve_download_link(d["zt_url"])
                 movie_data["preferred_download"] = d

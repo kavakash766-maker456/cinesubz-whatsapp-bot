@@ -20,6 +20,11 @@ import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 
+# Ensure bot directory is in sys.path for local module imports
+_BOT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _BOT_DIR not in sys.path:
+    sys.path.insert(0, _BOT_DIR)
+
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -872,66 +877,78 @@ def resolve_baiscopes_movie(movie_url: str, requested_quality: str = None):
 
 def resolve_cinesubz_with_scraper(movie_url: str, requested_quality: str = None):
     """Primary high-speed resolver powered by CineSubzScraper."""
-    try:
-        from cinesubz_scraper import CineSubzScraper
-        scraper = CineSubzScraper()
+    for attempt in range(1, 3):
+        try:
+            from cinesubz_scraper import CineSubzScraper
+            scraper = CineSubzScraper()
 
-        # Handle direct intermediate zt-links / api links
-        if any(k in movie_url for k in ("/zt-links/", "/api-", "/zt-")):
-            direct = scraper.resolve_download_link(movie_url)
-            if direct:
-                return {
-                    "success": True,
-                    "title": "Movie Download",
-                    "poster": "",
-                    "backdrop": "",
-                    "thumbnail_b64": "",
-                    "description": "",
-                    "quality": requested_quality or "720p",
-                    "size_text": "",
-                    "direct_url": direct,
-                    "is_telegram": "telegram" in direct.lower() or "t.me" in direct.lower(),
-                }
+            # Handle direct intermediate zt-links / api links
+            if any(k in movie_url for k in ("/zt-links/", "/api-", "/zt-")):
+                direct = scraper.resolve_download_link(movie_url)
+                if direct:
+                    return {
+                        "success": True,
+                        "title": "Movie Download",
+                        "poster": "",
+                        "backdrop": "",
+                        "thumbnail_b64": "",
+                        "description": "",
+                        "quality": requested_quality or "720p",
+                        "size_text": "",
+                        "direct_url": direct,
+                        "is_telegram": "telegram" in direct.lower() or "t.me" in direct.lower(),
+                    }
 
-        # Handle movie / episode pages
-        movie = scraper.get_movie(movie_url, resolve_downloads=False)
-        downloads = movie.get("downloads") or []
-        if not downloads:
-            return None
+            # Handle movie / episode pages
+            movie = scraper.get_movie(movie_url, resolve_downloads=False)
+            downloads = movie.get("downloads") or []
+            if not downloads:
+                if attempt < 2:
+                    time.sleep(1.0)
+                    continue
+                return None
 
-        # Prioritize requested quality
-        ordered = []
-        if requested_quality:
-            rq = requested_quality.lower()
+            # Prioritize requested quality
+            ordered = []
+            if requested_quality:
+                rq = requested_quality.lower().strip()
+                rq_num = rq.rstrip("p")
+                for d in downloads:
+                    meta = (d.get("meta") or "").lower()
+                    q = (d.get("quality") or "").lower()
+                    lbl = (d.get("label") or "").lower()
+                    if (
+                        rq in meta
+                        or rq in q
+                        or rq in lbl
+                        or (rq_num and (rq_num in meta or rq_num in q or rq_num in lbl))
+                    ):
+                        ordered.append(d)
             for d in downloads:
-                meta = (d.get("meta") or "").lower()
-                q = (d.get("quality") or "").lower()
-                lbl = (d.get("label") or "").lower()
-                if rq in meta or rq in q or rq in lbl:
+                if d not in ordered:
                     ordered.append(d)
-        for d in downloads:
-            if d not in ordered:
-                ordered.append(d)
 
-        for entry in ordered:
-            direct = scraper.resolve_download_link(entry.get("zt_url"))
-            if direct:
-                thumb = make_thumbnail_b64(movie.get("backdrop") or movie.get("poster") or "")
-                return {
-                    "success": True,
-                    "title": movie.get("title") or "Movie",
-                    "year": movie.get("year"),
-                    "poster": movie.get("poster", ""),
-                    "backdrop": movie.get("backdrop") or movie.get("poster", ""),
-                    "thumbnail_b64": thumb,
-                    "description": movie.get("description", ""),
-                    "quality": entry.get("quality") or requested_quality or "720p",
-                    "size_text": entry.get("size_text", ""),
-                    "direct_url": direct,
-                    "is_telegram": "telegram" in direct.lower() or "t.me" in direct.lower(),
-                }
-    except Exception:
-        pass
+            for entry in ordered:
+                direct = scraper.resolve_download_link(entry.get("zt_url"))
+                if direct:
+                    thumb = make_thumbnail_b64(movie.get("backdrop") or movie.get("poster") or "")
+                    return {
+                        "success": True,
+                        "title": movie.get("title") or "Movie",
+                        "year": movie.get("year"),
+                        "poster": movie.get("poster", ""),
+                        "backdrop": movie.get("backdrop") or movie.get("poster", ""),
+                        "thumbnail_b64": thumb,
+                        "description": movie.get("description", ""),
+                        "quality": entry.get("quality") or requested_quality or "720p",
+                        "size_text": entry.get("size_text", ""),
+                        "direct_url": direct,
+                        "is_telegram": "telegram" in direct.lower() or "t.me" in direct.lower(),
+                    }
+        except Exception:
+            if attempt < 2:
+                time.sleep(1.0)
+                continue
     return None
 
 
@@ -1109,12 +1126,18 @@ def resolve_direct_link(
         return {"error": "No download links found on CineSubz movie page", "movie": movie}
     ordered_entries = []
     if requested_quality:
-        rq = requested_quality.lower()
+        rq = requested_quality.lower().strip()
+        rq_num = rq.rstrip("p")
         for d in downloads:
             meta = (d.get("meta") or "").lower()
             q = (d.get("quality") or "").lower()
             lbl = (d.get("label") or "").lower()
-            if rq in meta or rq in q or rq in lbl:
+            if (
+                rq in meta
+                or rq in q
+                or rq in lbl
+                or (rq_num and (rq_num in meta or rq_num in q or rq_num in lbl))
+            ):
                 ordered_entries.append(d)
         for d in downloads:
             if d not in ordered_entries:
