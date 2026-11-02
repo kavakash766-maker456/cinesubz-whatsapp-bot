@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install required Python packages for movie and gdown resolvers
-RUN pip3 install --no-cache-dir --break-system-packages requests beautifulsoup4 gdown pycryptodome cryptography telethon
+RUN pip3 install --no-cache-dir --break-system-packages requests beautifulsoup4 gdown pycryptodome cryptography telethon curl_cffi lxml
 
 WORKDIR /app
 
@@ -20,7 +20,7 @@ COPY package.json ./
 RUN npm install --production
 
 # Copy application files and resolver data
-COPY resolver.py gdrive_resolver.py telegram_downloader.py ./
+COPY resolver.py cinesubz_scraper.py gdrive_resolver.py telegram_downloader.py ./
 COPY tg_session.txt* ./
 COPY src/ ./src/
 COPY data/ ./data/

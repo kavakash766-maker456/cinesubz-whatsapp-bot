@@ -870,6 +870,71 @@ def resolve_baiscopes_movie(movie_url: str, requested_quality: str = None):
     return {"error": f"No download links found on Baiscopes page: {movie_url}"}
 
 
+def resolve_cinesubz_with_scraper(movie_url: str, requested_quality: str = None):
+    """Primary high-speed resolver powered by CineSubzScraper."""
+    try:
+        from cinesubz_scraper import CineSubzScraper
+        scraper = CineSubzScraper()
+
+        # Handle direct intermediate zt-links / api links
+        if any(k in movie_url for k in ("/zt-links/", "/api-", "/zt-")):
+            direct = scraper.resolve_download_link(movie_url)
+            if direct:
+                return {
+                    "success": True,
+                    "title": "Movie Download",
+                    "poster": "",
+                    "backdrop": "",
+                    "thumbnail_b64": "",
+                    "description": "",
+                    "quality": requested_quality or "720p",
+                    "size_text": "",
+                    "direct_url": direct,
+                    "is_telegram": "telegram" in direct.lower() or "t.me" in direct.lower(),
+                }
+
+        # Handle movie / episode pages
+        movie = scraper.get_movie(movie_url, resolve_downloads=False)
+        downloads = movie.get("downloads") or []
+        if not downloads:
+            return None
+
+        # Prioritize requested quality
+        ordered = []
+        if requested_quality:
+            rq = requested_quality.lower()
+            for d in downloads:
+                meta = (d.get("meta") or "").lower()
+                q = (d.get("quality") or "").lower()
+                lbl = (d.get("label") or "").lower()
+                if rq in meta or rq in q or rq in lbl:
+                    ordered.append(d)
+        for d in downloads:
+            if d not in ordered:
+                ordered.append(d)
+
+        for entry in ordered:
+            direct = scraper.resolve_download_link(entry.get("zt_url"))
+            if direct:
+                thumb = make_thumbnail_b64(movie.get("backdrop") or movie.get("poster") or "")
+                return {
+                    "success": True,
+                    "title": movie.get("title") or "Movie",
+                    "year": movie.get("year"),
+                    "poster": movie.get("poster", ""),
+                    "backdrop": movie.get("backdrop") or movie.get("poster", ""),
+                    "thumbnail_b64": thumb,
+                    "description": movie.get("description", ""),
+                    "quality": entry.get("quality") or requested_quality or "720p",
+                    "size_text": entry.get("size_text", ""),
+                    "direct_url": direct,
+                    "is_telegram": "telegram" in direct.lower() or "t.me" in direct.lower(),
+                }
+    except Exception:
+        pass
+    return None
+
+
 def resolve_direct_link(
     movie_url: str, requested_quality: str = None, _depth: int = 0
 ):
@@ -886,6 +951,12 @@ def resolve_direct_link(
             return resolve_baiscopes_movie(movie_url, requested_quality)
         except Exception as e:
             pass
+
+    # Primary: Resolve via the new high-speed CineSubzScraper engine
+    if "cinesubz" in movie_url or any(k in movie_url for k in ("/zt-links/", "/api-", "/zt-")):
+        c_res = resolve_cinesubz_with_scraper(movie_url, requested_quality)
+        if c_res and c_res.get("success") and c_res.get("direct_url"):
+            return c_res
 
     # Direct zt-links or intermediate redirect link support (/zt-links/, /api-, /zt-, ?r=)
     is_zt = (
@@ -1250,6 +1321,24 @@ def main():
                     return
             except Exception:
                 pass
+
+        # Primary: Check CineSubz TV Series with CineSubzScraper
+        try:
+            from cinesubz_scraper import CineSubzScraper
+            scraper = CineSubzScraper()
+            s_data = scraper.get_series(args.url)
+            if s_data.get("episodes"):
+                out = {
+                    "success": True,
+                    "title": s_data.get("title") or "Series",
+                    "poster": s_data.get("poster", ""),
+                    "backdrop": s_data.get("backdrop") or s_data.get("poster", ""),
+                    "episodes": s_data.get("episodes") or [],
+                }
+                print(json.dumps(out, ensure_ascii=False, indent=2))
+                return
+        except Exception:
+            pass
 
         # If an individual episode URL was given (e.g. /episodes/show-1x1/), discover parent series page
         if "/episodes/" in args.url:
