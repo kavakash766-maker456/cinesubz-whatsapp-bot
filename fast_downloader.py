@@ -28,6 +28,9 @@ def get_file_info(url: str, headers: dict = None) -> tuple:
     try:
         req = urllib.request.Request(url, headers=h)
         with urllib.request.urlopen(req, timeout=12) as resp:
+            ctype = resp.headers.get("Content-Type", "").lower()
+            if "text/html" in ctype:
+                raise RuntimeError(f"URL returned an HTML page ({ctype}) instead of a media file.")
             cr = resp.headers.get("Content-Range", "")
             if "/" in cr:
                 total_str = cr.split("/")[-1].strip()
@@ -76,7 +79,8 @@ def download_chunk(url: str, dest_path: str, start: int, end: int, part_num: int
     return False
 
 
-def parallel_download(url: str, dest_path: str, num_threads: int = 8) -> bool:
+def parallel_download(url: str, dest_path: str, num_threads: int = 4) -> bool:
+    num_threads = min(max(num_threads, 1), 4)
     size, supports_range = get_file_info(url)
     
     # If file size is smaller than 10MB or range not supported, do high-speed single stream
@@ -168,6 +172,9 @@ def stream_download(url: str, dest_path: str, total_size: int = 0) -> bool:
     downloaded = 0
 
     with urllib.request.urlopen(req, timeout=60) as resp:
+        ctype = resp.headers.get("Content-Type", "").lower()
+        if "text/html" in ctype:
+            raise RuntimeError(f"URL returned an HTML page ({ctype}) instead of a media file.")
         if total_size <= 0:
             clen = resp.headers.get("Content-Length")
             total_size = int(clen) if clen and clen.isdigit() else 0
@@ -217,7 +224,7 @@ if __name__ == "__main__":
         
     url = sys.argv[1]
     dest = sys.argv[2]
-    threads = int(sys.argv[3]) if len(sys.argv) > 3 else 8
+    threads = min(int(sys.argv[3]), 4) if len(sys.argv) > 3 else 4
     
     os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
     success = parallel_download(url, dest, threads)

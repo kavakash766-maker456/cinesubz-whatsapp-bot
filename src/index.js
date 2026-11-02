@@ -752,7 +752,7 @@ async function downloadFile(url, destPath, onProgress) {
     const pythonCmd = process.platform === "win32" ? "python" : "python3";
     const { spawn } = require("child_process");
 
-    const child = spawn(pythonCmd, [fastDownloader, url, destPath, "8"]);
+    const child = spawn(pythonCmd, [fastDownloader, url, destPath, "4"]);
     let buffer = "";
 
     child.stdout.on("data", (chunk) => {
@@ -794,6 +794,11 @@ async function downloadFile(url, destPath, onProgress) {
           timeout: 7200000,
         })
           .then((response) => {
+            const cType = (response.headers["content-type"] || "").toLowerCase();
+            if (cType.includes("text/html")) {
+              fs.unlink(destPath, () => {});
+              return reject(new Error("Server returned HTML page instead of video."));
+            }
             const totalLength = parseInt(response.headers["content-length"] || "0", 10);
             let downloaded = 0;
             response.data.on("data", (c) => {

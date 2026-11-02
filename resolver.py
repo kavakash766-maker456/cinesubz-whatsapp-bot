@@ -662,29 +662,40 @@ def _resolve_one(drive_url: str):
         "Connection": "keep-alive",
     })
 
-    try:
-        sess.get(host + path, timeout=12)
-    except Exception:
-        return []
+    for _ in range(2):
+        try:
+            sess.get(host + path, timeout=12)
+            break
+        except Exception:
+            time.sleep(0.5)
 
-    try:
-        r_api = sess.get(
-            f"{host}/api/download-data{path}",
-            headers={"Accept": "application/json", "Referer": host + path},
-            timeout=12,
-        )
-        data = r_api.json()
-    except Exception:
-        return []
-    if not data.get("success"):
+    data = {}
+    for _ in range(2):
+        try:
+            r_api = sess.get(
+                f"{host}/api/download-data{path}",
+                headers={"Accept": "application/json", "Referer": host + path},
+                timeout=12,
+            )
+            data = r_api.json()
+            if data.get("redirect"):
+                break
+        except Exception:
+            time.sleep(0.5)
+
+    if not data.get("redirect"):
         return []
     target = host + data["redirect"]
 
-    try:
-        r_page = sess.get(target, headers={"Referer": host + "/"}, timeout=12)
-        page = r_page.text
-    except Exception:
-        return []
+    page = ""
+    for _ in range(2):
+        try:
+            r_page = sess.get(target, headers={"Referer": host + "/"}, timeout=12)
+            page = r_page.text
+            if "dl-links" in page:
+                break
+        except Exception:
+            time.sleep(0.5)
     if "dl-links" not in page:
         return []
 
@@ -1024,36 +1035,7 @@ def resolve_direct_link(
             result["episode_count"] = len(episodes)
             return result
     if not downloads:
-        if _depth == 0:
-            clean_name = movie.get("details", {}).get("title") or movie_url.rstrip("/").split("/")[-1].replace("-", " ")
-            clean_name = re.sub(r"(sinhala\s*subtitles?|සිංහල\s*උපසිරැසි.*|\b(19\d\d|20\d\d)\b)", "", clean_name, flags=re.I).strip()
-            if clean_name:
-                try:
-                    from sinhalasub_resolver import search_sinhalasub, resolve_sinhalasub_movie
-                    sh_cands = search_sinhalasub(clean_name)
-                    if sh_cands:
-                        res = resolve_sinhalasub_movie(sh_cands[0]["url"], requested_quality)
-                        if res.get("success"):
-                            res["fallback_from"] = "CineSubz"
-                            return res
-                except Exception:
-                    pass
-                try:
-                    b_path = os.path.join(os.path.dirname(__file__), "../web/src/data/baiscopes_movies.json")
-                    if os.path.exists(b_path):
-                        with open(b_path, "r", encoding="utf-8") as bf:
-                            b_items = json.load(bf)
-                            for bi in b_items:
-                                if clean_name.lower() in (bi.get("title") or "").lower():
-                                    res = resolve_baiscopes_movie(bi["url"], requested_quality)
-                                    if res.get("success"):
-                                        res["fallback_from"] = "CineSubz"
-                                        return res
-                except Exception:
-                    pass
-        return {"error": "No download links found on movie page", "movie": movie}
-
-    # Filter/sort by requested quality if specified, but fall back to others if it fails
+        return {"error": "No download links found on CineSubz movie page", "movie": movie}
     ordered_entries = []
     if requested_quality:
         rq = requested_quality.lower()
@@ -1143,21 +1125,6 @@ def resolve_direct_link(
         except Exception as e:
             last_error = str(e)
             continue
-
-    if _depth == 0:
-        clean_name = movie.get("details", {}).get("title") or movie_url.rstrip("/").split("/")[-1].replace("-", " ")
-        clean_name = re.sub(r"(sinhala\s*subtitles?|සිංහල\s*උපසිරැසි.*|\b(19\d\d|20\d\d)\b)", "", clean_name, flags=re.I).strip()
-        if clean_name:
-            try:
-                from sinhalasub_resolver import search_sinhalasub, resolve_sinhalasub_movie
-                sh_cands = search_sinhalasub(clean_name)
-                if sh_cands:
-                    res = resolve_sinhalasub_movie(sh_cands[0]["url"], requested_quality)
-                    if res.get("success"):
-                        res["fallback_from"] = "CineSubz"
-                        return res
-            except Exception:
-                pass
 
     return {"error": last_error, "movie": movie}
 
@@ -1363,22 +1330,7 @@ def main():
             out["episodes"] = [{"season": 1, "episode": 1, "title": ep_title, "url": args.url}]
 
         if not out["episodes"]:
-            # If CineSubz returned 0 episodes, try SinhalaSub search fallback
-            clean_title = data["details"].get("title") or args.url.rstrip("/").split("/")[-1].replace("-", " ")
-            clean_title = re.sub(r"(sinhala\s*subtitles?|සිංහල\s*උපසිරැසි.*|\b(19\d\d|20\d\d)\b)", "", clean_title, flags=re.I).strip()
-            if clean_title:
-                try:
-                    from sinhalasub_resolver import search_sinhalasub, get_sinhalasub_series_episodes
-                    cands = search_sinhalasub(clean_title)
-                    for cand in cands:
-                        if "/tvshows/" in cand["url"]:
-                            fb_eps = get_sinhalasub_series_episodes(cand["url"])
-                            if fb_eps.get("episodes"):
-                                print(json.dumps(fb_eps, ensure_ascii=False, indent=2))
-                                return
-                except Exception:
-                    pass
-            out["error"] = "No episodes found on this page"
+            out["error"] = "No episodes found on this CineSubz page"
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return
 
