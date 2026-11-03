@@ -81,7 +81,7 @@ def make_thumbnail_b64(image_url: str) -> str:
 
 
 def search_sinhalasub(query: str) -> list:
-    """Search sinhalasub.lk for query and return movie list."""
+    """Search sinhalasub.lk for query and return movie list, filtered and ranked by title relevance."""
     clean_query = re.sub(r"\s*\(?\d{4}\)?", "", query).strip()
     clean_query = re.sub(r"[^a-zA-Z0-9\s]", " ", clean_query).strip()
     search_url = f"{BASE}/?s={urllib.parse.quote_plus(clean_query)}"
@@ -91,9 +91,16 @@ def search_sinhalasub(query: str) -> list:
         return []
         
     soup = BeautifulSoup(html, "html.parser")
-    results = []
+    candidates = []
     seen = set()
     
+    # Query words for relevance check (exclude common noise)
+    q_words = [w.lower() for w in re.findall(r"[a-zA-Z0-9]+", clean_query) if len(w) > 1]
+    stop_words = {"sinhala", "subtitles", "subtitle", "sub", "movie", "film", "full", "download", "watch", "with"}
+    q_tokens = [w for w in q_words if w not in stop_words]
+    if not q_tokens:
+        q_tokens = q_words
+
     for item in soup.select(".display-item, .item-box, article, .item"):
         a = item.find("a", href=True)
         if not a:
@@ -109,12 +116,25 @@ def search_sinhalasub(query: str) -> list:
         title = h3.get_text(" ", strip=True) if h3 else (a.get("title") or "Movie")
         img = item.find("img")
         poster = (img.get("data-src") or img.get("data-original") or img.get("src") or "").strip() if img else ""
-        results.append({
+        
+        # Calculate overlap score
+        cand_words = set(w.lower() for w in re.findall(r"[a-zA-Z0-9]+", title))
+        score = sum(1 for tok in q_tokens if tok in cand_words)
+        
+        # If query has tokens, require at least one token match to prevent returning unrelated latest posts on 404
+        if q_tokens and score == 0:
+            continue
+            
+        candidates.append({
             "title": title,
             "url": href,
             "poster": poster,
+            "score": score,
         })
-    return results
+        
+    # Rank by score descending
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+    return candidates
 
 
 def unwrap_dotflix(url: str) -> str:

@@ -828,6 +828,13 @@ async function processQueue() {
   const currentTask = requestQueue.shift();
   currentProcessingItem = currentTask;
 
+  const queueWatchdog = setTimeout(() => {
+    logger.warn(`[Queue Watchdog] Task ${currentTask?.movieUrl} exceeded 8 minutes! Force releasing queue lock.`);
+    isProcessingQueue = false;
+    currentProcessingItem = null;
+    if (requestQueue.length > 0) setTimeout(triggerQueue, 1000);
+  }, 8 * 60 * 1000);
+
   const {
     isSeriesSeason,
     seasonNumber,
@@ -856,8 +863,8 @@ async function processQueue() {
     cloudSession.updateGistFile("last_request.txt", `${new Date().toISOString()} | Processing: ${movieUrl} | By: ${pushName} | Q: ${quality}`);
   } catch (_) {}
 
-  // Helper function to broadcast message to target groups
-  const broadcastToGroups = async (payload) => {
+  // Helper function to broadcast message to target groups with per-target timeout
+  const broadcastToGroups = async (payload, timeoutMs = 180000) => {
     const groupsToSend = (currentTask.targetGroups && currentTask.targetGroups.length > 0)
       ? currentTask.targetGroups
       : TARGET_GROUP_JIDS;
@@ -866,7 +873,11 @@ async function processQueue() {
     let lastError = null;
     for (const jid of groupsToSend) {
       try {
-        await waSocket.sendMessage(jid, payload);
+        const sendPromise = waSocket.sendMessage(jid, payload);
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`Timeout (${Math.round(timeoutMs / 1000)}s) sending to ${jid}`)), timeoutMs)
+        );
+        await Promise.race([sendPromise, timeoutPromise]);
         sentCount++;
       } catch (err) {
         lastError = err;
@@ -1336,11 +1347,13 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
       logger.info(`Uploading ${finalSizeMB}MB document to WhatsApp groups...`);
       const thumbBuffer = await getPosterThumbnail(posterUrl || effectivePoster, movieData?.thumbnail_b64);
       
-      await broadcastToGroups({
-        document: { url: tempFilePath },
-        mimetype: "video/mp4",
-        fileName: `${title} [${resolvedQuality}] [FilmFeed].mp4`,
-        caption: 
+      let uploadSucceeded = false;
+      try {
+        await broadcastToGroups({
+          document: { url: tempFilePath },
+          mimetype: "video/mp4",
+          fileName: `${title} [${resolvedQuality}] [FilmFeed].mp4`,
+          caption: 
 `🎬 *${title}* (${resolvedQuality})
 ━━━━━━━━━━━━━━━━━━━━
 👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
@@ -1349,10 +1362,35 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 ━━━━━━━━━━━━━━━━━━━━
 🍿 FilmFeed 4K Auto-Bot Engine
 ${getPromoFooter()}`,
-        mentions: mentionsList,
-        ...(thumbBuffer ? { jpegThumbnail: thumbBuffer } : {}),
-        contextInfo: getMetaAiContext(mentionsList),
-      });
+          mentions: mentionsList,
+          ...(thumbBuffer ? { jpegThumbnail: thumbBuffer } : {}),
+          contextInfo: getMetaAiContext(mentionsList),
+        }, 240000);
+        uploadSucceeded = true;
+      } catch (uploadErr) {
+        logger.warn(`Document upload to WhatsApp groups timed out or failed (${uploadErr.message}). Broadcasting direct link fallback...`);
+        // Fallback: If WhatsApp document upload fails or times out (e.g. >1.2GB or WhatsApp MMS rejection),
+        // send direct high-speed download link so user and group never miss the movie!
+        await broadcastToGroups({
+          text: 
+`🎬 *${title}* (${resolvedQuality})
+━━━━━━━━━━━━━━━━━━━━
+👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
+🎯 *User Stats:* ${count} වන සාර්ථක නිකුතුව! [${badge}]
+📦 *ගොනු ප්‍රමාණය:* ${finalSizeMB}MB
+⚡ *High-Speed Direct Download:*
+WhatsApp Server ගොනු ප්‍රමාණ සීමාව නිසා, පහත Direct High-Speed ලින්ක් එකෙන් (100MB/s) දැන්ම බාගත කරගන්න:
+
+🚀 *Direct Download Link:*
+🔗 ${directUrl}
+━━━━━━━━━━━━━━━━━━━━
+🍿 FilmFeed 4K Cinema Engine
+${getPromoFooter()}`,
+          mentions: mentionsList,
+          contextInfo: getMetaAiContext(mentionsList),
+        });
+        uploadSucceeded = true;
+      }
 
       // 4.1. Send Interactive WhatsApp Movie Poll AFTER Document is delivered to groups
       try {
@@ -1448,6 +1486,9 @@ ${getPromoFooter()}`,
       contextInfo: getMetaAiContext(mentionsList),
     });
   } finally {
+    if (typeof queueWatchdog !== "undefined" && queueWatchdog) {
+      clearTimeout(queueWatchdog);
+    }
     isProcessingQueue = false;
     currentProcessingItem = null;
     if (requestQueue.length > 0) {
@@ -1887,6 +1928,8 @@ async function startBot() {
       markOnlineOnConnect: true,
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 120000,
+      mediaUploadTimeoutMs: 180000,
+      mediaCache: new Map(),
       getMessage: async (key) => {
         if (key?.id && messageStore.has(key.id)) {
           return messageStore.get(key.id);

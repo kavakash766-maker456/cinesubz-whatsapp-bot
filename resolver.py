@@ -861,9 +861,9 @@ def resolve_baiscopes_movie(movie_url: str, requested_quality: str = None):
         try:
             from sinhalasub_resolver import search_sinhalasub, resolve_sinhalasub_movie
             sh_cands = search_sinhalasub(clean_name)
-            if sh_cands:
-                res = resolve_sinhalasub_movie(sh_cands[0]["url"], requested_quality)
-                if res.get("success"):
+            for cand in (sh_cands or [])[:3]:
+                res = resolve_sinhalasub_movie(cand["url"], requested_quality)
+                if res.get("success") and res.get("direct_url"):
                     res["fallback_from"] = "Baiscopes"
                     return res
         except Exception:
@@ -1279,8 +1279,8 @@ def resolve_direct_link(
         try:
             from sinhalasub_resolver import search_sinhalasub, resolve_sinhalasub_movie
             sh_cands = search_sinhalasub(movie_name)
-            if sh_cands:
-                sh_res = resolve_sinhalasub_movie(sh_cands[0]["url"], requested_quality)
+            for cand in (sh_cands or [])[:3]:
+                sh_res = resolve_sinhalasub_movie(cand["url"], requested_quality)
                 if sh_res.get("success") and sh_res.get("direct_url"):
                     sh_res["fallback_from"] = "CineSubz"
                     return sh_res
