@@ -121,12 +121,16 @@ def unwrap_url(encrypted_blob, candidates):
             plain = cryptojs_decrypt(encrypted_blob, pw).strip()
         except Exception:
             continue
+        if plain.startswith("http://") or plain.startswith("https://"):
+            return plain
         try:
             decoded = base64.b64decode(plain, validate=True).decode("utf-8")
+            if decoded.startswith("http"):
+                return decoded
         except Exception:
-            continue
-        if decoded.startswith("http"):
-            return decoded
+            pass
+        if any(ext in plain.lower() for ext in (".mp4", ".mkv", "pixeldrain", "cloudflarestorage", "supercloud")):
+            return plain
     return None
 
 

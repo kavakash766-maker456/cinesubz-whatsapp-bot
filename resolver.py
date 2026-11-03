@@ -902,6 +902,15 @@ def resolve_cinesubz_with_scraper(movie_url: str, requested_quality: str = None)
             # Handle movie / episode pages
             movie = scraper.get_movie(movie_url, resolve_downloads=False)
             downloads = movie.get("downloads") or []
+            episodes = movie.get("episodes") or []
+            if not downloads and episodes:
+                first_ep = episodes[0]
+                ep_res = resolve_cinesubz_with_scraper(first_ep["url"], requested_quality)
+                if ep_res and ep_res.get("success"):
+                    ep_res["series_title"] = movie.get("title")
+                    ep_res["series_url"] = movie_url
+                    ep_res["episode_count"] = len(episodes)
+                    return ep_res
             if not downloads:
                 if attempt < 2:
                     time.sleep(1.0)
@@ -955,6 +964,40 @@ def resolve_cinesubz_with_scraper(movie_url: str, requested_quality: str = None)
 def resolve_direct_link(
     movie_url: str, requested_quality: str = None, _depth: int = 0
 ):
+    movie_url = (movie_url or "").strip()
+    # Handle search URLs e.g. https://cinesubz.lk/?s=matrix
+    if "cinesubz" in movie_url and "?s=" in movie_url:
+        m_s = re.search(r"[?&]s=([^&]+)", movie_url)
+        if m_s:
+            q = urllib.parse.unquote_plus(m_s.group(1)).strip()
+            if q and _depth == 0:
+                movie_url = q
+
+    # If the input is not a URL (e.g. user passed movie title directly)
+    if not movie_url.startswith("http://") and not movie_url.startswith("https://"):
+        try:
+            from cinesubz_scraper import CineSubzScraper
+            scraper = CineSubzScraper()
+            results = scraper.search(movie_url)
+            if results and len(results) > 0:
+                # Rank results: prioritize exact word matches and release titles
+                q_clean = movie_url.lower().strip()
+                def score(item):
+                    t = (item.get("title") or "").lower()
+                    if t.startswith(q_clean + " (") or t.startswith(q_clean + " :") or t == q_clean:
+                        return 100
+                    if re.search(r"\b" + re.escape(q_clean) + r"\b", t):
+                        return 80
+                    return 10
+
+                sorted_results = sorted(results, key=score, reverse=True)
+                for cand in sorted_results[:3]:
+                    res = resolve_direct_link(cand["url"], requested_quality, _depth=_depth + 1)
+                    if res and res.get("success"):
+                        return res
+        except Exception:
+            pass
+
     movie_url = re.sub(r"https?://(www\.)?cinesubz\.(net|co)/", "https://cinesubz.lk/", movie_url)
     if "sinhalasub" in movie_url:
         try:

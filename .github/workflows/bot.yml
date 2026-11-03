@@ -47,7 +47,7 @@ jobs:
 
       - name: Install Python Packages
         run: |
-          pip install --no-cache-dir cryptography pycryptodome requests beautifulsoup4 gdown telethon Pillow playwright playwright-stealth aiohttp aiofiles rich curl_cffi lxml
+          pip install --no-cache-dir -r requirements.txt
           python -m playwright install chromium
 
       - name: Install Node Dependencies

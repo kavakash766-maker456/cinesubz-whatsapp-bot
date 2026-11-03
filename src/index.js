@@ -355,7 +355,7 @@ setupKeepAlivePing();
 // 3. Movie & Series Resolver Helpers
 // --------------------------------------------------------------------------
 async function resolveMovie(movieUrl, quality) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const resolverScript = path.join(__dirname, "../resolver.py");
     const args = [movieUrl];
     if (quality) {
@@ -363,39 +363,41 @@ async function resolveMovie(movieUrl, quality) {
     }
 
     const pythonCmd = process.platform === "win32" ? "python" : "python3";
-    execFile(pythonCmd, [resolverScript, ...args], { maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(pythonCmd, [resolverScript, ...args], { maxBuffer: 15 * 1024 * 1024, timeout: 120000 }, (err, stdout, stderr) => {
       if (err) {
         logger.error({ err, stderr }, "Resolver script error");
-        return reject(err);
+        return resolve({ success: false, error: (stderr || err.message || "Resolver process error").slice(0, 300) });
       }
       try {
-        const data = JSON.parse(stdout);
+        const jsonMatch = (stdout || "").match(/\{[\s\S]*\}/);
+        const data = jsonMatch ? JSON.parse(jsonMatch[0]) : JSON.parse(stdout);
         resolve(data);
       } catch (parseErr) {
         logger.error({ stdout, stderr }, "Failed to parse resolver JSON");
-        reject(parseErr);
+        resolve({ success: false, error: "Failed to parse resolver response" });
       }
     });
   });
 }
 
 async function resolveSeriesEpisodes(seriesUrl) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const resolverScript = path.join(__dirname, "../resolver.py");
     const args = [seriesUrl, "--episodes"];
 
     const pythonCmd = process.platform === "win32" ? "python" : "python3";
-    execFile(pythonCmd, [resolverScript, ...args], { maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(pythonCmd, [resolverScript, ...args], { maxBuffer: 15 * 1024 * 1024, timeout: 120000 }, (err, stdout, stderr) => {
       if (err) {
         logger.error({ err, stderr }, "Series episodes resolver error");
-        return reject(err);
+        return resolve({ success: false, episodes: [], error: (stderr || err.message).slice(0, 300) });
       }
       try {
-        const data = JSON.parse(stdout);
+        const jsonMatch = (stdout || "").match(/\{[\s\S]*\}/);
+        const data = jsonMatch ? JSON.parse(jsonMatch[0]) : JSON.parse(stdout);
         resolve(data);
       } catch (parseErr) {
         logger.error({ stdout, stderr }, "Failed to parse series episodes JSON");
-        reject(parseErr);
+        resolve({ success: false, episodes: [], error: "Failed to parse series episodes JSON" });
       }
     });
   });
@@ -1469,6 +1471,7 @@ const botSockets = {
   movies: null,
   series: null,
 };
+const messageStore = new Map();
 
 function attachMessageEvents(sock) {
   sock.ev.on("messages.upsert", async (m) => {
@@ -1477,6 +1480,13 @@ function attachMessageEvents(sock) {
     if (!m.messages || m.messages.length === 0) return;
 
     for (const msg of m.messages) {
+      if (msg.key?.id && msg.message) {
+        messageStore.set(msg.key.id, msg.message);
+        if (messageStore.size > 2000) {
+          const oldest = messageStore.keys().next().value;
+          messageStore.delete(oldest);
+        }
+      }
       if (!msg.message) continue;
 
       const msgId = msg.key?.id;
@@ -1595,18 +1605,21 @@ function attachMessageEvents(sock) {
             break;
           }
 
-          // Movie Command: !req <url> | <quality> | <token>
-          const rMatch = line.match(/^[!/.]?req(?:uest)?\s+(https?:\/\/[^\s|]+)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?/i);
+          // Movie Command: !req <url_or_title> | <quality> | <token>
+          const rMatch = line.match(/^[!/.]?req(?:uest)?\s+([^|\n]+?)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?$/i);
           if (rMatch) {
-            commandFound = true;
-            movieUrl = rMatch[1].trim();
-            quality = rMatch[2] ? rMatch[2].trim() : "720p";
-            token = rMatch[3] ? rMatch[3].trim() : "";
-            if (movieUrl.includes("/tvshows/")) {
-              isSeriesSeason = true;
-              seasonNumber = 1;
+            const rawTarget = rMatch[1].trim();
+            if (rawTarget && rawTarget.length >= 2) {
+              commandFound = true;
+              movieUrl = rawTarget;
+              quality = rMatch[2] ? rMatch[2].trim() : "720p";
+              token = rMatch[3] ? rMatch[3].trim() : "";
+              if (movieUrl.includes("/tvshows/")) {
+                isSeriesSeason = true;
+                seasonNumber = 1;
+              }
+              break;
             }
-            break;
           }
         }
 
@@ -1878,7 +1891,12 @@ async function startBot() {
       markOnlineOnConnect: true,
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 120000,
-      getMessage: async () => undefined,
+      getMessage: async (key) => {
+        if (key?.id && messageStore.has(key.id)) {
+          return messageStore.get(key.id);
+        }
+        return undefined;
+      },
     });
 
     waSocket = sock;
