@@ -4,15 +4,25 @@ SinhalaSub.LK Resolver & Fallback Engine for FilmFeed Bot
 Provides direct high-speed mp4 resolution and search fallback when CineSubz is unavailable.
 """
 
+import base64
 import io
 import json
 import re
+import socket
 import sys
 import time
-import base64
 import urllib.parse
 from bs4 import BeautifulSoup
 import requests
+
+# Force IPv4 socket resolution to prevent broken IPv6 timeouts on GitHub Actions and cloud runners
+try:
+    _orig_getaddrinfo = socket.getaddrinfo
+    def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+    socket.getaddrinfo = _ipv4_getaddrinfo
+except Exception:
+    pass
 
 BASE = "https://sinhalasub.lk"
 UA = (
@@ -105,6 +115,27 @@ def search_sinhalasub(query: str) -> list:
             "poster": poster,
         })
     return results
+
+
+def unwrap_dotflix(url: str) -> str:
+    """Unwrap dtflix.site or dotflix.fit share landing page to direct file download URL."""
+    if not url or ("dtflix" not in url and "dotflix" not in url):
+        return url
+    try:
+        page_html = http_get(url)
+        if page_html:
+            m_px = re.search(r"pixeldrain\.(?:dev|com)/u/([a-zA-Z0-9_-]+)", page_html)
+            if m_px:
+                return f"https://pixeldrain.com/api/file/{m_px.group(1)}?download"
+            m_r2 = re.search(r'(https?://[^\s"\'<>]*(?:r2\.dev|cloudflarestorage)[^\s"\'<>]*)', page_html)
+            if m_r2:
+                return m_r2.group(1).replace("\\", "").split('?')[0]
+            m_g = re.search(r'(https?://video-downloads\.googleusercontent\.com/[^\s"\'<>:]+)', page_html)
+            if m_g:
+                return m_g.group(1)
+    except Exception:
+        pass
+    return url
 
 
 def resolve_sinhalasub_movie(movie_url: str, requested_quality: str = None) -> dict:
@@ -226,6 +257,8 @@ def resolve_sinhalasub_movie(movie_url: str, requested_quality: str = None) -> d
         return {"error": "zluFinalLink not found in unlocker page"}
         
     direct_url = m.group(1).strip()
+    if "dtflix" in direct_url or "dotflix" in direct_url:
+        direct_url = unwrap_dotflix(direct_url)
     if "pixeldrain.com/u/" in direct_url:
         direct_url = direct_url.replace("pixeldrain.com/u/", "pixeldrain.com/api/file/")
     if "pixeldrain.com/api/file/" in direct_url and "?download" not in direct_url:

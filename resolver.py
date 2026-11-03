@@ -1273,6 +1273,28 @@ def resolve_direct_link(
             last_error = str(e)
             continue
 
+    # High-Reliability Fallback: Search SinhalaSub & Baiscopes if CineSubz failed to resolve a direct file URL
+    movie_name = clean_page_title(movie.get("details", {}).get("title") or title or "")
+    if movie_name:
+        try:
+            from sinhalasub_resolver import search_sinhalasub, resolve_sinhalasub_movie
+            sh_cands = search_sinhalasub(movie_name)
+            if sh_cands:
+                sh_res = resolve_sinhalasub_movie(sh_cands[0]["url"], requested_quality)
+                if sh_res.get("success") and sh_res.get("direct_url"):
+                    sh_res["fallback_from"] = "CineSubz"
+                    return sh_res
+        except Exception:
+            pass
+
+        try:
+            bs_res = resolve_baiscopes_movie(movie_name, requested_quality)
+            if bs_res.get("success") and bs_res.get("direct_url"):
+                bs_res["fallback_from"] = "CineSubz"
+                return bs_res
+        except Exception:
+            pass
+
     return {"error": last_error, "movie": movie}
 
 
