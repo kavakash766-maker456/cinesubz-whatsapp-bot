@@ -9,9 +9,19 @@ import hashlib
 import html as html_module
 import os
 import re
+import socket
 import sys
 import time
 import urllib.parse
+
+# Force IPv4 socket resolution to prevent broken IPv6 timeouts on GitHub Actions and cloud runners
+try:
+    _orig_getaddrinfo = socket.getaddrinfo
+    def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+    socket.getaddrinfo = _ipv4_getaddrinfo
+except Exception:
+    pass
 
 # Prefer curl_cffi for Cloudflare TLS impersonation; fallback to requests
 try:

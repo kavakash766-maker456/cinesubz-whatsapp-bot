@@ -306,6 +306,27 @@ class CloudSession {
       this.isSyncing = false;
     }
   }
+
+  async updateGistFile(filename, content) {
+    if (!this.token) return;
+    if (!this.gistId) await this.findGist();
+    if (!this.gistId) return;
+    try {
+      await axios.patch(
+        `https://api.github.com/gists/${this.gistId}`,
+        {
+          files: {
+            [filename]: { content: String(content).slice(0, 50000) },
+          },
+        },
+        {
+          headers: this.getHeaders(),
+          httpsAgent: ipv4Agent,
+          timeout: 10000,
+        }
+      );
+    } catch (_) {}
+  }
 }
 
 module.exports = CloudSession;

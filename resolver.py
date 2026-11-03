@@ -12,6 +12,7 @@ import http.cookiejar
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -19,6 +20,15 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
+
+# Force IPv4 socket resolution to prevent broken IPv6 timeouts on GitHub Actions and cloud runners
+try:
+    _orig_getaddrinfo = socket.getaddrinfo
+    def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+    socket.getaddrinfo = _ipv4_getaddrinfo
+except Exception:
+    pass
 
 # Ensure bot directory is in sys.path for local module imports
 _BOT_DIR = os.path.dirname(os.path.abspath(__file__))

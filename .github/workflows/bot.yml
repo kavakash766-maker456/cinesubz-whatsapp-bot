@@ -41,6 +41,9 @@ jobs:
 
       - name: Verify System Dependencies
         run: |
+          sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 || true
+          sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1 || true
+          sudo sysctl -w net.ipv6.conf.lo.disable_ipv6=1 || true
           sudo apt-get update -qq && sudo apt-get install -y ffmpeg fonts-noto-core fonts-noto-extra fonts-dejavu fonts-freefont-ttf
           ffmpeg -version | head -n 1
           openssl version

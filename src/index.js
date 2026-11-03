@@ -1,4 +1,8 @@
 require("dotenv").config();
+const dns = require("dns");
+try {
+  dns.setDefaultResultOrder("ipv4first");
+} catch (_) {}
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -27,7 +31,11 @@ const TARGET_GROUP_JIDS = (process.env.TARGET_GROUP_JIDS || "120363419930344447@
   .filter(Boolean);
 const TARGET_GROUP_JID = TARGET_GROUP_JIDS[0];
 const AUTH_DIR = process.env.AUTH_DIR || path.join(__dirname, "../auth_info");
-const cloudSession = new CloudSession(AUTH_DIR, process.env.GH_PAT || process.env.GITHUB_TOKEN || process.env.GH_TOKEN);
+const cloudSession = new CloudSession(
+  AUTH_DIR,
+  process.env.GH_PAT || process.env.GITHUB_TOKEN || process.env.GH_TOKEN,
+  process.env.SESSION_VAULT_ID || "8f37b6dbcf07ff6fab07b21cc8cbe05b"
+);
 const TEMP_DIR = path.join(__dirname, "../temp");
 const STATS_FILE = path.join(AUTH_DIR, "user_stats.json");
 const SELF_URL = process.env.SELF_URL || process.env.RENDER_EXTERNAL_URL || process.env.KOYEB_APP_URL || null;
@@ -749,82 +757,64 @@ function getMetaAiContext(mentionsList = []) {
 // 5. File Downloader
 // --------------------------------------------------------------------------
 async function downloadFile(url, destPath, onProgress) {
-  return new Promise((resolve, reject) => {
-    const fastDownloader = path.join(__dirname, "../fast_downloader.py");
-    const pythonCmd = process.platform === "win32" ? "python" : "python3";
-    const { spawn } = require("child_process");
+  const fastDownloader = path.join(__dirname, "../fast_downloader.py");
+  const pythonCmd = process.platform === "win32" ? "python" : "python3";
+  const { spawn } = require("child_process");
 
-    const child = spawn(pythonCmd, [fastDownloader, url, destPath, "4"]);
-    let buffer = "";
+  const runDownloader = (threads) => {
+    return new Promise((resolve, reject) => {
+      const child = spawn(pythonCmd, [fastDownloader, url, destPath, String(threads)]);
+      let buffer = "";
+      let errBuffer = "";
 
-    child.stdout.on("data", (chunk) => {
-      buffer += chunk.toString();
-      const lines = buffer.split("\n");
-      buffer = lines.pop();
+      child.stdout.on("data", (chunk) => {
+        buffer += chunk.toString();
+        const lines = buffer.split("\n");
+        buffer = lines.pop();
 
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const data = JSON.parse(line.trim());
-          if (data.type === "progress" && onProgress) {
-            onProgress(data.downloaded, data.total, data.speed_mb);
-          }
-        } catch (_) {}
-      }
-    });
-
-    child.stderr.on("data", (errData) => {
-      logger.warn(`[FastDownloader] ${errData.toString().trim()}`);
-    });
-
-    child.on("close", (code) => {
-      if (code === 0 && fs.existsSync(destPath) && fs.statSync(destPath).size > 1000000) {
-        resolve(destPath);
-      } else {
-        logger.warn(`Fast parallel downloader exited with code ${code}. Falling back to standard stream...`);
-        const writer = fs.createWriteStream(destPath);
-        const https = require("https");
-        axios({
-          url,
-          method: "GET",
-          responseType: "stream",
-          httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept-Encoding": "identity",
-            Accept: "*/*",
-          },
-          timeout: 7200000,
-        })
-          .then((response) => {
-            const cType = (response.headers["content-type"] || "").toLowerCase();
-            if (cType.includes("text/html")) {
-              fs.unlink(destPath, () => {});
-              return reject(new Error("Server returned HTML page instead of video."));
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const data = JSON.parse(line.trim());
+            if (data.type === "progress" && onProgress) {
+              onProgress(data.downloaded, data.total, data.speed_mb);
             }
-            const totalLength = parseInt(response.headers["content-length"] || "0", 10);
-            let downloaded = 0;
-            response.data.on("data", (c) => {
-              downloaded += c.length;
-              if (onProgress) onProgress(downloaded, totalLength, 0);
-            });
-            response.data.pipe(writer);
-            writer.on("finish", () => resolve(destPath));
-            writer.on("error", (err) => {
-              fs.unlink(destPath, () => {});
-              reject(err);
-            });
-          })
-          .catch(reject);
-      }
-    });
+          } catch (_) {}
+        }
+      });
 
-    child.on("error", (err) => {
-      logger.error({ err }, "Failed spawning fast_downloader.py");
-      reject(err);
+      child.stderr.on("data", (errData) => {
+        errBuffer += errData.toString();
+        logger.warn(`[FastDownloader] ${errData.toString().trim()}`);
+      });
+
+      child.on("close", (code) => {
+        if (code === 0 && fs.existsSync(destPath) && fs.statSync(destPath).size > 1000000) {
+          resolve(destPath);
+        } else {
+          const detail = errBuffer.trim() || `Downloader exited with code ${code}`;
+          reject(new Error(detail));
+        }
+      });
+
+      child.on("error", (err) => {
+        logger.error({ err }, "Failed spawning fast_downloader.py");
+        reject(err);
+      });
     });
-  });
+  };
+
+  try {
+    return await runDownloader(4);
+  } catch (err) {
+    logger.warn(`4-thread parallel download failed (${err.message}). Retrying with 1-thread stream...`);
+    try {
+      return await runDownloader(1);
+    } catch (retryErr) {
+      logger.error(`1-thread stream download also failed: ${retryErr.message}`);
+      throw retryErr;
+    }
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -862,6 +852,9 @@ async function processQueue() {
   logger.info(
     `[Queue Engine] Processing task for ${pushName}: ${movieUrl} | Type=${isSeriesSeason ? `Series S${seasonNumber}` : "Movie"} | Remaining in queue: ${requestQueue.length}`
   );
+  try {
+    cloudSession.updateGistFile("last_request.txt", `${new Date().toISOString()} | Processing: ${movieUrl} | By: ${pushName} | Q: ${quality}`);
+  } catch (_) {}
 
   // Helper function to broadcast message to target groups
   const broadcastToGroups = async (payload) => {
@@ -1447,6 +1440,9 @@ ${getPromoFooter()}`,
 
   } catch (err) {
     logger.error({ err }, "Error processing queued task");
+    try {
+      cloudSession.updateGistFile("last_error.txt", `${new Date().toISOString()} | Task Error: ${err.message}\n${err.stack || ""}`);
+    } catch (_) {}
     await waSocket.sendMessage(replyTarget, {
       text: `⚠️ *[FilmFeed Auto-Bot]* දෝෂයක් සිදු විය: ${err.message}`,
       contextInfo: getMetaAiContext(mentionsList),

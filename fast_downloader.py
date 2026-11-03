@@ -23,6 +23,15 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# Force IPv4 socket resolution to prevent broken IPv6 timeouts on GitHub Actions and cloud runners
+try:
+    _orig_getaddrinfo = socket.getaddrinfo
+    def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+    socket.getaddrinfo = _ipv4_getaddrinfo
+except Exception:
+    pass
+
 # Set socket timeout default to 30 seconds
 socket.setdefaulttimeout(30)
 
