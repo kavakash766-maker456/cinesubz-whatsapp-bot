@@ -779,7 +779,7 @@ async function downloadFile(url, destPath, onProgress) {
   const pythonCmd = process.platform === "win32" ? "python" : "python3";
   const { spawn } = require("child_process");
 
-  const runDownloader = (threads, timeoutMs = 720000) => {
+  const runDownloader = (threads, timeoutMs = 900000) => {
     return new Promise((resolve, reject) => {
       const child = spawn(pythonCmd, ["-u", fastDownloader, url, destPath, String(threads)], {
         env: { ...process.env, PYTHONUNBUFFERED: "1" },
@@ -794,11 +794,11 @@ async function downloadFile(url, destPath, onProgress) {
       }, timeoutMs);
 
       const watchdog = setInterval(() => {
-        if (Date.now() - lastActivity > 240000) {
+        if (Date.now() - lastActivity > 300000) {
           clearInterval(watchdog);
           clearTimeout(killTimer);
           try { child.kill("SIGKILL"); } catch (_) {}
-          reject(new Error("Downloader stalled: no progress for 240s"));
+          reject(new Error("Downloader stalled: no progress for 300s"));
         }
       }, 5000);
 
@@ -849,11 +849,11 @@ async function downloadFile(url, destPath, onProgress) {
   };
 
   try {
-    return await runDownloader(4, 720000);
+    return await runDownloader(4, 900000);
   } catch (err) {
     logger.warn(`4-thread parallel download failed (${err.message}). Retrying with 2-thread stream...`);
     try {
-      return await runDownloader(2, 720000);
+      return await runDownloader(2, 900000);
     } catch (retryErr) {
       logger.error(`Stream download also failed: ${retryErr.message}`);
       throw retryErr;

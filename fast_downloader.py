@@ -334,7 +334,7 @@ def download_chunk(
                 mode = "ab" if existing_bytes > 0 else "wb"
                 with open(part_file, mode) as f:
                     while not stop_event.is_set():
-                        chunk = resp.read(256 * 1024)  # 256KB buffer
+                        chunk = resp.read(64 * 1024)  # 256KB buffer
                         if not chunk:
                             break
                         f.write(chunk)
@@ -425,7 +425,7 @@ def stream_download(
 
                 with open(dest_path, mode) as f:
                     while True:
-                        buf = resp.read(512 * 1024)
+                        buf = resp.read(64 * 1024)
                         if not buf:
                             break
                         f.write(buf)
@@ -504,7 +504,7 @@ def parallel_download(
         return False
 
     # Fallback to single-stream if small file or byte ranges unsupported
-    if size < 5 * 1024 * 1024 or not supports_range:
+    if size < 5 * 1024 * 1024 or not supports_range or "pixeldrain.com" in url:
         success = stream_download(
             url,
             dest_path,
