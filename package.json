@@ -4,7 +4,8 @@
   "description": "WhatsApp Movie Downloader Bot for Fly.io",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "postinstall": "node patch_baileys.js"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.8",

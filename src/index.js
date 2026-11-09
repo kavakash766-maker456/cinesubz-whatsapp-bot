@@ -1,4 +1,13 @@
 require("dotenv").config();
+const path = require("path");
+const fs = require("fs");
+
+// Ensure Baileys messages-media.js is fully patched before Baileys is imported
+try {
+  const patchBaileys = require(path.join(__dirname, "../patch_baileys.js"));
+  if (typeof patchBaileys === "function") patchBaileys();
+} catch (_) {}
+
 const dns = require("dns");
 try {
   dns.setDefaultResultOrder("ipv4first");
@@ -16,27 +25,32 @@ const pino = require("pino");
 const qrcode = require("qrcode-terminal");
 const http = require("http");
 const https = require("https");
-const path = require("path");
-const fs = require("fs");
 const { execFile, execFileSync } = require("child_process");
 const axios = require("axios");
 
 // Force exact Content-Length on all media stream uploads to WhatsApp MMS (strictly required by WhatsApp servers)
-axios.interceptors.request.use((config) => {
-  if (config.data && typeof config.data.pipe === "function" && config.data.path) {
+function attachAxiosInterceptor(axInstance) {
+  if (!axInstance || !axInstance.interceptors || !axInstance.interceptors.request) return;
+  axInstance.interceptors.request.use((config) => {
     try {
-      if (fs.existsSync(config.data.path)) {
-        const stats = fs.statSync(config.data.path);
-        if (config.headers && typeof config.headers.set === "function") {
-          config.headers.set("Content-Length", String(stats.size));
-        } else if (config.headers) {
-          config.headers["Content-Length"] = String(stats.size);
+      if (config.data && typeof config.data.pipe === "function" && config.data.path) {
+        if (fs.existsSync(config.data.path)) {
+          const stats = fs.statSync(config.data.path);
+          if (config.headers && typeof config.headers.set === "function") {
+            config.headers.set("Content-Length", String(stats.size));
+          } else if (config.headers) {
+            config.headers["Content-Length"] = String(stats.size);
+          }
         }
       }
     } catch (_) {}
-  }
-  return config;
-});
+    return config;
+  });
+}
+attachAxiosInterceptor(axios);
+import("axios").then((esm) => {
+  if (esm && esm.default) attachAxiosInterceptor(esm.default);
+}).catch(() => {});
 const CloudSession = require("./cloud_session");
 const { broadcastDailyNews } = require("./daily_news");
 const { registerBotInFirestore } = require("./firebase_sync");
@@ -929,7 +943,7 @@ async function processQueue() {
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
           logger.info(`[Broadcast] Sending to ${jid} (isDocument=${isDocument}, attempt=${attempt}/${maxAttempts})...`);
-          const sendPromise = waSocket.sendMessage(jid, payload);
+          const sendPromise = waSocket.sendMessage(jid, payload, { mediaUploadTimeoutMs: effectiveTimeoutMs });
           const timeoutPromise = new Promise((_, reject) =>
             setTimeout(() => reject(new Error(`Timeout (${Math.round(effectiveTimeoutMs / 1000)}s) sending to ${jid}`)), effectiveTimeoutMs)
           );
