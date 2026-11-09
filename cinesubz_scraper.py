@@ -592,7 +592,7 @@ class CineSubzScraper:
         if not m:
             return None
 
-        original_url = m.group(1).strip()
+        original_url = html.unescape(m.group(1).strip())
         mapped_url = self._map_zt_href(original_url, page_html)
 
         if re.match(r"https?://(www\.)?(telegram\.me|t\.me)/", mapped_url):
