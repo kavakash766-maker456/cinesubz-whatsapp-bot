@@ -594,6 +594,7 @@ def parallel_download(
     # Assemble chunks into destination file
     temp_assembled = f"{dest_path}.assembled.tmp"
     try:
+        last_asm_heartbeat = time.time()
         with open(temp_assembled, "wb") as outfile:
             for pf in part_files:
                 if not os.path.exists(pf):
@@ -604,6 +605,18 @@ def parallel_download(
                         if not buf:
                             break
                         outfile.write(buf)
+                        now_asm = time.time()
+                        if now_asm - last_asm_heartbeat >= 2.0:
+                            last_asm_heartbeat = now_asm
+                            emit_ipc(
+                                "progress",
+                                downloaded=size,
+                                total=size,
+                                percent=100.0,
+                                speed_mb=round((size / (1024 * 1024)) / max(now_asm - start_time, 0.001), 2),
+                                eta_seconds=0,
+                                assembling=True,
+                            )
 
         if os.path.exists(dest_path):
             os.remove(dest_path)

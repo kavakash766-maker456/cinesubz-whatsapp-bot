@@ -169,9 +169,7 @@ DYNAMIC MESSAGE LENGTH RULES (ඉතා වැදගත්):
 SYSTEM KNOWLEDGE:
 - OFFICIAL WEBSITE: ${OFFICIAL_WEBSITE} (All movie & TV series downloads are requested here).
 - LOCKED GROUP: The WhatsApp Group (${groupLink}) is locked for member typing so that the group doesn't get flooded with spam stickers/messages, keeping downloaded movie files 100% clean and easy to find!
-- DUAL BOT NUMBERS:
-  * Movie Bot: 0760372547 (Movies only)
-  * TV Series Bot: 0782088603 (TV Series & Season Packs)
+- OFFICIAL BOT NUMBER: 0782088603 (Movies & TV Series 24/7)
 - HOW TO DOWNLOAD: Visit ${OFFICIAL_WEBSITE} -> Search Movie/Series -> Select Quality/Season -> Click Request -> Bot drops the file into the WhatsApp group in 2-3 mins!
 - DEVELOPER: Akash Sithum (Phone/WhatsApp: 0787732040).
 

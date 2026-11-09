@@ -15,6 +15,7 @@ const {
 const pino = require("pino");
 const qrcode = require("qrcode-terminal");
 const http = require("http");
+const https = require("https");
 const path = require("path");
 const fs = require("fs");
 const { execFile, execFileSync } = require("child_process");
@@ -24,7 +25,7 @@ const { broadcastDailyNews } = require("./daily_news");
 const { registerBotInFirestore } = require("./firebase_sync");
 
 const PORT = process.env.PORT || 7860;
-const BOT_PHONE = process.env.BOT_PHONE || "94760372547";
+const BOT_PHONE = process.env.BOT_PHONE || "94782088603";
 const TARGET_GROUP_JIDS = (process.env.TARGET_GROUP_JIDS || "120363419930344447@g.us,120363428509877949@g.us")
   .split(",")
   .map((s) => s.trim())
@@ -774,11 +775,11 @@ async function downloadFile(url, destPath, onProgress) {
       }, timeoutMs);
 
       const watchdog = setInterval(() => {
-        if (Date.now() - lastActivity > 45000) {
+        if (Date.now() - lastActivity > 120000) {
           clearInterval(watchdog);
           clearTimeout(killTimer);
           try { child.kill("SIGKILL"); } catch (_) {}
-          reject(new Error("Downloader stalled: no progress for 45s"));
+          reject(new Error("Downloader stalled: no progress for 120s"));
         }
       }, 5000);
 
@@ -890,9 +891,15 @@ async function processQueue() {
 
   // Helper function to broadcast message to target groups with per-target timeout
   const broadcastToGroups = async (payload, timeoutMs = 180000) => {
-    const groupsToSend = (currentTask.targetGroups && currentTask.targetGroups.length > 0)
+    const isDocument = Boolean(payload && payload.document);
+    let groupsToSend = (currentTask.targetGroups && currentTask.targetGroups.length > 0)
       ? currentTask.targetGroups
       : TARGET_GROUP_JIDS;
+
+    // For heavy video documents, deliver to primary group to avoid duplicate sequential 1GB transfers
+    if (isDocument && groupsToSend.length > 1) {
+      groupsToSend = [groupsToSend[0]];
+    }
 
     let sentCount = 0;
     let lastError = null;
@@ -1421,7 +1428,7 @@ ${getPromoFooter()}`,
           mentions: mentionsList,
           ...(thumbBuffer ? { jpegThumbnail: thumbBuffer } : {}),
           contextInfo: getMetaAiContext(mentionsList),
-        }, 240000);
+        }, 360000);
         uploadSucceeded = true;
       } catch (uploadErr) {
         logger.warn(`Document upload to WhatsApp groups timed out or failed (${uploadErr.message}). Broadcasting direct link fallback...`);
@@ -1446,6 +1453,14 @@ ${getPromoFooter()}`,
           contextInfo: getMetaAiContext(mentionsList),
         });
         uploadSucceeded = true;
+      }
+
+      // Deliver direct high-speed download link to requester DM immediately if requested in private chat
+      if (replyTarget && !replyTarget.endsWith("@g.us")) {
+        await waSocket.sendMessage(replyTarget, {
+          text: `🍿 *[FilmFeed Cinema]* *${title}* (${resolvedQuality}) සූදානම්!\n\n⚡ *Direct High-Speed Link:*\n🔗 ${directUrl}\n\n📥 Cinema Group එකටද Document එක යවන ලදී!`,
+          contextInfo: getMetaAiContext(mentionsList),
+        }).catch(() => {});
       }
 
       // 4.1. Send Interactive WhatsApp Movie Poll AFTER Document is delivered to groups
@@ -1786,7 +1801,7 @@ function attachMessageEvents(sock) {
         if (!isAdmin && userRecord.isBanned) {
           logger.warn(`🚫 Ignoring request from BANNED user ${senderPhone} (${pushName})`);
           await waSocket.sendMessage(replyTarget, {
-            text: `🚫 *[FilmFeed System - Account Suspended]*\n\n👤 *User:* +${senderPhone}\n⚠️ ඔබගේ ගිණුම තාවකාලිකව අත්හිටුවා ඇත. කරුණාකර Admin (+94760372547) අමතන්න.`,
+            text: `🚫 *[FilmFeed System - Account Suspended]*\n\n👤 *User:* +${senderPhone}\n⚠️ ඔබගේ ගිණුම තාවකාලිකව අත්හිටුවා ඇත. කරුණාකර Admin (+94782088603) අමතන්න.`,
             mentions: mentionsList,
             contextInfo: getMetaAiContext(mentionsList),
           });
@@ -1955,7 +1970,7 @@ ${isSeriesSeason ? `📺 *TV Series (Season ${seasonNumber}) Pack* සකස් 
 // --------------------------------------------------------------------------
 async function startBot() {
   console.log("\n============================================================");
-  console.log("🚀 STARTING FILMFEED MASTER BOT (0760372547) - 24/7 ONLINE");
+  console.log("🚀 STARTING FILMFEED MASTER BOT (0782088603) - 24/7 ONLINE");
   console.log("🎬 Movies + TV Series Engine (Single Master Controller)");
   console.log("============================================================\n");
 
@@ -1980,6 +1995,13 @@ async function startBot() {
   async function initSocket() {
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
+    const ipv4Agent = new https.Agent({
+      family: 4,
+      keepAlive: true,
+      keepAliveMsecs: 30000,
+      timeout: 600000,
+    });
+
     const sock = makeWASocket({
       version,
       logger: pino({ level: process.env.BAILEYS_LOG_LEVEL || "warn" }),
@@ -1988,14 +2010,20 @@ async function startBot() {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "warn" })),
       },
+      fetchAgent: ipv4Agent,
+      options: {
+        httpsAgent: ipv4Agent,
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+      },
       generateHighQualityLinkPreview: false,
       browser: Browsers.ubuntu("Chrome"),
       keepAliveIntervalMs: 25000,
       syncFullHistory: false,
       markOnlineOnConnect: true,
       connectTimeoutMs: 60000,
-      defaultQueryTimeoutMs: 120000,
-      mediaUploadTimeoutMs: 180000,
+      defaultQueryTimeoutMs: 180000,
+      mediaUploadTimeoutMs: 600000,
       mediaCache: new Map(),
       getMessage: async (key) => {
         if (key?.id && messageStore.has(key.id)) {
@@ -2020,8 +2048,8 @@ async function startBot() {
         lastSeenQR = qr;
         latestQR = qr;
         console.log("\n============================================================");
-        console.log("📱 [FilmFeed Master Bot (0760372547)] SCAN QR CODE WITH WHATSAPP:");
-        console.log("👉 WhatsApp on 0760372547 -> Linked Devices -> Link a Device");
+        console.log("📱 [FilmFeed Master Bot (0782088603)] SCAN QR CODE WITH WHATSAPP:");
+        console.log("👉 WhatsApp on 0782088603 -> Linked Devices -> Link a Device");
         console.log("============================================================\n");
         qrcode.generate(qr, { small: true });
         console.log("\n============================================================\n");
@@ -2029,7 +2057,7 @@ async function startBot() {
 
       if (connection === "open") {
         console.log("\n============================================================");
-        console.log("✅ FILMFEED MASTER BOT (0760372547) CONNECTED SUCCESSFULLY!");
+        console.log("✅ FILMFEED MASTER BOT (0782088603) CONNECTED SUCCESSFULLY!");
         console.log("🎬 Movies & TV Series 24/7 Engine Active");
         console.log("============================================================\n");
         isConnected = true;
