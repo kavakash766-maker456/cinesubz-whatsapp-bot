@@ -23,6 +23,14 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# curl_cffi: Cloudflare-bypass TLS impersonation + proper per-chunk read timeouts
+try:
+    from curl_cffi import requests as _cffi_requests
+    _HAS_CFFI = True
+except ImportError:
+    _cffi_requests = None
+    _HAS_CFFI = False
+
 # Force IPv4 socket resolution to prevent broken IPv6 timeouts on GitHub Actions and cloud runners
 try:
     _orig_getaddrinfo = socket.getaddrinfo
@@ -123,38 +131,38 @@ def get_file_info(url: str, headers: dict = None) -> tuple:
     h_probe["Range"] = "bytes=0-1024"
 
     try:
-        req = urllib.request.Request(url, headers=h_probe, method="GET")
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            ctype = resp.headers.get("Content-Type", "").lower()
-            if "text/html" in ctype and "application/" not in ctype:
-                raise RuntimeError(f"Server returned an HTML page ({ctype}) instead of media stream.")
-
-            # HTTP 206 Partial Content -> Range is supported!
-            cr = resp.headers.get("Content-Range", "")
-            if cr and "/" in cr:
-                total_str = cr.split("/")[-1].strip()
+        def _probe_resp(resp_obj, is_cffi=False):
+            ctype = (resp_obj.headers.get('content-type', '') if is_cffi else resp_obj.headers.get('Content-Type', '')).lower()
+            if 'text/html' in ctype and 'application/' not in ctype:
+                raise RuntimeError(f'Server returned an HTML page ({ctype}) instead of media stream.')
+            cr = (resp_obj.headers.get('content-range', '') if is_cffi else resp_obj.headers.get('Content-Range', ''))
+            if cr and '/' in cr:
+                total_str = cr.split('/')[-1].strip()
                 if total_str.isdigit():
                     return int(total_str), True
-
-            # Server returned HTTP 200 (ignored Range header)
-            clen = resp.headers.get("Content-Length")
-            if clen and clen.isdigit():
+            clen = (resp_obj.headers.get('content-length') if is_cffi else resp_obj.headers.get('Content-Length'))
+            if clen and str(clen).isdigit():
                 return int(clen), False
+            return None
 
-    except urllib.error.HTTPError as e:
-        if e.code in (401, 403, 404, 410):
-            # Fatal HTTP status from upstream
-            raise RuntimeError(f"HTTP {e.code} ({e.reason}) accessing media URL.")
-        # If server rejects 0-1024 range with 416 (Range Not Satisfiable), file might be <= 1024 bytes
-        if e.code == 416:
-            cr = e.headers.get("Content-Range", "")
-            if cr and "/" in cr:
-                total_str = cr.split("/")[-1].strip()
-                if total_str.isdigit():
-                    return int(total_str), True
+        if _HAS_CFFI:
+            resp = _cffi_requests.get(url, headers=h_probe, impersonate='chrome124', timeout=(15, 15), stream=True, allow_redirects=True)
+            result = _probe_resp(resp, is_cffi=True)
+            if result:
+                return result
+        else:
+            req = urllib.request.Request(url, headers=h_probe, method='GET')
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                result = _probe_resp(resp, is_cffi=False)
+                if result:
+                    return result
+
     except Exception as e:
-        if "HTML page" in str(e):
+        err_s = str(e)
+        if 'HTML page' in err_s:
             raise
+        if any(c in err_s for c in ['401', '403', '404', '410']):
+            raise RuntimeError(f'HTTP error accessing media URL: {err_s}')
 
     # 2. Secondary fallback probe: HTTP GET with Range: bytes=0-1
     try:
@@ -329,42 +337,76 @@ def download_chunk(
         headers["Range"] = f"bytes={current_start}-{part_end}"
 
         try:
-            req = urllib.request.Request(url, headers=headers, method="GET")
-            with urllib.request.urlopen(req, timeout=35) as resp:
-                mode = "ab" if existing_bytes > 0 else "wb"
+            mode = 'ab' if existing_bytes > 0 else 'wb'
+            last_hb = time.time()
+            if _HAS_CFFI:
+                # curl_cffi: TLS impersonation + 90s per-chunk read timeout (no infinite block)
+                resp = _cffi_requests.get(
+                    url, headers=headers, impersonate='chrome124',
+                    stream=True, timeout=(30, 90), allow_redirects=True,
+                )
+                if resp.status_code in (401, 403, 404, 410):
+                    stop_event.set()
+                    emit_ipc('error', message=f'HTTP {resp.status_code} on chunk {part_num}', code=resp.status_code)
+                    return False
+                if mode == 'wb':
+                    existing_bytes = 0
                 with open(part_file, mode) as f:
-                    while not stop_event.is_set():
-                        chunk = resp.read(64 * 1024)  # 256KB buffer
-                        if not chunk:
+                    for chunk in resp.iter_content(chunk_size=65536):
+                        if stop_event.is_set():
                             break
+                        if not chunk:
+                            continue
                         f.write(chunk)
                         existing_bytes += len(chunk)
                         progress_dict[part_num] = existing_bytes
-                        if existing_bytes % (2 * 1024 * 1024) < 256 * 1024:
-                            try:
-                                f.flush()
-                            except Exception:
-                                pass
+                        now_hb = time.time()
+                        if now_hb - last_hb >= 30:
+                            last_hb = now_hb
+                            sys.stderr.write(f'[chunk{part_num}] alive: {existing_bytes//(1024*1024)}MB\n')
+                            sys.stderr.flush()
                     try:
                         f.flush()
                     except Exception:
                         pass
+            else:
+                req = urllib.request.Request(url, headers=headers, method='GET')
+                with urllib.request.urlopen(req, timeout=35) as resp:
+                    if mode == 'wb':
+                        existing_bytes = 0
+                    with open(part_file, mode) as f:
+                        while not stop_event.is_set():
+                            chunk = resp.read(64 * 1024)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            existing_bytes += len(chunk)
+                            progress_dict[part_num] = existing_bytes
+                            now_hb = time.time()
+                            if now_hb - last_hb >= 30:
+                                last_hb = now_hb
+                                sys.stderr.write(f'[chunk{part_num}] alive: {existing_bytes//(1024*1024)}MB\n')
+                                sys.stderr.flush()
+                        try:
+                            f.flush()
+                        except Exception:
+                            pass
 
             if existing_bytes >= expected_size:
                 progress_dict[part_num] = expected_size
                 with meta_lock:
-                    part_info["done"] = True
+                    part_info['done'] = True
                     save_meta(dest_path, meta_dict)
                 return True
 
         except urllib.error.HTTPError as e:
             if e.code in (401, 403, 404, 410):
                 stop_event.set()
-                emit_ipc("error", message=f"HTTP {e.code} ({e.reason}) on chunk {part_num}", code=e.code)
+                emit_ipc('error', message=f'HTTP {e.code} ({e.reason}) on chunk {part_num}', code=e.code)
                 return False
-            # Transient error, apply jittered backoff
-        except Exception:
-            pass
+        except Exception as chunk_err:
+            sys.stderr.write(f'[chunk{part_num}] attempt {attempt} error: {chunk_err}\n')
+            sys.stderr.flush()
 
         if attempt < max_retries and not stop_event.is_set():
             # Exponential backoff with decorrelated jitter
@@ -395,43 +437,54 @@ def stream_download(
 
     start_time = time.time()
     last_emit = start_time
+    last_heartbeat = start_time
 
     for attempt in range(1, max_retries + 1):
         try:
             req_headers = dict(headers)
             if existing_bytes > 0:
-                req_headers["Range"] = f"bytes={existing_bytes}-"
+                req_headers['Range'] = f'bytes={existing_bytes}-'
 
-            req = urllib.request.Request(url, headers=req_headers, method="GET")
-            with urllib.request.urlopen(req, timeout=40) as resp:
-                ctype = resp.headers.get("Content-Type", "").lower()
-                if "text/html" in ctype:
-                    raise RuntimeError("Server returned an HTML page instead of a media stream.")
+            if _HAS_CFFI:
+                # curl_cffi: TLS impersonation bypasses Cloudflare R2 throttling
+                # timeout=(connect_s, read_s) — read=90 means raise after 90s with no data chunk
+                resp = _cffi_requests.get(
+                    url, headers=req_headers, impersonate='chrome124',
+                    stream=True, timeout=(30, 90), allow_redirects=True,
+                )
+                if 'text/html' in resp.headers.get('content-type', '').lower():
+                    raise RuntimeError('Server returned HTML instead of media stream.')
+                if resp.status_code in (401, 403, 404, 410):
+                    emit_ipc('error', message=f'HTTP {resp.status_code}', code=resp.status_code)
+                    return False
 
                 if total_size <= 0:
-                    cr = resp.headers.get("Content-Range", "")
-                    if cr and "/" in cr:
-                        t_str = cr.split("/")[-1].strip()
+                    cr = resp.headers.get('content-range', '')
+                    if cr and '/' in cr:
+                        t_str = cr.split('/')[-1].strip()
                         if t_str.isdigit():
                             total_size = int(t_str)
                     if total_size <= 0:
-                        clen = resp.headers.get("Content-Length")
-                        if clen and clen.isdigit():
+                        clen = resp.headers.get('content-length')
+                        if clen and str(clen).isdigit():
                             total_size = existing_bytes + int(clen)
 
-                mode = "ab" if existing_bytes > 0 and resp.status == 206 else "wb"
-                if mode == "wb":
+                mode = 'ab' if existing_bytes > 0 and resp.status_code == 206 else 'wb'
+                if mode == 'wb':
                     existing_bytes = 0
 
                 with open(dest_path, mode) as f:
-                    while True:
-                        buf = resp.read(64 * 1024)
+                    for buf in resp.iter_content(chunk_size=65536):
                         if not buf:
-                            break
+                            continue
                         f.write(buf)
                         existing_bytes += len(buf)
-
                         now = time.time()
+                        # Keepalive heartbeat: stderr output resets Node.js watchdog timer
+                        if now - last_heartbeat >= 30:
+                            last_heartbeat = now
+                            sys.stderr.write(f'[stream] alive: {existing_bytes//(1024*1024)}MB\n')
+                            sys.stderr.flush()
                         if now - last_emit >= 0.9:
                             last_emit = now
                             elapsed = max(now - start_time, 0.001)
@@ -441,7 +494,7 @@ def stream_download(
                             speed_bps = existing_bytes / elapsed
                             eta = int(remaining / max(speed_bps, 1)) if total_size > 0 else 0
                             emit_ipc(
-                                "progress",
+                                'progress',
                                 downloaded=existing_bytes,
                                 total=total_size,
                                 percent=pct,
@@ -449,10 +502,62 @@ def stream_download(
                                 eta_seconds=eta,
                             )
 
+            else:
+                # Fallback: urllib.request (no Cloudflare bypass)
+                req = urllib.request.Request(url, headers=req_headers, method='GET')
+                with urllib.request.urlopen(req, timeout=40) as resp:
+                    ctype = resp.headers.get('Content-Type', '').lower()
+                    if 'text/html' in ctype:
+                        raise RuntimeError('Server returned an HTML page instead of a media stream.')
+
+                    if total_size <= 0:
+                        cr = resp.headers.get('Content-Range', '')
+                        if cr and '/' in cr:
+                            t_str = cr.split('/')[-1].strip()
+                            if t_str.isdigit():
+                                total_size = int(t_str)
+                        if total_size <= 0:
+                            clen = resp.headers.get('Content-Length')
+                            if clen and clen.isdigit():
+                                total_size = existing_bytes + int(clen)
+
+                    mode = 'ab' if existing_bytes > 0 and resp.status == 206 else 'wb'
+                    if mode == 'wb':
+                        existing_bytes = 0
+
+                    with open(dest_path, mode) as f:
+                        while True:
+                            buf = resp.read(64 * 1024)
+                            if not buf:
+                                break
+                            f.write(buf)
+                            existing_bytes += len(buf)
+                            now = time.time()
+                            if now - last_heartbeat >= 30:
+                                last_heartbeat = now
+                                sys.stderr.write(f'[stream] alive: {existing_bytes//(1024*1024)}MB\n')
+                                sys.stderr.flush()
+                            if now - last_emit >= 0.9:
+                                last_emit = now
+                                elapsed = max(now - start_time, 0.001)
+                                speed_mb = round((existing_bytes / (1024 * 1024)) / elapsed, 2)
+                                pct = round((existing_bytes / total_size) * 100, 1) if total_size > 0 else 0.0
+                                remaining = max(total_size - existing_bytes, 0)
+                                speed_bps = existing_bytes / elapsed
+                                eta = int(remaining / max(speed_bps, 1)) if total_size > 0 else 0
+                                emit_ipc(
+                                    'progress',
+                                    downloaded=existing_bytes,
+                                    total=total_size,
+                                    percent=pct,
+                                    speed_mb=speed_mb,
+                                    eta_seconds=eta,
+                                )
+
             final_size = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
             if final_size > 1000000 or (total_size > 0 and final_size >= total_size):
                 emit_ipc(
-                    "complete",
+                    'complete',
                     success=True,
                     size=final_size,
                     dest_path=dest_path,
@@ -462,16 +567,17 @@ def stream_download(
 
         except urllib.error.HTTPError as e:
             if e.code in (401, 403, 404, 410):
-                emit_ipc("error", message=f"HTTP {e.code} ({e.reason})", code=e.code)
+                emit_ipc('error', message=f'HTTP {e.code} ({e.reason})', code=e.code)
                 return False
-        except Exception:
-            pass
+        except Exception as se:
+            sys.stderr.write(f'[stream] attempt {attempt} error: {se}\n')
+            sys.stderr.flush()
 
         if attempt < max_retries:
             sleep_sec = min(0.5 * (2 ** (attempt - 1)) + random.uniform(0.1, 0.5), 15.0)
             time.sleep(sleep_sec)
 
-    emit_ipc("error", message="Single-stream download failed after max retries", code=500)
+    emit_ipc('error', message='Single-stream download failed after max retries', code=500)
     return False
 
 

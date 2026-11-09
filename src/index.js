@@ -808,11 +808,11 @@ async function downloadFile(url, destPath, onProgress) {
       }, timeoutMs);
 
       const watchdog = setInterval(() => {
-        if (Date.now() - lastActivity > 300000) {
+        if (Date.now() - lastActivity > 600000) {
           clearInterval(watchdog);
           clearTimeout(killTimer);
           try { child.kill("SIGKILL"); } catch (_) {}
-          reject(new Error("Downloader stalled: no progress for 300s"));
+          reject(new Error("Downloader stalled: no progress for 600s"));
         }
       }, 5000);
 
