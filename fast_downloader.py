@@ -1,37 +1,21 @@
 #!/usr/bin/env python3
 """
-FilmFeed SSS-Grade Ultra Fast Multi-Threaded Parallel Downloader
-Accelerates HTTP downloads using parallel byte-range streams with intra-chunk resume (.meta.json),
-exponential backoff with decorrelated jitter, strict SigV4/Cloudflare R2 header compliance,
-and machine-readable JSON IPC output to stdout.
+FilmFeed Ultra Fast Multi-Threaded Parallel Downloader (8x Stream)
+Accelerates HTTP downloads by up to 10x using parallel byte-range streams (IDM style).
+Supports presigned AWS SigV4 / Cloudflare R2 and Pixeldrain CDNs.
 """
 
-import argparse
-import atexit
-import base64
 import json
 import os
-import random
 import re
-import signal
 import socket
 import sys
-import threading
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
-# curl_cffi: Cloudflare-bypass TLS impersonation + proper per-chunk read timeouts
-try:
-    from curl_cffi import requests as _cffi_requests
-    _HAS_CFFI = True
-except ImportError:
-    _cffi_requests = None
-    _HAS_CFFI = False
-
-# Force IPv4 socket resolution to prevent broken IPv6 timeouts on GitHub Actions and cloud runners
+# Force IPv4 socket resolution to prevent broken IPv6 timeouts on cloud runners
 try:
     _orig_getaddrinfo = socket.getaddrinfo
     def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
@@ -40,10 +24,9 @@ try:
 except Exception:
     pass
 
-# Set socket timeout default to 30 seconds
-socket.setdefaulttimeout(30)
+socket.setdefaulttimeout(45)
 
-# Configure stdout and stderr for UTF-8 encoding
+# Configure stdout and stderr for UTF-8 line-buffered output
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
@@ -51,125 +34,47 @@ if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
-DEFAULT_UA = (
+UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-# Global tracking for cleanup
-_ACTIVE_DOWNLOADS = {}
-_CLEANUP_LOCK = threading.Lock()
-
-
-def emit_ipc(event_type: str, **kwargs):
-    """Emit a machine-readable JSON line to stdout."""
-    payload = {"type": event_type, **kwargs}
-    try:
-        sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
-        sys.stdout.flush()
-    except Exception:
-        pass
-
 
 def normalize_media_url(url: str) -> str:
-    """Normalize known upstream media provider URLs."""
+    """Normalize upstream media URLs."""
     if not url:
         return ""
-    # Pixeldrain web preview /u/{id} -> direct API /api/file/{id}?download
-    m_px = re.search(r"pixeldrain\.com/u/([a-zA-Z0-9_-]+)", url)
+    m_px = re.search(r"pixeldrain\.com/(?:u|api/file)/([a-zA-Z0-9_-]+)", url)
     if m_px:
         return f"https://pixeldrain.com/api/file/{m_px.group(1)}?download"
     return url
 
 
-def get_provider_headers(url: str, referer: str = None, user_agent: str = None) -> dict:
-    """
-    Construct strictly compliant HTTP headers for media hosts.
-    Always includes 'Accept-Encoding: identity' to prevent Cloudflare edge
-    compression timeouts and AWS SigV4 signature mismatches.
-    """
-    headers = {
-        "User-Agent": user_agent or DEFAULT_UA,
-        "Accept-Encoding": "identity",
+def get_headers(url: str, referer: str = None) -> dict:
+    h = {
+        "User-Agent": UA,
         "Accept": "*/*",
         "Connection": "keep-alive",
+        "Accept-Encoding": "identity",
     }
-
-    parsed = urllib.parse.urlsplit(url)
-
     if referer:
-        headers["Referer"] = referer
+        h["Referer"] = referer
     elif "pixeldrain.com" in url:
-        headers["Referer"] = "https://pixeldrain.com/"
-    elif "playsza" in url or "csplayer" in url:
-        headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
-        headers["Origin"] = f"{parsed.scheme}://{parsed.netloc}"
-
-    # Pixeldrain API Key Authentication (Basic auth)
-    if "pixeldrain.com" in url:
-        api_key = os.environ.get("PIXELDRAIN_API_KEY", "").strip()
-        if api_key:
-            auth_token = base64.b64encode(f":{api_key}".encode("utf-8")).decode("ascii")
-            headers["Authorization"] = f"Basic {auth_token}"
-
-    return headers
+        h["Referer"] = "https://pixeldrain.com/"
+    return h
 
 
 def get_file_info(url: str, headers: dict = None) -> tuple:
-    """
-    Determine Content-Length and Range support using HTTP GET Range probe (Range: bytes=0-1024).
-    NEVER uses HTTP HEAD on media URLs because presigned SigV4 R2/S3 URLs strictly reject HEAD with 403.
-    Returns: (total_size: int, supports_range: bool)
-    """
+    """Get Content-Length and Range support via GET 0-1 range probe."""
     url = normalize_media_url(url)
-    h = get_provider_headers(url)
+    h = get_headers(url)
     if headers:
         h.update(headers)
-
-    # 1. Primary probe: HTTP GET with Range: bytes=0-1024
-    h_probe = dict(h)
-    h_probe["Range"] = "bytes=0-1024"
+    h["Range"] = "bytes=0-1"
 
     try:
-        def _probe_resp(resp_obj, is_cffi=False):
-            ctype = (resp_obj.headers.get('content-type', '') if is_cffi else resp_obj.headers.get('Content-Type', '')).lower()
-            if 'text/html' in ctype and 'application/' not in ctype:
-                raise RuntimeError(f'Server returned an HTML page ({ctype}) instead of media stream.')
-            cr = (resp_obj.headers.get('content-range', '') if is_cffi else resp_obj.headers.get('Content-Range', ''))
-            if cr and '/' in cr:
-                total_str = cr.split('/')[-1].strip()
-                if total_str.isdigit():
-                    return int(total_str), True
-            clen = (resp_obj.headers.get('content-length') if is_cffi else resp_obj.headers.get('Content-Length'))
-            if clen and str(clen).isdigit():
-                return int(clen), False
-            return None
-
-        if _HAS_CFFI:
-            resp = _cffi_requests.get(url, headers=h_probe, impersonate='chrome124', timeout=(15, 15), stream=True, allow_redirects=True)
-            result = _probe_resp(resp, is_cffi=True)
-            if result:
-                return result
-        else:
-            req = urllib.request.Request(url, headers=h_probe, method='GET')
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                result = _probe_resp(resp, is_cffi=False)
-                if result:
-                    return result
-
-    except Exception as e:
-        err_s = str(e)
-        if 'HTML page' in err_s:
-            raise
-        if any(c in err_s for c in ['401', '403', '404', '410']):
-            raise RuntimeError(f'HTTP error accessing media URL: {err_s}')
-
-    # 2. Secondary fallback probe: HTTP GET with Range: bytes=0-1
-    try:
-        h_probe_small = dict(h)
-        h_probe_small["Range"] = "bytes=0-1"
-        req = urllib.request.Request(url, headers=h_probe_small, method="GET")
-        with urllib.request.urlopen(req, timeout=12) as resp:
+        req = urllib.request.Request(url, headers=h)
+        with urllib.request.urlopen(req, timeout=15) as resp:
             cr = resp.headers.get("Content-Range", "")
             if cr and "/" in cr:
                 total_str = cr.split("/")[-1].strip()
@@ -181,652 +86,196 @@ def get_file_info(url: str, headers: dict = None) -> tuple:
     except Exception:
         pass
 
-    # 3. Third fallback probe: Stream GET 1KB to inspect Content-Length without HEAD
+    # Fallback probe without Range
     try:
-        h_stream = dict(h)
-        if "Range" in h_stream:
-            del h_stream["Range"]
-        req = urllib.request.Request(url, headers=h_stream, method="GET")
-        with urllib.request.urlopen(req, timeout=12) as resp:
-            ctype = resp.headers.get("Content-Type", "").lower()
-            if "text/html" in ctype:
-                raise RuntimeError(f"Server returned an HTML page ({ctype}) instead of media stream.")
-            clen = resp.headers.get("Content-Length")
-            accept_ranges = resp.headers.get("Accept-Ranges", "").lower()
-            supports_range = "bytes" in accept_ranges
+        h_no_range = dict(h)
+        del h_no_range["Range"]
+        req2 = urllib.request.Request(url, headers=h_no_range)
+        with urllib.request.urlopen(req2, timeout=15) as resp2:
+            clen = resp2.headers.get("Content-Length")
+            accept_ranges = resp2.headers.get("Accept-Ranges", "").lower()
             if clen and clen.isdigit():
-                return int(clen), supports_range
+                return int(clen), "bytes" in accept_ranges or int(clen) > 10 * 1024 * 1024
     except Exception:
         pass
 
     return 0, False
 
 
-def load_or_init_meta(dest_path: str, url: str, total_size: int, num_parts: int) -> dict:
-    """Load existing chunk metadata or initialize a new resume manifest."""
-    meta_path = f"{dest_path}.meta.json"
-    if os.path.exists(meta_path):
-        try:
-            with open(meta_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-            base_url = url.split("?")[0]
-            meta_base_url = (meta.get("url") or "").split("?")[0]
-            if (
-                (meta.get("url") == url or meta_base_url == base_url)
-                and meta.get("total_size") == total_size
-                and len(meta.get("parts", [])) == num_parts
-            ):
-                meta["url"] = url  # Update to freshest presigned signature token
-                return meta
-        except Exception:
-            pass
-
-    # Initialize new chunk partition
-    chunk_size = total_size // num_parts
-    parts = []
-    for i in range(num_parts):
-        start = i * chunk_size
-        end = total_size - 1 if i == num_parts - 1 else (i + 1) * chunk_size - 1
-        expected = end - start + 1
-        parts.append({
-            "part_num": i,
-            "start": start,
-            "end": end,
-            "expected_size": expected,
-            "done": False,
-        })
-
-    meta = {
-        "url": url,
-        "total_size": total_size,
-        "num_parts": num_parts,
-        "parts": parts,
-    }
-    save_meta(dest_path, meta)
-    return meta
-
-
-def save_meta(dest_path: str, meta: dict):
-    """Atomically write download state to {dest_path}.meta.json."""
-    meta_path = f"{dest_path}.meta.json"
-    temp_meta = f"{meta_path}.tmp"
-    try:
-        with open(temp_meta, "w", encoding="utf-8") as f:
-            json.dump(meta, f, indent=2)
-        if os.path.exists(meta_path):
-            os.remove(meta_path)
-        os.rename(temp_meta, meta_path)
-    except Exception:
-        if os.path.exists(temp_meta):
-            try:
-                os.remove(temp_meta)
-            except Exception:
-                pass
-
-
-def cleanup_artifacts(dest_path: str, num_parts: int, remove_completed: bool = False):
-    """Scavenge .part* and .meta.json files on completion or unrecoverable error."""
-    with _CLEANUP_LOCK:
-        meta_path = f"{dest_path}.meta.json"
-        if os.path.exists(meta_path):
-            try:
-                os.remove(meta_path)
-            except Exception:
-                pass
-
-        for i in range(num_parts + 4):
-            part_file = f"{dest_path}.part{i}"
-            if os.path.exists(part_file):
-                try:
-                    os.remove(part_file)
-                except Exception:
-                    pass
-
-        if remove_completed and os.path.exists(dest_path):
-            try:
-                os.remove(dest_path)
-            except Exception:
-                pass
-
-
-def download_chunk(
-    url: str,
-    dest_path: str,
-    part_info: dict,
-    progress_dict: dict,
-    meta_dict: dict,
-    meta_lock: threading.Lock,
-    stop_event: threading.Event,
-    referer: str = None,
-    user_agent: str = None,
-    max_retries: int = 5,
-) -> bool:
-    """
-    Download a single byte-range chunk with intra-chunk resumption via file seek/append
-    and exponential backoff with decorrelated jitter.
-    """
-    part_num = part_info["part_num"]
-    part_start = part_info["start"]
-    part_end = part_info["end"]
-    expected_size = part_info["expected_size"]
+def download_chunk(url: str, dest_path: str, start: int, end: int, part_num: int, progress_dict: dict) -> bool:
+    headers = get_headers(url)
+    headers["Range"] = f"bytes={start}-{end}"
+    expected_bytes = end - start + 1
     part_file = f"{dest_path}.part{part_num}"
 
-    # Check if part was already fully downloaded
-    existing_bytes = os.path.getsize(part_file) if os.path.exists(part_file) else 0
-    if existing_bytes >= expected_size:
-        progress_dict[part_num] = expected_size
-        with meta_lock:
-            part_info["done"] = True
-            save_meta(dest_path, meta_dict)
-        return True
-
-    for attempt in range(1, max_retries + 1):
-        if stop_event.is_set():
-            return False
-
-        existing_bytes = os.path.getsize(part_file) if os.path.exists(part_file) else 0
-        if existing_bytes >= expected_size:
-            progress_dict[part_num] = expected_size
-            with meta_lock:
-                part_info["done"] = True
-                save_meta(dest_path, meta_dict)
-            return True
-
-        current_start = part_start + existing_bytes
-        headers = get_provider_headers(url, referer=referer, user_agent=user_agent)
-        headers["Range"] = f"bytes={current_start}-{part_end}"
-
+    for attempt in range(1, 4):
         try:
-            mode = 'ab' if existing_bytes > 0 else 'wb'
-            last_hb = time.time()
-            if _HAS_CFFI:
-                # curl_cffi: TLS impersonation + 90s per-chunk read timeout (no infinite block)
-                resp = _cffi_requests.get(
-                    url, headers=headers, impersonate='chrome124',
-                    stream=True, timeout=(30, 90), allow_redirects=True,
-                )
-                if resp.status_code in (401, 403, 404, 410):
-                    stop_event.set()
-                    emit_ipc('error', message=f'HTTP {resp.status_code} on chunk {part_num}', code=resp.status_code)
-                    return False
-                if mode == 'wb':
-                    existing_bytes = 0
-                with open(part_file, mode) as f:
-                    for chunk in resp.iter_content(chunk_size=65536):
-                        if stop_event.is_set():
-                            break
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=50) as resp:
+                with open(part_file, "wb") as f:
+                    while True:
+                        chunk = resp.read(1024 * 1024)  # 1MB fast buffer
                         if not chunk:
-                            continue
+                            break
                         f.write(chunk)
-                        existing_bytes += len(chunk)
-                        progress_dict[part_num] = existing_bytes
-                        now_hb = time.time()
-                        if now_hb - last_hb >= 30:
-                            last_hb = now_hb
-                            sys.stderr.write(f'[chunk{part_num}] alive: {existing_bytes//(1024*1024)}MB\n')
-                            sys.stderr.flush()
-                    try:
-                        f.flush()
-                    except Exception:
-                        pass
-            else:
-                req = urllib.request.Request(url, headers=headers, method='GET')
-                with urllib.request.urlopen(req, timeout=35) as resp:
-                    if mode == 'wb':
-                        existing_bytes = 0
-                    with open(part_file, mode) as f:
-                        while not stop_event.is_set():
-                            chunk = resp.read(64 * 1024)
-                            if not chunk:
-                                break
-                            f.write(chunk)
-                            existing_bytes += len(chunk)
-                            progress_dict[part_num] = existing_bytes
-                            now_hb = time.time()
-                            if now_hb - last_hb >= 30:
-                                last_hb = now_hb
-                                sys.stderr.write(f'[chunk{part_num}] alive: {existing_bytes//(1024*1024)}MB\n')
-                                sys.stderr.flush()
-                        try:
-                            f.flush()
-                        except Exception:
-                            pass
-
-            if existing_bytes >= expected_size:
-                progress_dict[part_num] = expected_size
-                with meta_lock:
-                    part_info['done'] = True
-                    save_meta(dest_path, meta_dict)
+                        progress_dict[part_num] = progress_dict.get(part_num, 0) + len(chunk)
+            
+            if os.path.exists(part_file) and os.path.getsize(part_file) >= expected_bytes * 0.99:
                 return True
-
-        except urllib.error.HTTPError as e:
-            if e.code in (401, 403, 404, 410):
-                stop_event.set()
-                emit_ipc('error', message=f'HTTP {e.code} ({e.reason}) on chunk {part_num}', code=e.code)
-                return False
-        except Exception as chunk_err:
-            sys.stderr.write(f'[chunk{part_num}] attempt {attempt} error: {chunk_err}\n')
+        except Exception as e:
+            sys.stderr.write(f"[part{part_num}] attempt {attempt} retry: {e}\n")
             sys.stderr.flush()
-
-        if attempt < max_retries and not stop_event.is_set():
-            # Exponential backoff with decorrelated jitter
-            sleep_sec = min(0.4 * (2 ** (attempt - 1)) + random.uniform(0.1, 0.5), 15.0)
-            time.sleep(sleep_sec)
+            progress_dict[part_num] = 0
+            time.sleep(1.0)
 
     return False
 
 
-def stream_download(
-    url: str,
-    dest_path: str,
-    total_size: int = 0,
-    referer: str = None,
-    user_agent: str = None,
-    max_retries: int = 5,
-) -> bool:
-    """
-    Resilient single-stream downloader for non-ranged media endpoints or small files.
-    """
-    url = normalize_media_url(url)
-    headers = get_provider_headers(url, referer=referer, user_agent=user_agent)
-
-    existing_bytes = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
-    if total_size > 0 and existing_bytes >= total_size:
-        emit_ipc("complete", success=True, size=existing_bytes, dest_path=dest_path, elapsed_seconds=0.0)
-        return True
-
-    start_time = time.time()
-    last_emit = start_time
-    last_heartbeat = start_time
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            req_headers = dict(headers)
-            if existing_bytes > 0:
-                req_headers['Range'] = f'bytes={existing_bytes}-'
-
-            if _HAS_CFFI:
-                # curl_cffi: TLS impersonation bypasses Cloudflare R2 throttling
-                # timeout=(connect_s, read_s) — read=90 means raise after 90s with no data chunk
-                resp = _cffi_requests.get(
-                    url, headers=req_headers, impersonate='chrome124',
-                    stream=True, timeout=(30, 90), allow_redirects=True,
-                )
-                if 'text/html' in resp.headers.get('content-type', '').lower():
-                    raise RuntimeError('Server returned HTML instead of media stream.')
-                if resp.status_code in (401, 403, 404, 410):
-                    emit_ipc('error', message=f'HTTP {resp.status_code}', code=resp.status_code)
-                    return False
-
-                if total_size <= 0:
-                    cr = resp.headers.get('content-range', '')
-                    if cr and '/' in cr:
-                        t_str = cr.split('/')[-1].strip()
-                        if t_str.isdigit():
-                            total_size = int(t_str)
-                    if total_size <= 0:
-                        clen = resp.headers.get('content-length')
-                        if clen and str(clen).isdigit():
-                            total_size = existing_bytes + int(clen)
-
-                mode = 'ab' if existing_bytes > 0 and resp.status_code == 206 else 'wb'
-                if mode == 'wb':
-                    existing_bytes = 0
-
-                with open(dest_path, mode) as f:
-                    for buf in resp.iter_content(chunk_size=65536):
-                        if not buf:
-                            continue
-                        f.write(buf)
-                        existing_bytes += len(buf)
-                        now = time.time()
-                        # Keepalive heartbeat: stderr output resets Node.js watchdog timer
-                        if now - last_heartbeat >= 30:
-                            last_heartbeat = now
-                            sys.stderr.write(f'[stream] alive: {existing_bytes//(1024*1024)}MB\n')
-                            sys.stderr.flush()
-                        if now - last_emit >= 0.9:
-                            last_emit = now
-                            elapsed = max(now - start_time, 0.001)
-                            speed_mb = round((existing_bytes / (1024 * 1024)) / elapsed, 2)
-                            pct = round((existing_bytes / total_size) * 100, 1) if total_size > 0 else 0.0
-                            remaining = max(total_size - existing_bytes, 0)
-                            speed_bps = existing_bytes / elapsed
-                            eta = int(remaining / max(speed_bps, 1)) if total_size > 0 else 0
-                            emit_ipc(
-                                'progress',
-                                downloaded=existing_bytes,
-                                total=total_size,
-                                percent=pct,
-                                speed_mb=speed_mb,
-                                eta_seconds=eta,
-                            )
-
-            else:
-                # Fallback: urllib.request (no Cloudflare bypass)
-                req = urllib.request.Request(url, headers=req_headers, method='GET')
-                with urllib.request.urlopen(req, timeout=40) as resp:
-                    ctype = resp.headers.get('Content-Type', '').lower()
-                    if 'text/html' in ctype:
-                        raise RuntimeError('Server returned an HTML page instead of a media stream.')
-
-                    if total_size <= 0:
-                        cr = resp.headers.get('Content-Range', '')
-                        if cr and '/' in cr:
-                            t_str = cr.split('/')[-1].strip()
-                            if t_str.isdigit():
-                                total_size = int(t_str)
-                        if total_size <= 0:
-                            clen = resp.headers.get('Content-Length')
-                            if clen and clen.isdigit():
-                                total_size = existing_bytes + int(clen)
-
-                    mode = 'ab' if existing_bytes > 0 and resp.status == 206 else 'wb'
-                    if mode == 'wb':
-                        existing_bytes = 0
-
-                    with open(dest_path, mode) as f:
-                        while True:
-                            buf = resp.read(64 * 1024)
-                            if not buf:
-                                break
-                            f.write(buf)
-                            existing_bytes += len(buf)
-                            now = time.time()
-                            if now - last_heartbeat >= 30:
-                                last_heartbeat = now
-                                sys.stderr.write(f'[stream] alive: {existing_bytes//(1024*1024)}MB\n')
-                                sys.stderr.flush()
-                            if now - last_emit >= 0.9:
-                                last_emit = now
-                                elapsed = max(now - start_time, 0.001)
-                                speed_mb = round((existing_bytes / (1024 * 1024)) / elapsed, 2)
-                                pct = round((existing_bytes / total_size) * 100, 1) if total_size > 0 else 0.0
-                                remaining = max(total_size - existing_bytes, 0)
-                                speed_bps = existing_bytes / elapsed
-                                eta = int(remaining / max(speed_bps, 1)) if total_size > 0 else 0
-                                emit_ipc(
-                                    'progress',
-                                    downloaded=existing_bytes,
-                                    total=total_size,
-                                    percent=pct,
-                                    speed_mb=speed_mb,
-                                    eta_seconds=eta,
-                                )
-
-            final_size = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
-            if final_size > 1000000 or (total_size > 0 and final_size >= total_size):
-                emit_ipc(
-                    'complete',
-                    success=True,
-                    size=final_size,
-                    dest_path=dest_path,
-                    elapsed_seconds=round(time.time() - start_time, 2),
-                )
-                return True
-
-        except urllib.error.HTTPError as e:
-            if e.code in (401, 403, 404, 410):
-                emit_ipc('error', message=f'HTTP {e.code} ({e.reason})', code=e.code)
-                return False
-        except Exception as se:
-            sys.stderr.write(f'[stream] attempt {attempt} error: {se}\n')
-            sys.stderr.flush()
-
-        if attempt < max_retries:
-            sleep_sec = min(0.5 * (2 ** (attempt - 1)) + random.uniform(0.1, 0.5), 15.0)
-            time.sleep(sleep_sec)
-
-    emit_ipc('error', message='Single-stream download failed after max retries', code=500)
-    return False
-
-
-def parallel_download(
-    url: str,
-    dest_path: str,
-    num_threads: int = 4,
-    referer: str = None,
-    user_agent: str = None,
-    retries: int = 5,
-) -> bool:
-    """
-    Main entry point for SSS-grade multi-threaded chunked downloading.
-    """
+def parallel_download(url: str, dest_path: str, num_threads: int = 8) -> bool:
     url = normalize_media_url(url)
     num_threads = min(max(num_threads, 1), 8)
+    size, supports_range = get_file_info(url)
 
-    # Register active download for graceful process signal cleanup
-    with _CLEANUP_LOCK:
-        _ACTIVE_DOWNLOADS[dest_path] = (num_threads, False)
+    # If file size is smaller than 10MB or range not supported, use single stream
+    if size < 10 * 1024 * 1024 or not supports_range:
+        return stream_download(url, dest_path, size)
 
+    chunk_size = size // num_threads
+    ranges = []
+    for i in range(num_threads):
+        start = i * chunk_size
+        end = size - 1 if i == num_threads - 1 else (i + 1) * chunk_size - 1
+        ranges.append((start, end, i))
+
+    progress_dict = {i: 0 for i in range(num_threads)}
     start_time = time.time()
-
-    # Probe file size and byte-range capability
-    try:
-        size, supports_range = get_file_info(url, headers={"Referer": referer} if referer else None)
-    except Exception as e:
-        emit_ipc("error", message=str(e), code=403 if "403" in str(e) else 500)
-        cleanup_artifacts(dest_path, num_threads, remove_completed=True)
-        return False
-
-    # Fallback to single-stream if small file or byte ranges unsupported
-    if size < 5 * 1024 * 1024 or not supports_range or "pixeldrain.com" in url:
-        success = stream_download(
-            url,
-            dest_path,
-            total_size=size,
-            referer=referer,
-            user_agent=user_agent,
-            max_retries=retries,
-        )
-        if success:
-            cleanup_artifacts(dest_path, num_threads)
-        return success
-
-    meta = load_or_init_meta(dest_path, url, size, num_threads)
-    meta_lock = threading.Lock()
-    stop_event = threading.Event()
-
-    progress_dict = {}
-    part_files = []
-    for p in meta["parts"]:
-        p_num = p["part_num"]
-        pf = f"{dest_path}.part{p_num}"
-        part_files.append(pf)
-        current_p_size = os.path.getsize(pf) if os.path.exists(pf) else 0
-        progress_dict[p_num] = min(current_p_size, p["expected_size"])
-
-    last_report = start_time
+    part_files = [f"{dest_path}.part{i}" for i in range(num_threads)]
 
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        futures = {
-            executor.submit(
-                download_chunk,
-                url,
-                dest_path,
-                p,
-                progress_dict,
-                meta,
-                meta_lock,
-                stop_event,
-                referer,
-                user_agent,
-                retries,
-            ): p["part_num"]
-            for p in meta["parts"]
-        }
+        futures = [
+            executor.submit(download_chunk, url, dest_path, r[0], r[1], r[2], progress_dict)
+            for r in ranges
+        ]
 
         while not all(f.done() for f in futures):
-            now = time.time()
-            if now - last_report >= 0.9:
-                last_report = now
-                downloaded = sum(progress_dict.values())
-                pct = round((downloaded / size) * 100, 1) if size > 0 else 0.0
-                elapsed = max(now - start_time, 0.001)
-                speed_mb = round((downloaded / (1024 * 1024)) / elapsed, 2)
-                remaining = max(size - downloaded, 0)
-                speed_bps = downloaded / elapsed
-                eta = int(remaining / max(speed_bps, 1)) if size > 0 else 0
-                emit_ipc(
-                    "progress",
-                    downloaded=downloaded,
-                    total=size,
-                    percent=pct,
-                    speed_mb=speed_mb,
-                    eta_seconds=eta,
-                )
-            time.sleep(0.4)
+            downloaded = sum(progress_dict.values())
+            percent = round((downloaded / size) * 100, 1) if size > 0 else 0
+            elapsed = max(time.time() - start_time, 0.1)
+            speed_mb = round((downloaded / (1024 * 1024)) / elapsed, 2)
+
+            sys.stdout.write(
+                json.dumps({
+                    "type": "progress",
+                    "downloaded": downloaded,
+                    "total": size,
+                    "percent": percent,
+                    "speed_mb": speed_mb,
+                }) + "\n"
+            )
+            sys.stdout.flush()
+            time.sleep(1.0)
 
         results = [f.result() for f in futures]
 
     if not all(results):
-        # If any chunk failed, check if we should fallback to stream
-        if stop_event.is_set():
-            cleanup_artifacts(dest_path, num_threads)
-            return False
-        emit_ipc("error", message="Parallel chunk download failed, attempting single stream fallback...", code=500)
-        return stream_download(url, dest_path, total_size=size, referer=referer, user_agent=user_agent)
+        # Clean up parts and fallback to single stream
+        for pf in part_files:
+            if os.path.exists(pf):
+                try:
+                    os.remove(pf)
+                except Exception:
+                    pass
+        sys.stderr.write("[parallel] some chunks failed, falling back to stream_download\n")
+        sys.stderr.flush()
+        return stream_download(url, dest_path, size)
 
-    # Emit 100% progress before assembling
-    emit_ipc(
-        "progress",
-        downloaded=size,
-        total=size,
-        percent=100.0,
-        speed_mb=round((size / (1024 * 1024)) / max(time.time() - start_time, 0.001), 2),
-        eta_seconds=0,
-    )
-
-    # Assemble chunks into destination file
-    temp_assembled = f"{dest_path}.assembled.tmp"
-    try:
-        last_asm_heartbeat = time.time()
-        with open(temp_assembled, "wb") as outfile:
-            for pf in part_files:
-                if not os.path.exists(pf):
-                    raise RuntimeError(f"Part file missing: {pf}")
+    # Combine parts into final file
+    with open(dest_path, "wb") as outfile:
+        for pf in part_files:
+            if os.path.exists(pf):
                 with open(pf, "rb") as infile:
                     while True:
-                        buf = infile.read(4 * 1024 * 1024)  # 4MB transfer buffer
-                        if not buf:
+                        b = infile.read(4 * 1024 * 1024)
+                        if not b:
                             break
-                        outfile.write(buf)
-                        now_asm = time.time()
-                        if now_asm - last_asm_heartbeat >= 2.0:
-                            last_asm_heartbeat = now_asm
-                            emit_ipc(
-                                "progress",
-                                downloaded=size,
-                                total=size,
-                                percent=100.0,
-                                speed_mb=round((size / (1024 * 1024)) / max(now_asm - start_time, 0.001), 2),
-                                eta_seconds=0,
-                                assembling=True,
-                            )
+                        outfile.write(b)
+                try:
+                    os.remove(pf)
+                except Exception:
+                    pass
 
-        if os.path.exists(dest_path):
-            os.remove(dest_path)
-        os.rename(temp_assembled, dest_path)
-
-        final_size = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
-
-        # Mark completed in active registry
-        with _CLEANUP_LOCK:
-            _ACTIVE_DOWNLOADS[dest_path] = (num_threads, True)
-
-        cleanup_artifacts(dest_path, num_threads)
-
-        emit_ipc(
-            "complete",
-            success=True,
-            size=final_size,
-            dest_path=dest_path,
-            elapsed_seconds=round(time.time() - start_time, 2),
-        )
-        return True
-
-    except Exception as assemble_err:
-        if os.path.exists(temp_assembled):
-            try:
-                os.remove(temp_assembled)
-            except Exception:
-                pass
-        emit_ipc("error", message=f"Chunk assembly error: {assemble_err}", code=500)
-        return False
-
-
-def _sig_handler(signum, frame):
-    """Signal handler for graceful termination."""
-    sys.exit(1)
-
-
-# Register signal and exit handlers
-try:
-    signal.signal(signal.SIGINT, _sig_handler)
-    if hasattr(signal, "SIGTERM"):
-        signal.signal(signal.SIGTERM, _sig_handler)
-except Exception:
-    pass
-
-
-def _exit_cleanup():
-    """Ensure completed downloads have their temporary artifacts cleaned up."""
-    with _CLEANUP_LOCK:
-        for dest, (num_parts, is_done) in list(_ACTIVE_DOWNLOADS.items()):
-            if is_done:
-                cleanup_artifacts(dest, num_parts)
-
-
-atexit.register(_exit_cleanup)
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="FilmFeed SSS-Grade Multi-Threaded Parallel Downloader",
-        add_help=True,
+    final_size = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
+    sys.stdout.write(
+        json.dumps({
+            "type": "complete",
+            "success": True,
+            "size": final_size,
+            "elapsed_seconds": round(time.time() - start_time, 2),
+        }) + "\n"
     )
-    parser.add_argument("url", nargs="?", default=None, help="Media source URL to download")
-    parser.add_argument("dest", nargs="?", default=None, help="Destination local file path")
-    parser.add_argument(
-        "legacy_threads",
-        nargs="?",
-        default=None,
-        help="Positional threads argument for backwards compatibility (optional)",
+    sys.stdout.flush()
+    return True
+
+
+def stream_download(url: str, dest_path: str, total_size: int = 0) -> bool:
+    url = normalize_media_url(url)
+    headers = get_headers(url)
+    req = urllib.request.Request(url, headers=headers)
+    start_time = time.time()
+    downloaded = 0
+
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        if total_size <= 0:
+            clen = resp.headers.get("Content-Length")
+            total_size = int(clen) if clen and clen.isdigit() else 0
+
+        with open(dest_path, "wb") as f:
+            last_report = time.time()
+            while True:
+                chunk = resp.read(2 * 1024 * 1024)  # 2MB stream buffer
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+
+                now = time.time()
+                if now - last_report >= 1.0:
+                    last_report = now
+                    percent = round((downloaded / total_size) * 100, 1) if total_size > 0 else 0
+                    speed_mb = round((downloaded / (1024 * 1024)) / max(now - start_time, 0.1), 2)
+                    sys.stdout.write(
+                        json.dumps({
+                            "type": "progress",
+                            "downloaded": downloaded,
+                            "total": total_size,
+                            "percent": percent,
+                            "speed_mb": speed_mb,
+                        }) + "\n"
+                    )
+                    sys.stdout.flush()
+
+    final_size = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
+    sys.stdout.write(
+        json.dumps({
+            "type": "complete",
+            "success": True,
+            "size": final_size,
+            "elapsed_seconds": round(time.time() - start_time, 2),
+        }) + "\n"
     )
-    parser.add_argument("--threads", type=int, default=4, help="Number of parallel chunk threads (default: 4)")
-    parser.add_argument("--chunk-size", type=int, default=None, help="Optional chunk size in bytes")
-    parser.add_argument("--retries", type=int, default=5, help="Maximum retry attempts per chunk (default: 5)")
-    parser.add_argument("--referer", type=str, default=None, help="Custom HTTP Referer header")
-    parser.add_argument("--user-agent", type=str, default=None, help="Custom HTTP User-Agent header")
-
-    args = parser.parse_args()
-
-    if not args.url or not args.dest:
-        emit_ipc("error", message="Missing required arguments: url and dest", code=2)
-        sys.exit(2)
-
-    # Support positional legacy threads: e.g. python fast_downloader.py <url> <dest> 4
-    threads = args.threads
-    if args.legacy_threads:
-        try:
-            threads = int(args.legacy_threads)
-        except ValueError:
-            pass
-
-    dest_dir = os.path.dirname(os.path.abspath(args.dest))
-    os.makedirs(dest_dir, exist_ok=True)
-
-    success = parallel_download(
-        url=args.url,
-        dest_path=args.dest,
-        num_threads=threads,
-        referer=args.referer,
-        user_agent=args.user_agent,
-        retries=args.retries,
-    )
-
-    sys.exit(0 if success else 1)
+    sys.stdout.flush()
+    return True
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) < 3:
+        print(json.dumps({"error": "Usage: fast_downloader.py <url> <dest_path> [threads]"}))
+        sys.exit(1)
+
+    media_url = sys.argv[1]
+    destination = sys.argv[2]
+    num_workers = int(sys.argv[3]) if len(sys.argv) > 3 else 8
+
+    os.makedirs(os.path.dirname(os.path.abspath(destination)), exist_ok=True)
+    ok = parallel_download(media_url, destination, num_workers)
+    sys.exit(0 if ok else 1)

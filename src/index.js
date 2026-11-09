@@ -808,11 +808,11 @@ async function downloadFile(url, destPath, onProgress) {
       }, timeoutMs);
 
       const watchdog = setInterval(() => {
-        if (Date.now() - lastActivity > 600000) {
+        if (Date.now() - lastActivity > 900000) {
           clearInterval(watchdog);
           clearTimeout(killTimer);
           try { child.kill("SIGKILL"); } catch (_) {}
-          reject(new Error("Downloader stalled: no progress for 600s"));
+          reject(new Error("Downloader stalled: no progress for 900s"));
         }
       }, 5000);
 
@@ -863,7 +863,7 @@ async function downloadFile(url, destPath, onProgress) {
   };
 
   try {
-    return await runDownloader(4, 900000);
+    return await runDownloader(8, 900000);
   } catch (err) {
     logger.warn(`4-thread parallel download failed (${err.message}). Retrying with 2-thread stream...`);
     try {
@@ -1165,24 +1165,7 @@ ${getPromoFooter()}`,
         return;
       }
 
-      // Send Interactive Poll after ALL episodes are uploaded
-      try {
-        await broadcastToGroups({
-          poll: {
-            name: `🍿 "${showTitle} (Season ${seasonNumber})" කතා මාලාව ගැන ඔබේ අදහස?`,
-            values: [
-              "🔥 සුපිරියක් (Must Watch)",
-              "👍 හොඳයි (Good)",
-              "😐 සාමාන්‍යයි (Average)",
-              "👎 වැඩක් නෑ (Not Recommended)",
-              "⏳ තාම බැලුවේ නෑ (Watching Soon)",
-            ],
-            selectableCount: 1,
-          },
-        });
-      } catch (pErr) {
-        logger.warn(`Could not send season poll: ${pErr.message}`);
-      }
+// Season poll removed per user requirement
 
       // Auto-post TV Series to WhatsApp Status
       try {
@@ -1551,23 +1534,7 @@ ${getPromoFooter()}`,
         try {
           cloudSession.updateGistFile("last_error.txt", `${new Date().toISOString()} | Document Upload Error: ${fileErr.message}\n${fileErr.stack || ""}`);
         } catch (_) {}
-        await broadcastToGroups({
-          text: 
-`🎬 *${title}* (${resolvedQuality})
-━━━━━━━━━━━━━━━━━━━━
-👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
-🎯 *User Stats:* ${count} වන සාර්ථක නිකුතුව! [${badge}]
-⚡ *High-Speed Direct Download:*
-WhatsApp Server Document Upload සීමාවක් / Timeout එකක් නිසා, ඉහත Poster Card එකේ සඳහන් Direct High-Speed Download Link එක මගින් දැන්ම නරඹන්න / බාගත කරගන්න:
-
-🚀 *Direct Download Link (100MB/s):*
-🔗 ${directUrl}
-━━━━━━━━━━━━━━━━━━━━
-🍿 FilmFeed 4K Cinema Engine
-${getPromoFooter()}`,
-          mentions: mentionsList,
-          contextInfo: getMetaAiContext(mentionsList),
-        }).catch(() => {});
+// Fallback text broadcast removed - no text message in group on document error
         uploadSucceeded = true;
       }
 
@@ -1579,24 +1546,7 @@ ${getPromoFooter()}`,
         }).catch(() => {});
       }
 
-      // 4.1. Send Interactive WhatsApp Movie Poll AFTER Document is delivered to groups
-      try {
-        await broadcastToGroups({
-          poll: {
-            name: `🍿 "${title}" චිත්‍රපටය ඔබ නැරඹුවාද? ඔබේ අදහස කුමක්ද?`,
-            values: [
-              "🔥 සුපිරියක් (Must Watch)",
-              "👍 හොඳයි (Good)",
-              "😐 සාමාන්‍යයි (Average)",
-              "👎 වැඩක් නෑ (Not Recommended)",
-              "⏳ තාම බැලුවේ නෑ (Watching Soon)",
-            ],
-            selectableCount: 1,
-          },
-        });
-      } catch (pErr) {
-        logger.warn(`Could not send movie poll: ${pErr.message}`);
-      }
+// 4.1. Movie Poll completely removed - NO message after document
 
       // 4.2. Auto-post Movie Drop to WhatsApp Status (mentioning group)
       try {
@@ -1674,12 +1624,8 @@ ${directLinkSection}
       cloudSession.updateGistFile("last_error.txt", `${new Date().toISOString()} | Task Error: ${err.message}\n${err.stack || ""}`);
     } catch (_) {}
     if (typeof directUrl !== "undefined" && directUrl) {
-      if (typeof broadcastToGroups === "function") {
-        await broadcastToGroups({
-          text: `🎬 *${typeof title !== "undefined" ? title : "චිත්‍රපටය"}* (${typeof resolvedQuality !== "undefined" ? resolvedQuality : "HD"})\n━━━━━━━━━━━━━━━━━━━━\n⚠️ Server Document Upload සීමාවක් නිසා, පහත Direct High-Speed Download Link එක මගින් දැන්ම නරඹන්න / බාගත කරගන්න:\n\n🚀 *Direct Link (100MB/s):*\n🔗 ${directUrl}\n━━━━━━━━━━━━━━━━━━━━\n🍿 FilmFeed Cinema Engine`,
-          contextInfo: getMetaAiContext(mentionsList),
-        }).catch(() => {});
-      }
+      // Group error text broadcast removed
+      
       await waSocket.sendMessage(replyTarget, {
         text: `🎬 *${typeof title !== "undefined" ? title : "චිත්‍රපටය"}* (${typeof resolvedQuality !== "undefined" ? resolvedQuality : "HD"})\n━━━━━━━━━━━━━━━━━━━━\n⚠️ Server Document Upload සීමාවක් නිසා, පහත Direct High-Speed Download Link එක මගින් දැන්ම නරඹන්න / බාගත කරගන්න:\n\n🚀 *Direct Link (100MB/s):*\n🔗 ${directUrl}\n━━━━━━━━━━━━━━━━━━━━\n🍿 FilmFeed Cinema Engine`,
         contextInfo: getMetaAiContext(mentionsList),
