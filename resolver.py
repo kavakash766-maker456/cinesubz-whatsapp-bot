@@ -964,11 +964,13 @@ def resolve_cinesubz_with_scraper(movie_url: str, requested_quality: str = None)
                         "direct_url": direct,
                         "is_telegram": "telegram" in direct.lower() or "t.me" in direct.lower(),
                     }
-        except Exception:
+            return {"error": "CineSubz ඩවුන්ලෝඩ් සබැඳි Extract කරගත නොහැකි විය.", "success": False}
+        except Exception as err:
             if attempt < 2:
                 time.sleep(1.0)
                 continue
-    return None
+            return {"error": f"CineSubz Scraper Error: {err}", "success": False}
+    return {"error": "CineSubz වෙත සම්බන්ධ වීමට නොහැකි විය.", "success": False}
 
 
 def resolve_direct_link(
@@ -1001,12 +1003,14 @@ def resolve_direct_link(
                     return 10
 
                 sorted_results = sorted(results, key=score, reverse=True)
-                for cand in sorted_results[:3]:
+                matching = [c for c in sorted_results if score(c) >= 50]
+                for cand in matching[:3]:
                     res = resolve_direct_link(cand["url"], requested_quality, _depth=_depth + 1)
                     if res and res.get("success"):
                         return res
-        except Exception:
-            pass
+            return {"error": f"'{movie_url}' නමින් CineSubz හි චිත්‍රපටයක් හමු නොවීය.", "success": False}
+        except Exception as e:
+            return {"error": f"CineSubz සෙවුම් දෝෂය: {e}", "success": False}
 
     movie_url = re.sub(r"https?://(www\.)?cinesubz\.(net|co)/", "https://cinesubz.lk/", movie_url)
     if "sinhalasub" in movie_url:
@@ -1026,6 +1030,8 @@ def resolve_direct_link(
     if "cinesubz" in movie_url or any(k in movie_url for k in ("/zt-links/", "/api-", "/zt-")):
         c_res = resolve_cinesubz_with_scraper(movie_url, requested_quality)
         if c_res and c_res.get("success") and c_res.get("direct_url"):
+            return c_res
+        if c_res and c_res.get("error") and not is_zt:
             return c_res
 
     # Direct zt-links or intermediate redirect link support (/zt-links/, /api-, /zt-, ?r=)
@@ -1273,27 +1279,7 @@ def resolve_direct_link(
             last_error = str(e)
             continue
 
-    # High-Reliability Fallback: Search SinhalaSub & Baiscopes if CineSubz failed to resolve a direct file URL
-    movie_name = clean_page_title(movie.get("details", {}).get("title") or title or "")
-    if movie_name:
-        try:
-            from sinhalasub_resolver import search_sinhalasub, resolve_sinhalasub_movie
-            sh_cands = search_sinhalasub(movie_name)
-            for cand in (sh_cands or [])[:3]:
-                sh_res = resolve_sinhalasub_movie(cand["url"], requested_quality)
-                if sh_res.get("success") and sh_res.get("direct_url"):
-                    sh_res["fallback_from"] = "CineSubz"
-                    return sh_res
-        except Exception:
-            pass
-
-        try:
-            bs_res = resolve_baiscopes_movie(movie_name, requested_quality)
-            if bs_res.get("success") and bs_res.get("direct_url"):
-                bs_res["fallback_from"] = "CineSubz"
-                return bs_res
-        except Exception:
-            pass
+    # Note: Multi-source fallback disabled per user instruction (CineSubz only)
 
     return {"error": last_error, "movie": movie}
 

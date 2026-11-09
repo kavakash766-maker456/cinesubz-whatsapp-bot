@@ -1976,7 +1976,7 @@ async function startBot() {
       if (connection === "close") {
         isConnected = false;
         const statusCode = lastDisconnect?.error?.output?.statusCode;
-        const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
+        const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401 || statusCode === 403;
         console.warn(`[Master Bot] Connection closed (code: ${statusCode}). Reconnecting: ${!isLoggedOut}`);
 
         if (isLoggedOut) {
