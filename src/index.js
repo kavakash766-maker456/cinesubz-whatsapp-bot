@@ -20,6 +20,23 @@ const path = require("path");
 const fs = require("fs");
 const { execFile, execFileSync } = require("child_process");
 const axios = require("axios");
+
+// Force exact Content-Length on all media stream uploads to WhatsApp MMS (strictly required by WhatsApp servers)
+axios.interceptors.request.use((config) => {
+  if (config.data && typeof config.data.pipe === "function" && config.data.path) {
+    try {
+      if (fs.existsSync(config.data.path)) {
+        const stats = fs.statSync(config.data.path);
+        if (config.headers && typeof config.headers.set === "function") {
+          config.headers.set("Content-Length", String(stats.size));
+        } else if (config.headers) {
+          config.headers["Content-Length"] = String(stats.size);
+        }
+      }
+    } catch (_) {}
+  }
+  return config;
+});
 const CloudSession = require("./cloud_session");
 const { broadcastDailyNews } = require("./daily_news");
 const { registerBotInFirestore } = require("./firebase_sync");
@@ -855,7 +872,7 @@ async function processQueue() {
   const currentTask = requestQueue.shift();
   currentProcessingItem = currentTask;
 
-  const watchdogDuration = currentTask?.isSeriesSeason ? 30 * 60 * 1000 : 8 * 60 * 1000;
+  const watchdogDuration = currentTask?.isSeriesSeason ? 45 * 60 * 1000 : 20 * 60 * 1000;
   const queueWatchdog = setTimeout(() => {
     logger.warn(`[Queue Watchdog] Task ${currentTask?.movieUrl} exceeded timeout (${Math.round(watchdogDuration / 60000)}m)! Force releasing queue lock.`);
     isProcessingQueue = false;
@@ -903,19 +920,30 @@ async function processQueue() {
       groupsToSend = [groupsToSend[0]];
     }
 
+    const effectiveTimeoutMs = isDocument ? Math.max(timeoutMs, 600000) : timeoutMs;
+
     let sentCount = 0;
     let lastError = null;
     for (const jid of groupsToSend) {
-      try {
-        const sendPromise = waSocket.sendMessage(jid, payload);
-        const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error(`Timeout (${Math.round(timeoutMs / 1000)}s) sending to ${jid}`)), timeoutMs)
-        );
-        await Promise.race([sendPromise, timeoutPromise]);
-        sentCount++;
-      } catch (err) {
-        lastError = err;
-        logger.error({ err, jid }, `Failed sending to group ${jid}: ${err.message}`);
+      const maxAttempts = isDocument ? 2 : 1;
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          logger.info(`[Broadcast] Sending to ${jid} (isDocument=${isDocument}, attempt=${attempt}/${maxAttempts})...`);
+          const sendPromise = waSocket.sendMessage(jid, payload);
+          const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`Timeout (${Math.round(effectiveTimeoutMs / 1000)}s) sending to ${jid}`)), effectiveTimeoutMs)
+          );
+          await Promise.race([sendPromise, timeoutPromise]);
+          sentCount++;
+          lastError = null;
+          break;
+        } catch (err) {
+          lastError = err;
+          logger.error({ err, jid, attempt }, `Failed sending to group ${jid} on attempt ${attempt}: ${err.message}`);
+          if (attempt < maxAttempts) {
+            await new Promise((r) => setTimeout(r, 3000));
+          }
+        }
       }
     }
     if (sentCount === 0 && groupsToSend.length > 0) {
@@ -1437,7 +1465,7 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
         await broadcastToGroups({
           document: { url: tempFilePath },
           mimetype: "video/mp4",
-          fileName: `${title} [${resolvedQuality}] [FilmFeed].mp4`,
+          fileName: `${title.replace(/[\/\\?%*:|"<>]/g, "").trim()} [${resolvedQuality}] [FilmFeed].mp4`,
           caption: 
 `🎬 *${title}* (${resolvedQuality})
 ━━━━━━━━━━━━━━━━━━━━
@@ -1448,12 +1476,15 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 🍿 FilmFeed 4K Auto-Bot Engine
 ${getPromoFooter()}`,
           mentions: mentionsList,
-          ...(thumbBuffer ? { jpegThumbnail: thumbBuffer } : {}),
+          ...(thumbBuffer && thumbBuffer.length <= 32000 ? { jpegThumbnail: thumbBuffer } : {}),
           contextInfo: getMetaAiContext(mentionsList),
-        }, 360000);
+        }, 600000);
         uploadSucceeded = true;
       } catch (fileErr) {
-        logger.warn(`Document download/upload encountered issue (${fileErr.message}). Fallback link provided to group.`);
+        logger.error({ fileErr }, `Document download/upload encountered issue: ${fileErr.message}`);
+        try {
+          cloudSession.updateGistFile("last_error.txt", `${new Date().toISOString()} | Document Upload Error: ${fileErr.message}\n${fileErr.stack || ""}`);
+        } catch (_) {}
         await broadcastToGroups({
           text: 
 `🎬 *${title}* (${resolvedQuality})
@@ -2046,9 +2077,9 @@ async function startBot() {
       keepAliveIntervalMs: 25000,
       syncFullHistory: false,
       markOnlineOnConnect: true,
-      connectTimeoutMs: 60000,
-      defaultQueryTimeoutMs: 180000,
-      mediaUploadTimeoutMs: 600000,
+      connectTimeoutMs: 120000,
+      defaultQueryTimeoutMs: 900000,
+      mediaUploadTimeoutMs: 900000,
       mediaCache: new Map(),
       getMessage: async (key) => {
         if (key?.id && messageStore.has(key.id)) {
