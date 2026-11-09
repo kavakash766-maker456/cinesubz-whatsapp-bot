@@ -761,13 +761,34 @@ async function downloadFile(url, destPath, onProgress) {
   const pythonCmd = process.platform === "win32" ? "python" : "python3";
   const { spawn } = require("child_process");
 
-  const runDownloader = (threads) => {
+  const runDownloader = (threads, timeoutMs = 240000) => {
     return new Promise((resolve, reject) => {
       const child = spawn(pythonCmd, [fastDownloader, url, destPath, String(threads)]);
       let buffer = "";
       let errBuffer = "";
+      let lastActivity = Date.now();
+
+      const killTimer = setTimeout(() => {
+        try { child.kill("SIGKILL"); } catch (_) {}
+        reject(new Error(`Downloader timed out after ${Math.round(timeoutMs / 1000)}s`));
+      }, timeoutMs);
+
+      const watchdog = setInterval(() => {
+        if (Date.now() - lastActivity > 45000) {
+          clearInterval(watchdog);
+          clearTimeout(killTimer);
+          try { child.kill("SIGKILL"); } catch (_) {}
+          reject(new Error("Downloader stalled: no progress for 45s"));
+        }
+      }, 5000);
+
+      const cleanupTimers = () => {
+        clearTimeout(killTimer);
+        clearInterval(watchdog);
+      };
 
       child.stdout.on("data", (chunk) => {
+        lastActivity = Date.now();
         buffer += chunk.toString();
         const lines = buffer.split("\n");
         buffer = lines.pop();
@@ -784,11 +805,13 @@ async function downloadFile(url, destPath, onProgress) {
       });
 
       child.stderr.on("data", (errData) => {
+        lastActivity = Date.now();
         errBuffer += errData.toString();
         logger.warn(`[FastDownloader] ${errData.toString().trim()}`);
       });
 
       child.on("close", (code) => {
+        cleanupTimers();
         if (code === 0 && fs.existsSync(destPath) && fs.statSync(destPath).size > 1000000) {
           resolve(destPath);
         } else {
@@ -798,6 +821,7 @@ async function downloadFile(url, destPath, onProgress) {
       });
 
       child.on("error", (err) => {
+        cleanupTimers();
         logger.error({ err }, "Failed spawning fast_downloader.py");
         reject(err);
       });
@@ -805,11 +829,11 @@ async function downloadFile(url, destPath, onProgress) {
   };
 
   try {
-    return await runDownloader(4);
+    return await runDownloader(4, 240000);
   } catch (err) {
     logger.warn(`4-thread parallel download failed (${err.message}). Retrying with 1-thread stream...`);
     try {
-      return await runDownloader(1);
+      return await runDownloader(1, 180000);
     } catch (retryErr) {
       logger.error(`1-thread stream download also failed: ${retryErr.message}`);
       throw retryErr;
@@ -828,12 +852,13 @@ async function processQueue() {
   const currentTask = requestQueue.shift();
   currentProcessingItem = currentTask;
 
+  const watchdogDuration = currentTask?.isSeriesSeason ? 30 * 60 * 1000 : 8 * 60 * 1000;
   const queueWatchdog = setTimeout(() => {
-    logger.warn(`[Queue Watchdog] Task ${currentTask?.movieUrl} exceeded 8 minutes! Force releasing queue lock.`);
+    logger.warn(`[Queue Watchdog] Task ${currentTask?.movieUrl} exceeded timeout (${Math.round(watchdogDuration / 60000)}m)! Force releasing queue lock.`);
     isProcessingQueue = false;
     currentProcessingItem = null;
     if (requestQueue.length > 0) setTimeout(triggerQueue, 1000);
-  }, 8 * 60 * 1000);
+  }, watchdogDuration);
 
   const {
     isSeriesSeason,
@@ -1014,14 +1039,15 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
             seasonPosterSent = true;
           }
 
+          // Upload Episode Document to All Target Groups with fallback
           const epThumbnail = await getPosterThumbnail(posterUrl || epData.poster || epData.backdrop, epData.thumbnail_b64);
-
-          // Upload Episode Document to All Target Groups (streaming directly from disk to prevent OOM)
-          await broadcastToGroups({
-            document: { url: tempFilePath },
-            mimetype: "video/mp4",
-            fileName: `${epTitle} [${resolvedQuality}] [FilmFeed].mp4`,
-            caption: 
+          let epUploadSucceeded = false;
+          try {
+            await broadcastToGroups({
+              document: { url: tempFilePath },
+              mimetype: "video/mp4",
+              fileName: `${epTitle} [${resolvedQuality}] [FilmFeed].mp4`,
+              caption: 
 `🎬 *${epTitle}* (${resolvedQuality})
 ━━━━━━━━━━━━━━━━━━━━
 👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
@@ -1030,10 +1056,40 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 ━━━━━━━━━━━━━━━━━━━━
 🍿 FilmFeed TV Series Engine
 ${getPromoFooter()}`,
-            mentions: mentionsList,
-            ...(epThumbnail ? { jpegThumbnail: epThumbnail } : {}),
-            contextInfo: getMetaAiContext(mentionsList),
-          });
+              mentions: mentionsList,
+              ...(epThumbnail ? { jpegThumbnail: epThumbnail } : {}),
+              contextInfo: getMetaAiContext(mentionsList),
+            }, 120000);
+            epUploadSucceeded = true;
+          } catch (uploadErr) {
+            logger.warn(`Episode ${epIndex} document upload timed out or failed (${uploadErr.message}). Broadcasting direct link fallback...`);
+            await broadcastToGroups({
+              text: 
+`🎬 *${epTitle}* (${resolvedQuality})
+━━━━━━━━━━━━━━━━━━━━
+👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
+📦 *Season:* Season ${seasonNumber} [Episode ${epIndex}/${totalEpisodes}]
+⚡ *High-Speed Direct Download:*
+WhatsApp Server සීමාව නිසා, පහත Direct High-Speed ලින්ක් එකෙන් (100MB/s) දැන්ම බාගත කරගන්න:
+
+🚀 *Direct Download Link:*
+🔗 ${directUrl}
+━━━━━━━━━━━━━━━━━━━━
+🍿 FilmFeed TV Series Engine
+${getPromoFooter()}`,
+              mentions: mentionsList,
+              contextInfo: getMetaAiContext(mentionsList),
+            });
+            epUploadSucceeded = true;
+          }
+
+          // If requested in private chat (DM/LID), deliver direct link to requester DM immediately
+          if (replyTarget && !replyTarget.endsWith("@g.us")) {
+            await waSocket.sendMessage(replyTarget, {
+              text: `✅ *[FilmFeed TV Series]* Episode ${epIndex}/${totalEpisodes} සූදානම්!\n🎬 *${epTitle}* (${resolvedQuality})\n\n🚀 *Direct High-Speed Link:*\n🔗 ${directUrl}`,
+              contextInfo: getMetaAiContext(mentionsList),
+            }).catch(() => {});
+          }
 
           uploadedCount++;
 
@@ -1041,9 +1097,9 @@ ${getPromoFooter()}`,
             fs.unlinkSync(tempFilePath);
           }
 
-          await new Promise((r) => setTimeout(r, 2000));
+          await new Promise((r) => setTimeout(r, 1500));
         } catch (epErr) {
-          logger.error({ epErr }, `Error downloading episode ${epIndex}`);
+          logger.error({ epErr }, `Error processing episode ${epIndex}`);
         }
       }
 
@@ -1458,6 +1514,10 @@ ${getPromoFooter()}`,
         historyText += `\n${idx + 1}. 🎬 ${item.title} *(${item.quality})* - _${item.date}_`;
       });
 
+      const directLinkSection = (replyTarget && !replyTarget.endsWith("@g.us") && directUrl)
+        ? `\n🚀 *Direct High-Speed Download Link:*\n🔗 ${directUrl}\n`
+        : "";
+
       await waSocket.sendMessage(replyTarget, {
         text: 
 `🎉 *[FilmFeed Auto-Bot]* සාර්ථකයි!
@@ -1466,7 +1526,7 @@ ${getPromoFooter()}`,
 🎬 *නිකුත් වූ චිත්‍රපටය:* *${title}* (${resolvedQuality})
 📦 *ප්‍රමාණය:* ${finalSizeMB}MB
 ⚡ *තත්ත්වය:* සමූහය වෙත සාර්ථකව යවන ලදී (Broadcast Complete)
-
+${directLinkSection}
 📜 *ඔබ මෙතෙක් ලබාගත් චිත්‍රපට ලැයිස්තුව (${updatedStats.count}):*${historyText}
 ━━━━━━━━━━━━━━━━━━━━
 🍿 FilmFeed Group එකෙන් දැන්ම Download කරගන්න!
@@ -1481,10 +1541,17 @@ ${getPromoFooter()}`,
     try {
       cloudSession.updateGistFile("last_error.txt", `${new Date().toISOString()} | Task Error: ${err.message}\n${err.stack || ""}`);
     } catch (_) {}
-    await waSocket.sendMessage(replyTarget, {
-      text: `⚠️ *[FilmFeed Auto-Bot]* දෝෂයක් සිදු විය: ${err.message}`,
-      contextInfo: getMetaAiContext(mentionsList),
-    });
+    if (typeof directUrl !== "undefined" && directUrl) {
+      await waSocket.sendMessage(replyTarget, {
+        text: `🎬 *${typeof title !== "undefined" ? title : "චිත්‍රපටය"}* (${typeof resolvedQuality !== "undefined" ? resolvedQuality : "HD"})\n━━━━━━━━━━━━━━━━━━━━\n⚠️ Server Document Upload සීමාවක් නිසා, පහත Direct High-Speed Download Link එක මගින් දැන්ම නරඹන්න / බාගත කරගන්න:\n\n🚀 *Direct Link (100MB/s):*\n🔗 ${directUrl}\n━━━━━━━━━━━━━━━━━━━━\n🍿 FilmFeed Cinema Engine`,
+        contextInfo: getMetaAiContext(mentionsList),
+      }).catch(() => {});
+    } else {
+      await waSocket.sendMessage(replyTarget, {
+        text: `⚠️ *[FilmFeed Auto-Bot]* දෝෂයක් සිදු විය: ${err.message}`,
+        contextInfo: getMetaAiContext(mentionsList),
+      });
+    }
   } finally {
     if (typeof queueWatchdog !== "undefined" && queueWatchdog) {
       clearTimeout(queueWatchdog);

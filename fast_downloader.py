@@ -340,6 +340,15 @@ def download_chunk(
                         f.write(chunk)
                         existing_bytes += len(chunk)
                         progress_dict[part_num] = existing_bytes
+                        if existing_bytes % (2 * 1024 * 1024) < 256 * 1024:
+                            try:
+                                f.flush()
+                            except Exception:
+                                pass
+                    try:
+                        f.flush()
+                    except Exception:
+                        pass
 
             if existing_bytes >= expected_size:
                 progress_dict[part_num] = expected_size

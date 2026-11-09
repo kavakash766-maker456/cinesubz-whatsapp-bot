@@ -69,6 +69,8 @@ def _get_session():
 
 def http_get(url, **kwargs):
     """Fetch a URL with retries and redirect handling."""
+    if url and "cinesubz." in url:
+        url = re.sub(r"https?://(www\.)?cinesubz\.(?:net|co|com|org)", "https://cinesubz.lk", url)
     sess = _get_session()
     for attempt in range(1, MAX_RETRIES + 1):
         try:
