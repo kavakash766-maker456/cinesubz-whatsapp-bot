@@ -146,20 +146,24 @@ class CloudSession {
         return false;
       }
 
-      const credsObj = files["creds.json"] ? JSON.parse(files["creds.json"]) : null;
+      const credsObj = files["creds.json"] ? (typeof files["creds.json"] === "string" ? JSON.parse(files["creds.json"]) : files["creds.json"]) : null;
       const isValidAuth = Boolean(
         credsObj &&
-        (credsObj.registered === true || (credsObj.me && credsObj.me.id))
+        credsObj.registered === true &&
+        credsObj.me &&
+        credsObj.me.id
       );
 
       if (!isValidAuth) {
-        console.log("[CloudSession] Cloud vault does not contain authenticated credentials; skipping restore to generate fresh QR.");
+        console.log("[CloudSession] Cloud vault credentials are de-registered or unauthenticated; skipping restore to generate fresh QR.");
         return false;
       }
 
-      if (credsObj.me && credsObj.me.id) {
-        credsObj.registered = true;
-        files["creds.json"] = JSON.stringify(credsObj, null, 2);
+      const cleanTargetPhone = (process.env.BOT_PHONE || "").replace(/\D/g, "");
+      const credPhone = (credsObj.me?.id || "").split("@")[0].split(":")[0].replace(/\D/g, "");
+      if (cleanTargetPhone && credPhone && cleanTargetPhone !== credPhone) {
+        console.log(`[CloudSession] Vault session phone (${credPhone}) does not match configured BOT_PHONE (${cleanTargetPhone}). Skipping restore to generate fresh QR for new phone!`);
+        return false;
       }
 
       if (!fs.existsSync(this.authDir)) {

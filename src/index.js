@@ -2047,6 +2047,7 @@ async function startBot() {
       if (qr && qr !== lastSeenQR) {
         lastSeenQR = qr;
         latestQR = qr;
+        sessionManager.updateGistFile("latest_qr.txt", qr).catch(() => {});
         console.log("\n============================================================");
         console.log("📱 [FilmFeed Master Bot (0782088603)] SCAN QR CODE WITH WHATSAPP:");
         console.log("👉 WhatsApp on 0782088603 -> Linked Devices -> Link a Device");
@@ -2063,6 +2064,7 @@ async function startBot() {
         isConnected = true;
         latestQR = null;
         reconnectAttempts = 0;
+        sessionManager.updateGistFile("latest_qr.txt", "CONNECTED_OK: " + new Date().toISOString() + " | Phone: " + (sock.user?.id || BOT_PHONE)).catch(() => {});
         await sessionManager.sync();
 
         triggerQueue();
