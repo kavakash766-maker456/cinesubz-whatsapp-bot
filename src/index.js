@@ -762,9 +762,11 @@ async function downloadFile(url, destPath, onProgress) {
   const pythonCmd = process.platform === "win32" ? "python" : "python3";
   const { spawn } = require("child_process");
 
-  const runDownloader = (threads, timeoutMs = 240000) => {
+  const runDownloader = (threads, timeoutMs = 480000) => {
     return new Promise((resolve, reject) => {
-      const child = spawn(pythonCmd, [fastDownloader, url, destPath, String(threads)]);
+      const child = spawn(pythonCmd, ["-u", fastDownloader, url, destPath, String(threads)], {
+        env: { ...process.env, PYTHONUNBUFFERED: "1" },
+      });
       let buffer = "";
       let errBuffer = "";
       let lastActivity = Date.now();
@@ -775,11 +777,11 @@ async function downloadFile(url, destPath, onProgress) {
       }, timeoutMs);
 
       const watchdog = setInterval(() => {
-        if (Date.now() - lastActivity > 120000) {
+        if (Date.now() - lastActivity > 180000) {
           clearInterval(watchdog);
           clearTimeout(killTimer);
           try { child.kill("SIGKILL"); } catch (_) {}
-          reject(new Error("Downloader stalled: no progress for 120s"));
+          reject(new Error("Downloader stalled: no progress for 180s"));
         }
       }, 5000);
 
@@ -965,7 +967,45 @@ async function processQueue() {
       const backdropUrl = tmdb?.backdrop || seriesData.backdrop || posterUrl;
       const overview = tmdb?.overview || seriesData.description || "FilmFeed Cinema Series Release";
       const totalEpisodes = episodes.length;
-      let seasonPosterSent = false;
+
+      // Broadcast Season Poster Card to WhatsApp Groups IMMEDIATELY!
+      const seasonCaption = 
+`🎬 *${showTitle} (Season ${seasonNumber})*
+━━━━━━━━━━━━━━━━━━━━
+📦 *Pack Type:* Complete Season Batch
+🔢 *Total Episodes:* ${totalEpisodes} Episodes
+👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
+🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
+🌟 *Quality:* ${quality}
+${tmdb?.voteAverage ? `⭐ *TMDb Rating:* ${tmdb.voteAverage.toFixed(1)}/10\n` : ""}${tmdb?.releaseDate ? `📅 *Air Date:* ${tmdb.releaseDate}\n` : ""}🔑 *Token:* ${token || "VIP_SEASON"}
+⚡ *Subtitle:* Sinhala Subtitles Included
+━━━━━━━━━━━━━━━━━━━━
+📝 *Storyline / සාරාංශය:*
+${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
+
+📥 _Episode 1 සිට ${totalEpisodes} දක්වා පිළිවෙළින් Group එකට Upload වනු ඇත!_\n${getPromoFooter()}`;
+
+      const effectivePoster = posterUrl || backdropUrl;
+      try {
+        if (effectivePoster) {
+          const pipPoster = await createPosterWithRequesterAvatar(effectivePoster, requesterIdentifier, fallbackIdentifier, pushName);
+          await broadcastToGroups({
+            image: Buffer.isBuffer(pipPoster) ? pipPoster : { url: effectivePoster },
+            caption: seasonCaption,
+            mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
+          });
+        } else {
+          await broadcastToGroups({
+            text: seasonCaption,
+            mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
+          });
+        }
+        logger.info(`✅ Instant TV Series Season poster broadcasted to group for ${showTitle}`);
+      } catch (posterErr) {
+        logger.error({ posterErr }, `Failed to broadcast series poster: ${posterErr.message}`);
+      }
 
       // Download and Upload each episode 1 by 1
       let uploadedCount = 0;
@@ -1007,43 +1047,6 @@ async function processQueue() {
             logger.warn(`Episode ${epTitle} download failed or produced corrupted file (<1MB). Skipping.`);
             if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
             continue;
-          }
-
-          // ZERO POSTERS TO GROUP UNTIL FILE IS FULLY DOWNLOADED & VERIFIED!
-          if (!seasonPosterSent) {
-            const seasonCaption = 
-`🎬 *${showTitle} (Season ${seasonNumber})*
-━━━━━━━━━━━━━━━━━━━━
-📦 *Pack Type:* Complete Season Batch
-🔢 *Total Episodes:* ${totalEpisodes} Episodes
-👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
-🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
-🌟 *Quality:* ${quality}
-${tmdb?.voteAverage ? `⭐ *TMDb Rating:* ${tmdb.voteAverage.toFixed(1)}/10\n` : ""}${tmdb?.releaseDate ? `📅 *Air Date:* ${tmdb.releaseDate}\n` : ""}🔑 *Token:* ${token || "VIP_SEASON"}
-⚡ *Subtitle:* Sinhala Subtitles Included
-━━━━━━━━━━━━━━━━━━━━
-📝 *Storyline / සාරාංශය:*
-${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
-
-📥 _Episode 1 සිට ${totalEpisodes} දක්වා පිළිවෙළින් Group එකට Upload වනු ඇත!_\n${getPromoFooter()}`;
-
-            const effectivePoster = posterUrl || backdropUrl;
-            if (effectivePoster) {
-              const pipPoster = await createPosterWithRequesterAvatar(effectivePoster, requesterIdentifier, fallbackIdentifier, pushName);
-              await broadcastToGroups({
-                image: Buffer.isBuffer(pipPoster) ? pipPoster : { url: effectivePoster },
-                caption: seasonCaption,
-                mentions: mentionsList,
-                contextInfo: getMetaAiContext(mentionsList),
-              });
-            } else {
-              await broadcastToGroups({
-                text: seasonCaption,
-                mentions: mentionsList,
-                contextInfo: getMetaAiContext(mentionsList),
-              });
-            }
-            seasonPosterSent = true;
           }
 
           // Upload Episode Document to All Target Groups with fallback
@@ -1246,6 +1249,56 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
         return;
       }
 
+      // 1. Send High-Res Poster Card to WhatsApp Groups IMMEDIATELY upon link resolution!
+      const effectivePoster = posterUrl || backdropUrl;
+      const sizeTextDisplay = movieData.size_text || (actualBytes > 0 ? `${Math.round(actualBytes / (1024 * 1024))}MB` : resolvedQuality);
+
+      const instantCaption = 
+`🎬 *${title}*
+━━━━━━━━━━━━━━━━━━━━
+👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
+🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
+🌟 *Quality:* ${resolvedQuality} (${sizeTextDisplay})
+${tmdb?.voteAverage ? `⭐ *TMDb Rating:* ${tmdb.voteAverage.toFixed(1)}/10\n` : ""}${tmdb?.releaseDate ? `📅 *Release Date:* ${tmdb.releaseDate}\n` : ""}🔑 *Token:* ${token || "DIRECT"}
+⚡ *Audio / Sub:* Sinhala Subtitles Included
+━━━━━━━━━━━━━━━━━━━━
+📝 *Storyline / සාරාංශය:*
+${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
+
+🚀 *Direct High-Speed Download (100MB/s):*
+🔗 ${directUrl}
+━━━━━━━━━━━━━━━━━━━━
+🍿 _චිත්‍රපටය (Document එක) පහතින් Upload වෙමින් පවතී..._\n${getPromoFooter()}`;
+
+      try {
+        if (effectivePoster) {
+          const pipPoster = await createPosterWithRequesterAvatar(effectivePoster, requesterIdentifier, fallbackIdentifier, pushName);
+          await broadcastToGroups({
+            image: Buffer.isBuffer(pipPoster) ? pipPoster : { url: effectivePoster },
+            caption: instantCaption,
+            mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
+          });
+        } else {
+          await broadcastToGroups({
+            text: instantCaption,
+            mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
+          });
+        }
+        logger.info(`✅ Instant movie poster card broadcasted to WhatsApp group for ${title}!`);
+      } catch (posterErr) {
+        logger.error({ posterErr }, `Failed to broadcast instant poster card: ${posterErr.message}`);
+      }
+
+      // Deliver direct high-speed download link to requester DM immediately if requested in private chat
+      if (replyTarget && !replyTarget.endsWith("@g.us")) {
+        await waSocket.sendMessage(replyTarget, {
+          text: `🍿 *[FilmFeed Cinema]* *${title}* (${resolvedQuality}) ඉල්ලීම ලැබුණි!\n\n⚡ *Direct High-Speed Link (100MB/s):*\n🔗 ${directUrl}\n\n📥 Cinema Group එකට Poster එක සහ විස්තර යවන ලදී. Document එක දැන් සූදානම් වෙමින් පවතී!`,
+          contextInfo: getMetaAiContext(mentionsList),
+        }).catch(() => {});
+      }
+
       // Live Real-Time Status Tracker Message for Requester
       let liveStatusMsg = null;
       try {
@@ -1265,7 +1318,7 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
         if (liveStatusMsg?.key) statusTrackerKeys.push(liveStatusMsg.key);
       } catch (_) {}
 
-      // 1. Download Movie File to Disk First
+      // 2. Download Movie File to Disk and Upload as WhatsApp Document
       const safeName = title.replace(/[^a-zA-Z0-9_-]/g, "_") + `_${resolvedQuality}.mp4`;
       const tempFilePath = path.join(TEMP_DIR, `${Date.now()}_${safeName}`);
 
@@ -1285,19 +1338,23 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
         movieUrl.includes("anime"));
 
       let lastProgressEdit = 0;
-      if (isTelegram) {
-        logger.info(`Starting Telegram MTProto download for ${title}...`);
-        await downloadTelegramFile(directUrl || movieUrl, tempFilePath, (downloaded, total, speed_mb) => {
-          const now = Date.now();
-          const percent = total > 0 ? Math.round((downloaded / total) * 100) : 0;
-          if (now - lastProgressEdit > 3000 || percent % 20 === 0) {
-            lastProgressEdit = now;
-            const dMB = Math.round(downloaded / (1024 * 1024));
-            const tMB = Math.round(total / (1024 * 1024));
-            const speedText = speed_mb && speed_mb > 0 ? `${speed_mb} MB/s` : "Ultra Telegram CDN";
-            if (liveStatusMsg?.key) {
-              waSocket.sendMessage(replyTarget, {
-                text: 
+      let uploadSucceeded = false;
+      let finalSizeMB = 0;
+
+      try {
+        if (isTelegram) {
+          logger.info(`Starting Telegram MTProto download for ${title}...`);
+          await downloadTelegramFile(directUrl || movieUrl, tempFilePath, (downloaded, total, speed_mb) => {
+            const now = Date.now();
+            const percent = total > 0 ? Math.round((downloaded / total) * 100) : 0;
+            if (now - lastProgressEdit > 3000 || percent % 20 === 0) {
+              lastProgressEdit = now;
+              const dMB = Math.round(downloaded / (1024 * 1024));
+              const tMB = Math.round(total / (1024 * 1024));
+              const speedText = speed_mb && speed_mb > 0 ? `${speed_mb} MB/s` : "Ultra Telegram CDN";
+              if (liveStatusMsg?.key) {
+                waSocket.sendMessage(replyTarget, {
+                  text: 
 `🎬 *[FilmFeed Downloader]*
 ━━━━━━━━━━━━━━━━━━━━
 📌 *චිත්‍රපටය:* *${title}* (${resolvedQuality})
@@ -1306,28 +1363,28 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
 📥 *Download Progress:* ${percent}% (${dMB}MB / ${tMB}MB)
 ⚡ *Speed:* ${speedText} (MTProto Secure Stream)
 ━━━━━━━━━━━━━━━━━━━━`,
-                edit: liveStatusMsg.key,
-                contextInfo: getMetaAiContext(mentionsList),
-              }).catch(() => {});
+                  edit: liveStatusMsg.key,
+                  contextInfo: getMetaAiContext(mentionsList),
+                }).catch(() => {});
+              }
             }
-          }
-        });
-      } else if (isGDrive) {
-        logger.info(`Starting high-speed Google Drive download for ${title}...`);
-        await downloadGDriveFile(movieUrl, tempFilePath, resolvedQuality);
-      } else {
-        logger.info(`Downloading video from ${directUrl} to ${tempFilePath}`);
-        await downloadFile(directUrl, tempFilePath, (downloaded, total, speed_mb) => {
-          const now = Date.now();
-          const percent = total > 0 ? Math.round((downloaded / total) * 100) : 0;
-          if (now - lastProgressEdit > 3000 || percent % 20 === 0) {
-            lastProgressEdit = now;
-            const dMB = Math.round(downloaded / (1024 * 1024));
-            const tMB = Math.round(total / (1024 * 1024));
-            const speedText = speed_mb && speed_mb > 0 ? `${speed_mb} MB/s` : "Ultra High-Speed CDN";
-            if (liveStatusMsg?.key) {
-              waSocket.sendMessage(replyTarget, {
-                text: 
+          });
+        } else if (isGDrive) {
+          logger.info(`Starting high-speed Google Drive download for ${title}...`);
+          await downloadGDriveFile(movieUrl, tempFilePath, resolvedQuality);
+        } else {
+          logger.info(`Downloading video from ${directUrl} to ${tempFilePath}`);
+          await downloadFile(directUrl, tempFilePath, (downloaded, total, speed_mb) => {
+            const now = Date.now();
+            const percent = total > 0 ? Math.round((downloaded / total) * 100) : 0;
+            if (now - lastProgressEdit > 3000 || percent % 20 === 0) {
+              lastProgressEdit = now;
+              const dMB = Math.round(downloaded / (1024 * 1024));
+              const tMB = Math.round(total / (1024 * 1024));
+              const speedText = speed_mb && speed_mb > 0 ? `${speed_mb} MB/s` : "Ultra High-Speed CDN";
+              if (liveStatusMsg?.key) {
+                waSocket.sendMessage(replyTarget, {
+                  text: 
 `🎬 *[FilmFeed Downloader]*
 ━━━━━━━━━━━━━━━━━━━━
 📌 *චිත්‍රපටය:* *${title}* (${resolvedQuality})
@@ -1336,30 +1393,30 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
 📥 *Download Progress:* ${percent}% (${dMB}MB / ${tMB}MB)
 ⚡ *Speed:* ${speedText} (8x Multi-Stream)
 ━━━━━━━━━━━━━━━━━━━━`,
-                edit: liveStatusMsg.key,
-                contextInfo: getMetaAiContext(mentionsList),
-              }).catch(() => {});
+                  edit: liveStatusMsg.key,
+                  contextInfo: getMetaAiContext(mentionsList),
+                }).catch(() => {});
+              }
             }
-          }
-        });
-      }
+          });
+        }
 
-      // 2. Verify file exists on disk and is > 1MB
-      if (!fs.existsSync(tempFilePath)) {
-        throw new Error("ගොනුව බාගත කිරීම අසාර්ථක විය. File not created on disk.");
-      }
-      const finalFileSize = fs.statSync(tempFilePath).size;
-      if (finalFileSize < 1000000) {
-        throw new Error(`බාගත කිරීමේදී දෝෂයක් සිදු විය (ගොනුව ${Math.round(finalFileSize / 1024)}KB ලෙස ලැබුණි, 0MB දෝෂයකි).`);
-      }
+        // Verify file exists on disk and is > 1MB
+        if (!fs.existsSync(tempFilePath)) {
+          throw new Error("ගොනුව බාගත කිරීම අසාර්ථක විය. File not created on disk.");
+        }
+        const finalFileSize = fs.statSync(tempFilePath).size;
+        if (finalFileSize < 1000000) {
+          throw new Error(`බාගත කිරීමේදී දෝෂයක් සිදු විය (ගොනුව ${Math.round(finalFileSize / 1024)}KB ලෙස ලැබුණි, 0MB දෝෂයකි).`);
+        }
 
-      const finalSizeMB = Math.round(finalFileSize / (1024 * 1024));
-      logger.info(`Download verified! Final file size on disk: ${finalSizeMB}MB.`);
+        finalSizeMB = Math.round(finalFileSize / (1024 * 1024));
+        logger.info(`Download verified! Final file size on disk: ${finalSizeMB}MB.`);
 
-      // Update Live Status Message: Uploading
-      if (liveStatusMsg?.key) {
-        await waSocket.sendMessage(replyTarget, {
-          text: 
+        // Update Live Status Message: Uploading
+        if (liveStatusMsg?.key) {
+          await waSocket.sendMessage(replyTarget, {
+            text: 
 `🎬 *[FilmFeed Downloader]*
 ━━━━━━━━━━━━━━━━━━━━
 📌 *චිත්‍රපටය:* *${title}* (${resolvedQuality})
@@ -1368,50 +1425,15 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
 📤 *Uploading:* WhatsApp සමූහය වෙත යවමින් පවතී...
 ⚡ *Status:* Group Broadcast in Progress
 ━━━━━━━━━━━━━━━━━━━━`,
-          edit: liveStatusMsg.key,
-          contextInfo: getMetaAiContext(mentionsList),
-        }).catch(() => {});
-      }
+            edit: liveStatusMsg.key,
+            contextInfo: getMetaAiContext(mentionsList),
+          }).catch(() => {});
+        }
 
-      // 3. ZERO POSTERS SENT UNTIL FILE IS FULLY VERIFIED ON DISK!
-      // Send High-Res Poster to WhatsApp Group
-      const caption = 
-`🎬 *${title}*
-━━━━━━━━━━━━━━━━━━━━
-👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
-🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
-🌟 *Quality:* ${resolvedQuality} (${finalSizeMB}MB)
-${tmdb?.voteAverage ? `⭐ *TMDb Rating:* ${tmdb.voteAverage.toFixed(1)}/10\n` : ""}${tmdb?.releaseDate ? `📅 *Release Date:* ${tmdb.releaseDate}\n` : ""}🔑 *Token:* ${token || "DIRECT"}
-⚡ *Audio / Sub:* Sinhala Subtitles Included
-━━━━━━━━━━━━━━━━━━━━
-📝 *Storyline / සාරාංශය:*
-${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
-
-🍿 _චිත්‍රපටය පහතින් Document එකක් ලෙස ලැබෙනු ඇත!_\n${getPromoFooter()}`;
-
-      const effectivePoster = posterUrl || backdropUrl;
-      if (effectivePoster) {
-        const pipPoster = await createPosterWithRequesterAvatar(effectivePoster, requesterIdentifier, fallbackIdentifier, pushName);
-        await broadcastToGroups({
-          image: Buffer.isBuffer(pipPoster) ? pipPoster : { url: effectivePoster },
-          caption: caption,
-          mentions: mentionsList,
-          contextInfo: getMetaAiContext(mentionsList),
-        });
-      } else {
-        await broadcastToGroups({
-          text: caption,
-          mentions: mentionsList,
-          contextInfo: getMetaAiContext(mentionsList),
-        });
-      }
-
-      // 4. Upload Document to all groups with Movie Poster Thumbnail & Meta AI Styling (streaming directly from disk)
-      logger.info(`Uploading ${finalSizeMB}MB document to WhatsApp groups...`);
-      const thumbBuffer = await getPosterThumbnail(posterUrl || effectivePoster, movieData?.thumbnail_b64);
-      
-      let uploadSucceeded = false;
-      try {
+        // Upload Document to all groups with Movie Poster Thumbnail & Meta AI Styling (streaming directly from disk)
+        logger.info(`Uploading ${finalSizeMB}MB document to WhatsApp groups...`);
+        const thumbBuffer = await getPosterThumbnail(posterUrl || effectivePoster, movieData?.thumbnail_b64);
+        
         await broadcastToGroups({
           document: { url: tempFilePath },
           mimetype: "video/mp4",
@@ -1430,35 +1452,32 @@ ${getPromoFooter()}`,
           contextInfo: getMetaAiContext(mentionsList),
         }, 360000);
         uploadSucceeded = true;
-      } catch (uploadErr) {
-        logger.warn(`Document upload to WhatsApp groups timed out or failed (${uploadErr.message}). Broadcasting direct link fallback...`);
-        // Fallback: If WhatsApp document upload fails or times out (e.g. >1.2GB or WhatsApp MMS rejection),
-        // send direct high-speed download link so user and group never miss the movie!
+      } catch (fileErr) {
+        logger.warn(`Document download/upload encountered issue (${fileErr.message}). Fallback link provided to group.`);
         await broadcastToGroups({
           text: 
 `🎬 *${title}* (${resolvedQuality})
 ━━━━━━━━━━━━━━━━━━━━
 👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
 🎯 *User Stats:* ${count} වන සාර්ථක නිකුතුව! [${badge}]
-📦 *ගොනු ප්‍රමාණය:* ${finalSizeMB}MB
 ⚡ *High-Speed Direct Download:*
-WhatsApp Server ගොනු ප්‍රමාණ සීමාව නිසා, පහත Direct High-Speed ලින්ක් එකෙන් (100MB/s) දැන්ම බාගත කරගන්න:
+WhatsApp Server Document Upload සීමාවක් / Timeout එකක් නිසා, ඉහත Poster Card එකේ සඳහන් Direct High-Speed Download Link එක මගින් දැන්ම නරඹන්න / බාගත කරගන්න:
 
-🚀 *Direct Download Link:*
+🚀 *Direct Download Link (100MB/s):*
 🔗 ${directUrl}
 ━━━━━━━━━━━━━━━━━━━━
 🍿 FilmFeed 4K Cinema Engine
 ${getPromoFooter()}`,
           mentions: mentionsList,
           contextInfo: getMetaAiContext(mentionsList),
-        });
+        }).catch(() => {});
         uploadSucceeded = true;
       }
 
-      // Deliver direct high-speed download link to requester DM immediately if requested in private chat
+      // Deliver confirmation to requester DM
       if (replyTarget && !replyTarget.endsWith("@g.us")) {
         await waSocket.sendMessage(replyTarget, {
-          text: `🍿 *[FilmFeed Cinema]* *${title}* (${resolvedQuality}) සූදානම්!\n\n⚡ *Direct High-Speed Link:*\n🔗 ${directUrl}\n\n📥 Cinema Group එකටද Document එක යවන ලදී!`,
+          text: `🍿 *[FilmFeed Cinema]* *${title}* (${resolvedQuality}) සූදානම්!\n\n⚡ *Direct High-Speed Link:*\n🔗 ${directUrl}\n\n📥 Cinema Group එකටද Poster එක සහ Document/Direct Link යවන ලදී!`,
           contextInfo: getMetaAiContext(mentionsList),
         }).catch(() => {});
       }
@@ -1557,6 +1576,12 @@ ${directLinkSection}
       cloudSession.updateGistFile("last_error.txt", `${new Date().toISOString()} | Task Error: ${err.message}\n${err.stack || ""}`);
     } catch (_) {}
     if (typeof directUrl !== "undefined" && directUrl) {
+      if (typeof broadcastToGroups === "function") {
+        await broadcastToGroups({
+          text: `🎬 *${typeof title !== "undefined" ? title : "චිත්‍රපටය"}* (${typeof resolvedQuality !== "undefined" ? resolvedQuality : "HD"})\n━━━━━━━━━━━━━━━━━━━━\n⚠️ Server Document Upload සීමාවක් නිසා, පහත Direct High-Speed Download Link එක මගින් දැන්ම නරඹන්න / බාගත කරගන්න:\n\n🚀 *Direct Link (100MB/s):*\n🔗 ${directUrl}\n━━━━━━━━━━━━━━━━━━━━\n🍿 FilmFeed Cinema Engine`,
+          contextInfo: getMetaAiContext(mentionsList),
+        }).catch(() => {});
+      }
       await waSocket.sendMessage(replyTarget, {
         text: `🎬 *${typeof title !== "undefined" ? title : "චිත්‍රපටය"}* (${typeof resolvedQuality !== "undefined" ? resolvedQuality : "HD"})\n━━━━━━━━━━━━━━━━━━━━\n⚠️ Server Document Upload සීමාවක් නිසා, පහත Direct High-Speed Download Link එක මගින් දැන්ම නරඹන්න / බාගත කරගන්න:\n\n🚀 *Direct Link (100MB/s):*\n🔗 ${directUrl}\n━━━━━━━━━━━━━━━━━━━━\n🍿 FilmFeed Cinema Engine`,
         contextInfo: getMetaAiContext(mentionsList),
