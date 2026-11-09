@@ -443,6 +443,70 @@ async function resolveSeriesEpisodes(seriesUrl) {
   });
 }
 
+async function resolveAnimeEpisodes(animeSlug) {
+  return new Promise((resolve) => {
+    const resolverScript = path.join(__dirname, "../anime_resolver.py");
+    const args = ["--episodes", animeSlug];
+
+    const pythonCmd = process.platform === "win32" ? "python" : "python3";
+    execFile(pythonCmd, [resolverScript, ...args], { maxBuffer: 15 * 1024 * 1024, timeout: 60000 }, (err, stdout, stderr) => {
+      if (err) {
+        logger.error({ err, stderr }, "Anime episodes resolver error");
+        return resolve({ success: false, episodes: [], error: (stderr || err.message).slice(0, 300) });
+      }
+      try {
+        const jsonMatch = (stdout || "").match(/\{[\s\S]*\}/);
+        const data = jsonMatch ? JSON.parse(jsonMatch[0]) : JSON.parse(stdout);
+        resolve(data);
+      } catch (parseErr) {
+        logger.error({ stdout, stderr }, "Failed to parse anime episodes JSON");
+        resolve({ success: false, episodes: [], error: "Failed to parse anime episodes JSON" });
+      }
+    });
+  });
+}
+
+async function resolveAnimeEpisodeMp4(epSlug, quality = "720p") {
+  return new Promise((resolve) => {
+    const resolverScript = path.join(__dirname, "../anime_resolver.py");
+    const args = ["--resolve", epSlug, "--quality", quality];
+
+    const pythonCmd = process.platform === "win32" ? "python" : "python3";
+    execFile(pythonCmd, [resolverScript, ...args], { maxBuffer: 15 * 1024 * 1024, timeout: 45000 }, (err, stdout, stderr) => {
+      if (err) {
+        logger.error({ err, stderr }, "Anime episode MP4 resolver error");
+        return resolve({ success: false, error: (stderr || err.message).slice(0, 300) });
+      }
+      try {
+        const jsonMatch = (stdout || "").match(/\{[\s\S]*\}/);
+        const data = jsonMatch ? JSON.parse(jsonMatch[0]) : JSON.parse(stdout);
+        resolve(data);
+      } catch (parseErr) {
+        logger.error({ stdout, stderr }, "Failed to parse anime episode MP4 JSON");
+        resolve({ success: false, error: "Failed to parse anime episode MP4 JSON" });
+      }
+    });
+  });
+}
+
+async function searchAnimeDirect(query) {
+  return new Promise((resolve) => {
+    const resolverScript = path.join(__dirname, "../anime_resolver.py");
+    const pythonCmd = process.platform === "win32" ? "python" : "python3";
+    execFile(pythonCmd, [resolverScript, "--search", query], { maxBuffer: 10 * 1024 * 1024, timeout: 30000 }, (err, stdout) => {
+      if (err) return resolve([]);
+      try {
+        const jsonMatch = (stdout || "").match(/\[[\s\S]*\]/);
+        const data = jsonMatch ? JSON.parse(jsonMatch[0]) : JSON.parse(stdout);
+        resolve(data);
+      } catch (_) {
+        resolve([]);
+      }
+    });
+  });
+}
+
+
 const TMDB_API_KEY = process.env.TMDB_API_KEY || "b6524bb48fb309af7e940a074a363851";
 
 async function getTmdbMediaDetails(title, isTv = false, year = null) {
@@ -886,7 +950,7 @@ async function processQueue() {
   const currentTask = requestQueue.shift();
   currentProcessingItem = currentTask;
 
-  const watchdogDuration = currentTask?.isSeriesSeason ? 45 * 60 * 1000 : 20 * 60 * 1000;
+  const watchdogDuration = (currentTask?.isSeriesSeason || currentTask?.isAnimeSeason) ? 60 * 60 * 1000 : 20 * 60 * 1000;
   const queueWatchdog = setTimeout(() => {
     logger.warn(`[Queue Watchdog] Task ${currentTask?.movieUrl} exceeded timeout (${Math.round(watchdogDuration / 60000)}m)! Force releasing queue lock.`);
     isProcessingQueue = false;
@@ -896,6 +960,7 @@ async function processQueue() {
 
   const {
     isSeriesSeason,
+    isAnimeSeason,
     seasonNumber,
     movieUrl,
     quality,
@@ -967,6 +1032,141 @@ async function processQueue() {
 
   try {
     // ----------------------------------------------------------------------
+    // ----------------------------------------------------------------------
+    // MODE A.5: ANIME SEASON BATCH (Sequential Direct MP4 Delivery)
+    // ----------------------------------------------------------------------
+    if (isAnimeSeason) {
+      await waSocket.sendMessage(replyTarget, {
+        text: `🚀 *[FilmFeed Anime Engine]*\n━━━━━━━━━━━━━━━━━━━━\n*${pushName}*, ඔබ ඉල්ලූ Anime Season Batch පැක් එක සැකසීම ආරම්භ විය!\nසියලුම Episodes එකින් එක Download වී Group එකට Upload වනු ඇත. 🍿`,
+        mentions: mentionsList,
+        contextInfo: getMetaAiContext(mentionsList),
+      });
+
+      const animeSlug = movieUrl.replace(/https?:\/\/[^/]+\/(?:series\/)?/, "").replace(/^\//, "").split(/[?#|]/)[0].trim();
+      let animeData = await resolveAnimeEpisodes(animeSlug);
+      let episodes = animeData.episodes || [];
+
+      if (episodes.length === 0) {
+        // Fallback: search by query
+        const searchRes = await searchAnimeDirect(animeSlug);
+        if (searchRes && searchRes.length > 0) {
+          const matched = searchRes[0];
+          const fallbackData = await resolveAnimeEpisodes(matched.slug);
+          if (fallbackData && fallbackData.episodes && fallbackData.episodes.length > 0) {
+            episodes = fallbackData.episodes;
+            animeData = fallbackData;
+          }
+        }
+      }
+
+      if (episodes.length === 0) {
+        await waSocket.sendMessage(replyTarget, {
+          text: `❌ *[FilmFeed Anime]* "${animeSlug}" සඳහා Episodes සොයාගත නොහැකි විය.`,
+          mentions: mentionsList,
+          contextInfo: getMetaAiContext(mentionsList),
+        });
+        return;
+      }
+
+      // Try TMDb for high-res backdrop & overview
+      const tmdb = await getTmdbMediaDetails(animeData.title || animeSlug, true);
+      const showTitle = tmdb?.title || animeData.title || animeSlug.replace(/-/g, " ").toUpperCase();
+      const posterUrl = tmdb?.poster || animeData.poster || "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=800";
+      const backdropUrl = tmdb?.backdrop || posterUrl;
+      const overview = tmdb?.overview || "FilmFeed Cinema Official Anime Batch Release";
+      const totalEpisodes = episodes.length;
+
+      // Broadcast Anime Season Poster Card to WhatsApp Groups IMMEDIATELY!
+      const seasonCaption = 
+`🎬 *${showTitle}*
+━━━━━━━━━━━━━━━━━━━━
+📦 *Pack Type:* Complete Anime Season Batch
+🔢 *Total Episodes:* ${totalEpisodes} Episodes
+👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
+🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
+🌟 *Quality:* ${quality || "720p HD"}
+${tmdb?.voteAverage ? `⭐ *TMDb Rating:* ${tmdb.voteAverage.toFixed(1)}/10\n` : ""}${tmdb?.releaseDate ? `📅 *Air Date:* ${tmdb.releaseDate}\n` : ""}🔑 *Token:* ${token || "VIP_ANIME"}
+⚡ *Audio / Sub:* English Subtitles Included
+━━━━━━━━━━━━━━━━━━━━
+📝 *Storyline / සාරාංශය:*
+${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
+
+📥 _Episode 1 සිට ${totalEpisodes} දක්වා පිළිවෙළින් Group එකට Upload වනු ඇත!_\n${getPromoFooter()}`;
+
+      try {
+        const effectivePoster = posterUrl || backdropUrl;
+        if (effectivePoster) {
+          const pipPoster = await createPosterWithRequesterAvatar(effectivePoster, requesterIdentifier, fallbackIdentifier, pushName);
+          await broadcastToGroups({
+            image: Buffer.isBuffer(pipPoster) ? pipPoster : { url: effectivePoster },
+            caption: seasonCaption,
+            mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
+          });
+        } else {
+          await broadcastToGroups({
+            text: seasonCaption,
+            mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
+          });
+        }
+        logger.info(`✅ Instant Anime Season poster broadcasted to group for ${showTitle}`);
+      } catch (posterErr) {
+        logger.error({ posterErr }, `Failed to broadcast anime poster: ${posterErr.message}`);
+      }
+
+      // Download and Upload each episode 1 by 1
+      for (let i = 0; i < episodes.length; i++) {
+        const ep = episodes[i];
+        const epIndex = ep.episode || (i + 1);
+        logger.info(`[Anime Engine] Resolving episode ${epIndex}/${totalEpisodes}: ${ep.slug}`);
+
+        try {
+          const epData = await resolveAnimeEpisodeMp4(ep.slug, quality || "720p");
+          if (!epData.success || !epData.direct_link) {
+            logger.warn(`Skipping anime episode ${epIndex}: ${epData.error || "No direct link"}`);
+            continue;
+          }
+
+          const directUrl = epData.direct_link;
+          const resolvedQuality = epData.quality || quality || "720p";
+          const safeName = `${showTitle.replace(/[^a-zA-Z0-9_-]/g, "_")}_E${epIndex}_${resolvedQuality}.mp4`;
+          const tempFilePath = path.join(TEMP_DIR, `${Date.now()}_${safeName}`);
+
+          await downloadFile(directUrl, tempFilePath);
+
+          if (!fs.existsSync(tempFilePath) || fs.statSync(tempFilePath).size < 1000000) {
+            logger.warn(`Anime episode ${epIndex} download failed or <1MB. Skipping.`);
+            if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
+            continue;
+          }
+
+          // Upload Episode Document to All Target Groups
+          await broadcastToGroups({
+            document: { url: tempFilePath },
+            mimetype: "video/mp4",
+            fileName: `${showTitle} - Episode ${epIndex} (${resolvedQuality}).mp4`,
+            caption: `🎬 *${showTitle} - Episode ${epIndex}*\n🔢 Episode ${epIndex} of ${totalEpisodes}\n⚡ Quality: ${resolvedQuality}\n🍿 *FilmFeed Anime Engine*`,
+          });
+
+          logger.info(`✅ Anime Episode ${epIndex}/${totalEpisodes} uploaded successfully to groups!`);
+
+          // Cleanup temp file
+          try {
+            if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
+          } catch (_) {}
+
+          // Brief pause between episodes
+          await new Promise((r) => setTimeout(r, 2000));
+        } catch (epErr) {
+          logger.error({ epErr }, `Error processing anime episode ${epIndex}: ${epErr.message}`);
+        }
+      }
+
+      logger.info(`🎉 Complete Anime Season Batch delivery finished for ${showTitle}!`);
+      return;
+    }
+
     // MODE A: TV SERIES SEASON BATCH (Sequential Episode Delivery)
     // ----------------------------------------------------------------------
     if (isSeriesSeason) {
@@ -1767,6 +1967,7 @@ function attachMessageEvents(sock) {
         // Parse commands
         let commandFound = false;
         let isSeriesSeason = false;
+        let isAnimeSeason = false;
         let seasonNumber = 1;
         let movieUrl = "";
         let quality = "720p";
@@ -1777,6 +1978,19 @@ function attachMessageEvents(sock) {
         for (const rawLine of textLines) {
           const line = rawLine.trim();
           if (!line) continue;
+
+          // Anime Command: !anime <query_or_slug> | <season_str> | <quality> | <token>
+          const aMatch =
+            line.match(/^[!/.]?anime\s+([^|\n]+?)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?$/i);
+          if (aMatch) {
+            commandFound = true;
+            isAnimeSeason = true;
+            movieUrl = aMatch[1].trim();
+            seasonNumber = aMatch[2] ? (parseInt(aMatch[2].replace(/\D/g, ""), 10) || 1) : 1;
+            quality = aMatch[3] ? aMatch[3].trim() : (aMatch[2] && aMatch[2].includes("p") ? aMatch[2].trim() : "720p");
+            token = aMatch[4] ? aMatch[4].trim() : "";
+            break;
+          }
 
           // Season Command: !req_season, /season, .season, or !req <url> | S1
           const sMatch =
@@ -1927,6 +2141,7 @@ function attachMessageEvents(sock) {
 
         const taskItem = {
           isSeriesSeason,
+          isAnimeSeason,
           seasonNumber,
           movieUrl,
           cleanUrl,

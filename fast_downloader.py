@@ -61,6 +61,8 @@ def get_headers(url: str, referer: str = None) -> dict:
         h["Referer"] = referer
     elif "pixeldrain.com" in url:
         h["Referer"] = "https://pixeldrain.com/"
+    elif "animegg.org" in url:
+        h["Referer"] = "https://www.animegg.org/"
     return h
 
 

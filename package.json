@@ -8,13 +8,13 @@
     "postinstall": "node patch_baileys.js"
   },
   "dependencies": {
+    "@consumet/extensions": "^1.8.8",
     "@whiskeysockets/baileys": "^6.7.8",
     "axios": "^1.7.2",
     "dotenv": "^16.4.5",
+    "link-preview-js": "^3.0.12",
     "pino": "^9.2.0",
     "pino-pretty": "^11.2.1",
-    "qrcode-terminal": "^0.12.0",
-    "link-preview-js": "^3.0.12"
-  },
-  "devDependencies": {}
+    "qrcode-terminal": "^0.12.0"
+  }
 }

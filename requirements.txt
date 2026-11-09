@@ -12,3 +12,4 @@ aiofiles>=23.2.0
 rich>=13.7.0
 gdown>=4.7.0
 telethon>=1.30.0
+yt-dlp>=2024.08.06
