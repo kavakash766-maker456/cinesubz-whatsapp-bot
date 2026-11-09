@@ -934,7 +934,7 @@ async function processQueue() {
       groupsToSend = [groupsToSend[0]];
     }
 
-    const effectiveTimeoutMs = isDocument ? Math.max(timeoutMs, 600000) : timeoutMs;
+    const effectiveTimeoutMs = isDocument ? Math.max(timeoutMs, 1800000) : timeoutMs;
 
     let sentCount = 0;
     let lastError = null;
@@ -1291,11 +1291,11 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
         return;
       }
 
-      // 1. Send High-Res Poster Card to WhatsApp Groups IMMEDIATELY upon link resolution!
+      // 1. Prepare High-Res Poster Card (WITHOUT Direct Download Link, to be sent at 50% upload)
       const effectivePoster = posterUrl || backdropUrl;
       const sizeTextDisplay = movieData.size_text || (actualBytes > 0 ? `${Math.round(actualBytes / (1024 * 1024))}MB` : resolvedQuality);
 
-      const instantCaption = 
+      const groupPosterCaption = 
 `🎬 *${title}*
 ━━━━━━━━━━━━━━━━━━━━
 👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
@@ -1306,37 +1306,40 @@ ${tmdb?.voteAverage ? `⭐ *TMDb Rating:* ${tmdb.voteAverage.toFixed(1)}/10\n` :
 ━━━━━━━━━━━━━━━━━━━━
 📝 *Storyline / සාරාංශය:*
 ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
-
-🚀 *Direct High-Speed Download (100MB/s):*
-🔗 ${directUrl}
 ━━━━━━━━━━━━━━━━━━━━
-🍿 _චිත්‍රපටය (Document එක) පහතින් Upload වෙමින් පවතී..._\n${getPromoFooter()}`;
+🍿 _චිත්‍රපටය (Document එක) මේ දැන්ම සමූහය වෙත ලැබෙනු ඇත..._
+${getPromoFooter()}`;
 
-      try {
-        if (effectivePoster) {
-          const pipPoster = await createPosterWithRequesterAvatar(effectivePoster, requesterIdentifier, fallbackIdentifier, pushName);
-          await broadcastToGroups({
-            image: Buffer.isBuffer(pipPoster) ? pipPoster : { url: effectivePoster },
-            caption: instantCaption,
-            mentions: mentionsList,
-            contextInfo: getMetaAiContext(mentionsList),
-          });
-        } else {
-          await broadcastToGroups({
-            text: instantCaption,
-            mentions: mentionsList,
-            contextInfo: getMetaAiContext(mentionsList),
-          });
+      let posterBroadcasted = false;
+      const broadcastPosterCard = async () => {
+        if (posterBroadcasted) return;
+        posterBroadcasted = true;
+        try {
+          if (effectivePoster) {
+            const pipPoster = await createPosterWithRequesterAvatar(effectivePoster, requesterIdentifier, fallbackIdentifier, pushName);
+            await broadcastToGroups({
+              image: Buffer.isBuffer(pipPoster) ? pipPoster : { url: effectivePoster },
+              caption: groupPosterCaption,
+              mentions: mentionsList,
+              contextInfo: getMetaAiContext(mentionsList),
+            });
+          } else {
+            await broadcastToGroups({
+              text: groupPosterCaption,
+              mentions: mentionsList,
+              contextInfo: getMetaAiContext(mentionsList),
+            });
+          }
+          logger.info(`✅ Movie poster card broadcasted to WhatsApp group for ${title}!`);
+        } catch (posterErr) {
+          logger.error({ posterErr }, `Failed to broadcast poster card: ${posterErr.message}`);
         }
-        logger.info(`✅ Instant movie poster card broadcasted to WhatsApp group for ${title}!`);
-      } catch (posterErr) {
-        logger.error({ posterErr }, `Failed to broadcast instant poster card: ${posterErr.message}`);
-      }
+      };
 
-      // Deliver direct high-speed download link to requester DM immediately if requested in private chat
+      // Deliver instant acknowledgment to requester DM if requested in private chat
       if (replyTarget && !replyTarget.endsWith("@g.us")) {
         await waSocket.sendMessage(replyTarget, {
-          text: `🍿 *[FilmFeed Cinema]* *${title}* (${resolvedQuality}) ඉල්ලීම ලැබුණි!\n\n⚡ *Direct High-Speed Link (100MB/s):*\n🔗 ${directUrl}\n\n📥 Cinema Group එකට Poster එක සහ විස්තර යවන ලදී. Document එක දැන් සූදානම් වෙමින් පවතී!`,
+          text: `🍿 *[FilmFeed Cinema]* *${title}* (${resolvedQuality}) ඉල්ලීම ලැබුණි!\n\nචිත්‍රපටය බාගත වීම ආරම්භ විය... Download අවසන් වූ පසු Group එක වෙත Document එක සහ Poster Card එක නිකුත් කෙරේ!`,
           contextInfo: getMetaAiContext(mentionsList),
         }).catch(() => {});
       }
@@ -1472,6 +1475,46 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
           }).catch(() => {});
         }
 
+        // Refresh Media Connection to ensure valid, non-expired MMS upload token
+        try {
+          logger.info("Refreshing WhatsApp media connection credentials before upload...");
+          await waSocket.refreshMediaConn(true);
+        } catch (mConnErr) {
+          logger.warn(`Could not force refreshMediaConn: ${mConnErr.message}`);
+        }
+
+        // Setup global progress hook to broadcast poster card at 50% upload
+        global.__waMediaUploadProgress = async (progressEvent) => {
+          const loaded = progressEvent.loaded || 0;
+          const total = progressEvent.total || (finalFileSize || 1);
+          const percent = Math.min(100, Math.round((loaded / total) * 100));
+
+          // When upload reaches 50%, broadcast poster card to the WhatsApp group!
+          if (percent >= 50 && !posterBroadcasted) {
+            logger.info(`🚀 [Upload 50%] Milestone reached for ${title}! Broadcasting poster card to WhatsApp group...`);
+            await broadcastPosterCard();
+          }
+
+          const now = Date.now();
+          if (liveStatusMsg?.key && now - lastProgressEdit > 4000) {
+            lastProgressEdit = now;
+            const upMB = Math.round(loaded / (1024 * 1024));
+            waSocket.sendMessage(replyTarget, {
+              text: 
+`🎬 *[FilmFeed Downloader]*
+━━━━━━━━━━━━━━━━━━━━
+📌 *චිත්‍රපටය:* *${title}* (${resolvedQuality})
+👤 *Requested By:* ${pushName} [${badge}]
+✅ *Download:* 100% සම්පූර්ණයි (${finalSizeMB}MB)
+📤 *Uploading:* ${percent}% (${upMB}MB / ${finalSizeMB}MB)
+⚡ *Status:* Group Broadcast in Progress
+━━━━━━━━━━━━━━━━━━━━`,
+              edit: liveStatusMsg.key,
+              contextInfo: getMetaAiContext(mentionsList),
+            }).catch(() => {});
+          }
+        };
+
         // Upload Document to all groups with Movie Poster Thumbnail & Meta AI Styling (streaming directly from disk)
         logger.info(`Uploading ${finalSizeMB}MB document to WhatsApp groups...`);
         const thumbBuffer = await getPosterThumbnail(posterUrl || effectivePoster, movieData?.thumbnail_b64);
@@ -1492,9 +1535,18 @@ ${getPromoFooter()}`,
           mentions: mentionsList,
           ...(thumbBuffer && thumbBuffer.length <= 32000 ? { jpegThumbnail: thumbBuffer } : {}),
           contextInfo: getMetaAiContext(mentionsList),
-        }, 600000);
+        }, 1800000);
+
+        // Ensure poster was broadcasted if upload completed fast before 50% hook fired
+        if (!posterBroadcasted) {
+          await broadcastPosterCard();
+        }
         uploadSucceeded = true;
       } catch (fileErr) {
+        // In case of error, ensure group at least has poster if not yet broadcasted
+        if (!posterBroadcasted) {
+          await broadcastPosterCard().catch(() => {});
+        }
         logger.error({ fileErr }, `Document download/upload encountered issue: ${fileErr.message}`);
         try {
           cloudSession.updateGistFile("last_error.txt", `${new Date().toISOString()} | Document Upload Error: ${fileErr.message}\n${fileErr.stack || ""}`);
@@ -1572,6 +1624,7 @@ ${getPromoFooter()}`,
       }
 
       // 5. Delete temp file from disk
+      global.__waMediaUploadProgress = null;
       if (fs.existsSync(tempFilePath)) {
         fs.unlinkSync(tempFilePath);
       }
@@ -2069,7 +2122,7 @@ async function startBot() {
       family: 4,
       keepAlive: true,
       keepAliveMsecs: 30000,
-      timeout: 600000,
+      timeout: 1800000,
     });
 
     const sock = makeWASocket({
@@ -2092,8 +2145,8 @@ async function startBot() {
       syncFullHistory: false,
       markOnlineOnConnect: true,
       connectTimeoutMs: 120000,
-      defaultQueryTimeoutMs: 900000,
-      mediaUploadTimeoutMs: 900000,
+      defaultQueryTimeoutMs: 1800000,
+      mediaUploadTimeoutMs: 1800000,
       mediaCache: new Map(),
       getMessage: async (key) => {
         if (key?.id && messageStore.has(key.id)) {

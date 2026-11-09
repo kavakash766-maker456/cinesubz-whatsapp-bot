@@ -52,18 +52,41 @@ function patchBaileys() {
     modified = true;
   }
 
-  // 4. Ensure generous 10-minute timeout for heavy document uploads
-  if (!content.includes("timeout: timeoutMs || 600000")) {
+  // 4. Force fresh mediaConn auth token before MMS upload
+  if (content.includes("refreshMediaConn(false)")) {
+    content = content.replace(/refreshMediaConn\(false\)/g, "refreshMediaConn(true)");
+    modified = true;
+  }
+
+  // 5. Ensure generous 30-minute timeout (1800000ms) for heavy document uploads
+  if (!content.includes("timeout: timeoutMs || 1800000")) {
     content = content.replace(
-      /timeout:\s*timeoutMs\s*,/g,
-      "timeout: timeoutMs || 600000,"
+      /timeout:\s*(?:timeoutMs\s*\|\|\s*600000|timeoutMs)\s*,/g,
+      "timeout: timeoutMs || 1800000,"
+    );
+    modified = true;
+  }
+
+  // 6. Inject global.__waMediaUploadProgress hook into axios.post
+  if (!content.includes("global.__waMediaUploadProgress")) {
+    const postSearch = /responseType:\s*'json',/g;
+    content = content.replace(
+      postSearch,
+      `responseType: 'json',
+                    onUploadProgress: (progressEvent) => {
+                        try {
+                            if (typeof global.__waMediaUploadProgress === 'function') {
+                                global.__waMediaUploadProgress(progressEvent);
+                            }
+                        } catch (_) {}
+                    },`
     );
     modified = true;
   }
 
   if (modified) {
     fs.writeFileSync(targetFile, content, 'utf-8');
-    console.log('[PatchBaileys] Successfully patched messages-media.js with Content-Length, finish-sync, and 600s timeout!');
+    console.log('[PatchBaileys] Successfully patched messages-media.js with Content-Length, fresh mediaConn, 1800s timeout, and progress hook!');
   } else {
     console.log('[PatchBaileys] Baileys messages-media.js is already fully patched.');
   }
