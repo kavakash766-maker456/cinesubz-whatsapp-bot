@@ -1061,7 +1061,7 @@ async function processQueue() {
 
       if (episodes.length === 0) {
         await waSocket.sendMessage(replyTarget, {
-          text: `❌ *[FilmFeed Anime]* "${animeSlug}" සඳහා Episodes සොයාගත නොහැකි විය.`,
+          text: `❌ *[FilmFeed Anime]* Episodes not found for "${animeSlug}". Please verify the anime title on AnimeGG.`,
           mentions: mentionsList,
           contextInfo: getMetaAiContext(mentionsList),
         });
@@ -1531,25 +1531,18 @@ ${getPromoFooter()}`;
         }
       };
 
-      // Deliver instant acknowledgment to requester DM if requested in private chat
-      if (replyTarget && !replyTarget.endsWith("@g.us")) {
-        await waSocket.sendMessage(replyTarget, {
-          text: `🍿 *[FilmFeed Cinema]* *${title}* (${resolvedQuality}) ඉල්ලීම ලැබුණි!\n\nචිත්‍රපටය බාගත වීම ආරම්භ විය... Download අවසන් වූ පසු Group එක වෙත Document එක සහ Poster Card එක නිකුත් කෙරේ!`,
-          contextInfo: getMetaAiContext(mentionsList),
-        }).catch(() => {});
-      }
-
-      // Live Real-Time Status Tracker Message for Requester
+      // Live Real-Time Status Tracker Message for Requester (Single editing message)
       let liveStatusMsg = null;
+      let dmCompleted = false;
       try {
         liveStatusMsg = await waSocket.sendMessage(replyTarget, {
           text: 
 `🎬 *[FilmFeed Downloader]*
 ━━━━━━━━━━━━━━━━━━━━
-📌 *චිත්‍රපටය:* *${title}* (${resolvedQuality})
+📌 *Movie:* *${title}* (${resolvedQuality})
 👤 *Requested By:* ${pushName} [${badge}]
-⏳ *තත්ත්වය:* බාගත කිරීම ආරම්භ විය...
-📥 *Download Progress:* 0%
+⏳ *Status:* Download started...
+📥 *Progress:* 0%
 ⚡ *Server:* High-Speed Ultra Stream
 ━━━━━━━━━━━━━━━━━━━━`,
           mentions: mentionsList,
@@ -1597,11 +1590,11 @@ ${getPromoFooter()}`;
                   text: 
 `🎬 *[FilmFeed Downloader]*
 ━━━━━━━━━━━━━━━━━━━━
-📌 *චිත්‍රපටය:* *${title}* (${resolvedQuality})
+📌 *Movie:* *${title}* (${resolvedQuality})
 👤 *Requested By:* ${pushName} [${badge}]
-⏳ *තත්ත්වය:* Telegram හරහා බාගත වෙමින් පවතී...
-📥 *Download Progress:* ${percent}% (${dMB}MB / ${tMB}MB)
-⚡ *Speed:* ${speedText} (MTProto Secure Stream)
+⏳ *Status:* Downloading (Telegram Stream)...
+📥 *Progress:* ${percent}% (${dMB}MB / ${tMB}MB)
+⚡ *Speed:* ${speedText}
 ━━━━━━━━━━━━━━━━━━━━`,
                   edit: liveStatusMsg.key,
                   contextInfo: getMetaAiContext(mentionsList),
@@ -1627,11 +1620,11 @@ ${getPromoFooter()}`;
                   text: 
 `🎬 *[FilmFeed Downloader]*
 ━━━━━━━━━━━━━━━━━━━━
-📌 *චිත්‍රපටය:* *${title}* (${resolvedQuality})
+📌 *Movie:* *${title}* (${resolvedQuality})
 👤 *Requested By:* ${pushName} [${badge}]
-⏳ *තත්ත්වය:* බාගත වෙමින් පවතී...
-📥 *Download Progress:* ${percent}% (${dMB}MB / ${tMB}MB)
-⚡ *Speed:* ${speedText} (8x Multi-Stream)
+⏳ *Status:* Downloading...
+📥 *Progress:* ${percent}% (${dMB}MB / ${tMB}MB)
+⚡ *Speed:* ${speedText}
 ━━━━━━━━━━━━━━━━━━━━`,
                   edit: liveStatusMsg.key,
                   contextInfo: getMetaAiContext(mentionsList),
@@ -1643,11 +1636,11 @@ ${getPromoFooter()}`;
 
         // Verify file exists on disk and is > 1MB
         if (!fs.existsSync(tempFilePath)) {
-          throw new Error("ගොනුව බාගත කිරීම අසාර්ථක විය. File not created on disk.");
+          throw new Error("Video file download failed. File not created on disk.");
         }
         const finalFileSize = fs.statSync(tempFilePath).size;
         if (finalFileSize < 1000000) {
-          throw new Error(`බාගත කිරීමේදී දෝෂයක් සිදු විය (ගොනුව ${Math.round(finalFileSize / 1024)}KB ලෙස ලැබුණි, 0MB දෝෂයකි).`);
+          throw new Error(`Download error: received file is only ${Math.round(finalFileSize / 1024)}KB.`);
         }
 
         finalSizeMB = Math.round(finalFileSize / (1024 * 1024));
@@ -1659,11 +1652,11 @@ ${getPromoFooter()}`;
             text: 
 `🎬 *[FilmFeed Downloader]*
 ━━━━━━━━━━━━━━━━━━━━
-📌 *චිත්‍රපටය:* *${title}* (${resolvedQuality})
+📌 *Movie:* *${title}* (${resolvedQuality})
 👤 *Requested By:* ${pushName} [${badge}]
-✅ *Download:* 100% සම්පූර්ණයි (${finalSizeMB}MB)
-📤 *Uploading:* WhatsApp සමූහය වෙත යවමින් පවතී...
-⚡ *Status:* Group Broadcast in Progress
+✅ *Download:* 100% Complete (${finalSizeMB}MB)
+📤 *Status:* Uploading to WhatsApp group...
+⚡ *Broadcast:* In progress
 ━━━━━━━━━━━━━━━━━━━━`,
             edit: liveStatusMsg.key,
             contextInfo: getMetaAiContext(mentionsList),
@@ -1698,9 +1691,9 @@ ${getPromoFooter()}`;
               text: 
 `🎬 *[FilmFeed Downloader]*
 ━━━━━━━━━━━━━━━━━━━━
-📌 *චිත්‍රපටය:* *${title}* (${resolvedQuality})
+📌 *Movie:* *${title}* (${resolvedQuality})
 👤 *Requested By:* ${pushName} [${badge}]
-✅ *Download:* 100% සම්පූර්ණයි (${finalSizeMB}MB)
+✅ *Download:* 100% Complete (${finalSizeMB}MB)
 📤 *Uploading:* ${percent}% (${upMB}MB / ${finalSizeMB}MB)
 ⚡ *Status:* Group Broadcast in Progress
 ━━━━━━━━━━━━━━━━━━━━`,
@@ -1763,6 +1756,7 @@ ${getPromoFooter()}`,
           edit: liveStatusMsg.key,
           contextInfo: getMetaAiContext(mentionsList),
         }).catch(() => {});
+        dmCompleted = true;
       }
 
 // 4.1. Movie Poll completely removed - NO message after document
@@ -1832,18 +1826,20 @@ ${getPromoFooter()}`,
     try {
       cloudSession.updateGistFile("last_error.txt", `${new Date().toISOString()} | Task Error: ${err.message}\n${err.stack || ""}`);
     } catch (_) {}
-    if (typeof directUrl !== "undefined" && directUrl) {
-      // Group error text broadcast removed
-      
+
+    if (dmCompleted && replyTarget && !replyTarget.endsWith("@g.us")) {
+      logger.info(`Task already marked complete in requester DM ${replyTarget}. Suppressing further messages.`);
+    } else if (typeof directUrl !== "undefined" && directUrl) {
+      // Direct stream fallback for group or uncompleted task
       await waSocket.sendMessage(replyTarget, {
-        text: `🎬 *${typeof title !== "undefined" ? title : "චිත්‍රපටය"}* (${typeof resolvedQuality !== "undefined" ? resolvedQuality : "HD"})\n━━━━━━━━━━━━━━━━━━━━\n⚠️ Server Document Upload සීමාවක් නිසා, පහත Direct High-Speed Download Link එක මගින් දැන්ම නරඹන්න / බාගත කරගන්න:\n\n🚀 *Direct Link (100MB/s):*\n🔗 ${directUrl}\n━━━━━━━━━━━━━━━━━━━━\n🍿 FilmFeed Cinema Engine`,
+        text: `🎬 *${typeof title !== "undefined" ? title : "Movie"}* (${typeof resolvedQuality !== "undefined" ? resolvedQuality : "HD"})\n━━━━━━━━━━━━━━━━━━━━\n⚠️ Server Document Upload limit reached. Stream or download via high-speed direct link:\n\n🚀 *Direct Link (100MB/s):*\n🔗 ${directUrl}\n━━━━━━━━━━━━━━━━━━━━\n🍿 FilmFeed Cinema Engine`,
         contextInfo: getMetaAiContext(mentionsList),
       }).catch(() => {});
     } else {
       await waSocket.sendMessage(replyTarget, {
-        text: `⚠️ *[FilmFeed Auto-Bot]* දෝෂයක් සිදු විය: ${err.message}`,
+        text: `⚠️ *[FilmFeed Auto-Bot]* An error occurred: ${err.message}`,
         contextInfo: getMetaAiContext(mentionsList),
-      });
+      }).catch(() => {});
     }
   } finally {
     if (typeof queueWatchdog !== "undefined" && queueWatchdog) {
@@ -2036,7 +2032,7 @@ function attachMessageEvents(sock) {
 
         // Fallback: Search anywhere for CineSubz, SinhalaSub, Baiscopes, Anime or Cartoons URL
         if (!commandFound) {
-          const urlMatch = text.match(/(https?:\/\/[^\s|]*(?:cinesubz|sinhalasub|baiscopes|animekaizen|cartoons)[^\s|\n]*)/i);
+          const urlMatch = text.match(/(https?:\/\/[^\s|]*(?:cinesubz|sinhalasub|baiscopes|animegg|anime|cartoons)[^\s|\n]*)/i);
           if (urlMatch) {
             commandFound = true;
             movieUrl = urlMatch[1].trim();
