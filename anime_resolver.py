@@ -165,67 +165,100 @@ def clean_text(text: str) -> str:
         return ""
     return re.sub(r"\s+", " ", text).strip()
 
+def normalize_anime_title(text: str) -> str:
+    if not text:
+        return ""
+    # Normalize unicode multiplication symbol (× \u00d7) and special symbols
+    t = text.replace("×", " x ").replace("*", " x ")
+    # Remove Sinhala characters or non-ascii artifacts
+    t = re.sub(r"[\u0D80-\u0DFF]+", " ", t)
+    # Replace non-alphanumeric punctuation except hyphens with space
+    t = re.sub(r"[^\w\s-]", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
 def search_anime(query: str) -> list:
-    """Search anime by keyword on AnimeGG."""
-    url = f"{BASE_URL}/search/?q={quote(query)}"
-    try:
-        with httpx.Client(timeout=12.0) as client:
-            resp = client.get(url, headers=HEADERS)
-            if resp.status_code != 200:
-                return []
-            soup = BeautifulSoup(resp.text, "html.parser")
-            results = []
-            
-            # Find series cards
-            for card in soup.find_all("li", class_="mse"):
-                a_tag = card.find("a", href=True)
-                if not a_tag or "/series/" not in a_tag["href"]:
+    """Search anime by keyword on AnimeGG with intelligent normalization and season fallback."""
+    raw_q = query.strip()
+    norm_q = normalize_anime_title(raw_q)
+    
+    # Try search variants in order: normalized query, base title without Season/Part suffix
+    queries_to_try = [norm_q]
+    base_q = re.sub(r"(?i)\s*(?:season|part|cour)\s*\d+.*$", "", norm_q).strip()
+    if base_q and base_q.lower() != norm_q.lower():
+        queries_to_try.append(base_q)
+    # Also pure alphanumeric variant
+    simple_q = re.sub(r"[^a-zA-Z0-9\s]", " ", norm_q).strip()
+    if simple_q and simple_q not in queries_to_try:
+        queries_to_try.append(simple_q)
+
+    results = []
+    seen_slugs = set()
+
+    for q in queries_to_try:
+        if not q:
+            continue
+        url = f"{BASE_URL}/search/?q={quote(q)}"
+        try:
+            with httpx.Client(timeout=12.0) as client:
+                resp = client.get(url, headers=HEADERS)
+                if resp.status_code != 200:
                     continue
+                soup = BeautifulSoup(resp.text, "html.parser")
                 
-                href = a_tag["href"].strip()
-                slug = href.replace("/series/", "").strip("/")
+                # Find series cards
+                for card in soup.find_all("li", class_="mse"):
+                    a_tag = card.find("a", href=True)
+                    if not a_tag or "/series/" not in a_tag["href"]:
+                        continue
+                    
+                    href = a_tag["href"].strip()
+                    slug = href.replace("/series/", "").strip("/")
+                    if slug in seen_slugs or not slug:
+                        continue
+                    seen_slugs.add(slug)
+                    
+                    img_tag = card.find("img")
+                    poster = img_tag["src"] if img_tag and "src" in img_tag.attrs else ""
+                    if poster and not poster.startswith("http"):
+                        poster = f"{BASE_URL}{poster}"
+                    
+                    title_tag = card.find("strong")
+                    title = clean_text(title_tag.text) if title_tag else clean_text(a_tag.text)
+                    info_tag = card.find("span")
+                    info = clean_text(info_tag.text) if info_tag else ""
+                    
+                    results.append({
+                        "slug": slug,
+                        "title": title,
+                        "url": f"{BASE_URL}/series/{slug}",
+                        "poster": poster,
+                        "info": info
+                    })
                 
-                img_tag = card.find("img")
-                poster = img_tag["src"] if img_tag and "src" in img_tag.attrs else ""
-                if poster and not poster.startswith("http"):
-                    poster = f"{BASE_URL}{poster}"
+                # Fallback if li.mse not found, check any a with /series/
+                if not results:
+                    for a in soup.find_all("a", href=True):
+                        if "/series/" in a["href"]:
+                            slug = a["href"].replace("/series/", "").strip("/")
+                            if slug in seen_slugs or not slug:
+                                continue
+                            seen_slugs.add(slug)
+                            results.append({
+                                "slug": slug,
+                                "title": clean_text(a.text) or slug.replace("-", " ").title(),
+                                "url": f"{BASE_URL}/series/{slug}",
+                                "poster": "",
+                                "info": ""
+                            })
                 
-                title_tag = card.find("strong")
-                title = clean_text(title_tag.text) if title_tag else clean_text(a_tag.text)
-                
-                # episode count or extra info
-                info_tag = card.find("span")
-                info = clean_text(info_tag.text) if info_tag else ""
-                
-                results.append({
-                    "slug": slug,
-                    "title": title,
-                    "url": f"{BASE_URL}/series/{slug}",
-                    "poster": poster,
-                    "info": info
-                })
-            
-            # Fallback if li.mse not found, check any a with /series/
-            if not results:
-                seen_slugs = set()
-                for a in soup.find_all("a", href=True):
-                    if "/series/" in a["href"]:
-                        slug = a["href"].replace("/series/", "").strip("/")
-                        if slug in seen_slugs or not slug:
-                            continue
-                        seen_slugs.add(slug)
-                        results.append({
-                            "slug": slug,
-                            "title": clean_text(a.text) or slug.replace("-", " ").title(),
-                            "url": f"{BASE_URL}/series/{slug}",
-                            "poster": "",
-                            "info": ""
-                        })
-            
-            return results
-    except Exception as e:
-        sys.stderr.write(f"[ANIME SEARCH ERROR] {e}\n")
-        return []
+                # If we got solid results, stop searching further variants
+                if len(results) > 0:
+                    break
+        except Exception as e:
+            sys.stderr.write(f"[ANIME SEARCH ERROR] {e}\n")
+            continue
+
+    return results
 
 def _fetch_series_episodes_direct(slug: str) -> dict:
     """Internal helper to scrape series page directly."""
@@ -306,25 +339,47 @@ def get_series_episodes(slug: str) -> dict:
         parts = [p for p in clean.rstrip("/").split("/") if p]
         clean = parts[-1] if parts else clean
 
-    # Direct fetch attempt
-    res = _fetch_series_episodes_direct(clean)
-    if res.get("success") and len(res.get("episodes", [])) > 0:
-        return res
+    # Direct fetch attempt if it looks like a pre-formatted slug without spaces/symbols
+    if re.match(r"^[a-zA-Z0-9-]+$", clean):
+        res = _fetch_series_episodes_direct(clean)
+        if res.get("success") and len(res.get("episodes", [])) > 0:
+            return res
 
-    # Fallback: search AnimeGG if direct slug yields no episodes
-    search_q = clean.replace("-", " ")
-    sys.stderr.write(f"[ANIME RESOLVER] Direct slug '{clean}' had 0 episodes. Searching AnimeGG for '{search_q}'...\n")
-    matches = search_anime(search_q)
+    # Extract requested season number if present in query
+    season_match = re.search(r"(?i)\b(?:season|s)\s*(\d+)", clean)
+    requested_season = int(season_match.group(1)) if season_match else None
+
+    # Clean and normalize query for AnimeGG search
+    norm_title = normalize_anime_title(clean)
+    base_title = re.sub(r"(?i)\s*(?:season|part|cour)\s*\d+.*$", "", norm_title).strip()
+
+    search_queries = [norm_title, base_title, clean]
+    matches = []
+    for sq in search_queries:
+        if sq:
+            m = search_anime(sq)
+            if m:
+                matches = m
+                break
+
     if matches:
-        # Sort matches so that "-tv" or slug closely matching query with TV/series is preferred
-        sorted_matches = sorted(
-            matches,
-            key=lambda x: (
-                1 if f"{clean}-tv" == x["slug"] or f"{clean}-series" in x["slug"] else 0,
-                1 if "-tv" in x["slug"] else 0,
-            ),
-            reverse=True
-        )
+        def rank_match(item):
+            s = item["slug"].lower()
+            score = 0
+            if requested_season:
+                if f"season-{requested_season}" in s:
+                    score += 100
+                elif f"part-{requested_season}" in s:
+                    score += 80
+                elif requested_season == 1 and not ("season-" in s or "part-" in s):
+                    score += 50
+            if "-tv" in s:
+                score += 10
+            if "-dub" not in s:
+                score += 5
+            return score
+
+        sorted_matches = sorted(matches, key=rank_match, reverse=True)
         for m in sorted_matches:
             best_slug = m["slug"]
             sys.stderr.write(f"[ANIME RESOLVER] Testing match: '{best_slug}'...\n")
@@ -333,11 +388,13 @@ def get_series_episodes(slug: str) -> dict:
                 return res2
 
     # Fallback to curated anime catalog for guaranteed resolution
-    norm_slug = clean.lower().replace("_", "-")
-    matched_entry = CURATED_ANIME_FALLBACKS.get(norm_slug)
+    norm_slug = normalize_anime_title(clean).lower().replace(" ", "-").replace("_", "-")
+    base_slug = normalize_anime_title(base_title).lower().replace(" ", "-").replace("_", "-")
+
+    matched_entry = CURATED_ANIME_FALLBACKS.get(norm_slug) or CURATED_ANIME_FALLBACKS.get(base_slug)
     if not matched_entry:
         for k, v in CURATED_ANIME_FALLBACKS.items():
-            if k == norm_slug or k in norm_slug or norm_slug in k or k.replace("-", "") in norm_slug.replace("-", ""):
+            if k in norm_slug or norm_slug in k or k in base_slug or base_slug in k:
                 matched_entry = v
                 break
 

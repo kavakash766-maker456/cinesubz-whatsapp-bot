@@ -1038,7 +1038,14 @@ async function processQueue() {
         contextInfo: getMetaAiContext(mentionsList),
       });
 
-      const animeSlug = movieUrl.replace(/https?:\/\/[^/]+\/(?:series\/)?/, "").replace(/^\//, "").split(/[?#|]/)[0].trim();
+      let animeSlug = movieUrl
+        .replace(/https?:\/\/[^/]+\/(?:series\/)?/, "")
+        .replace(/^\//, "")
+        .split(/[?#|]/)[0]
+        .replace(/\u00D7|×/g, " x ")
+        .replace(/[*_]/g, " ")
+        .replace(/[\u0D80-\u0DFF]+/g, "")
+        .trim();
       let animeData = await resolveAnimeEpisodes(animeSlug);
       let episodes = animeData.episodes || [];
 
