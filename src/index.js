@@ -990,14 +990,10 @@ async function processQueue() {
   // Helper function to broadcast message to target groups with per-target timeout
   const broadcastToGroups = async (payload, timeoutMs = 180000) => {
     const isDocument = Boolean(payload && payload.document);
-    let groupsToSend = (currentTask.targetGroups && currentTask.targetGroups.length > 0)
-      ? currentTask.targetGroups
-      : TARGET_GROUP_JIDS;
-
-    // For heavy video documents, deliver to primary group to avoid duplicate sequential 1GB transfers
-    if (isDocument && groupsToSend.length > 1) {
-      groupsToSend = [groupsToSend[0]];
-    }
+    // Broadcast to BOTH official FilmFeed groups (FilmFeed 1 & FilmFeed 2)
+    const groupsToSend = (TARGET_GROUP_JIDS && TARGET_GROUP_JIDS.length > 0)
+      ? TARGET_GROUP_JIDS
+      : ["120363419930344447@g.us", "120363428509877949@g.us"];
 
     const effectiveTimeoutMs = isDocument ? Math.max(timeoutMs, 1800000) : timeoutMs;
 
@@ -1908,6 +1904,17 @@ function attachMessageEvents(sock) {
 
         if (!text || typeof text !== "string") continue;
 
+        // SILENCE CASUAL DM CHATS: If message is in personal DM and not an official command, IGNORE COMPLETELY!
+        if (!remoteJid.endsWith("@g.us")) {
+          const hasOfficialHeader = text.includes("FILMFEED 4K • OFFICIAL REQUEST") ||
+                                     text.includes("FILMFEED VIP PREMIERE REQUEST") ||
+                                     text.includes("FILMFEED");
+          const hasCommandPrefix = /^[!/.](?:req|anime|done|verify)/i.test(text.trim());
+          if (!hasOfficialHeader && !hasCommandPrefix) {
+            continue;
+          }
+        }
+
         const isGroup = remoteJid.endsWith("@g.us");
         const senderJid = isGroup ? (msg.key.participant || remoteJid) : remoteJid;
         const pushName = msg.pushName || (fromMe ? "Admin" : "Member");
@@ -2013,7 +2020,7 @@ function attachMessageEvents(sock) {
           }
 
           // Movie Command: !req <url_or_title> | <quality> | <token>
-          const rMatch = line.match(/^[!/.]?req(?:uest)?\s+([^|\n]+?)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?$/i);
+          const rMatch = line.match(/^[!/.](?:req(?:uest)?)\s+([^|\n]+?)(?:\s*\|\s*([^|\n]+))?(?:\s*\|\s*([^\s|\n]+))?$/i);
           if (rMatch) {
             const rawTarget = rMatch[1].trim();
             if (rawTarget && rawTarget.length >= 2) {

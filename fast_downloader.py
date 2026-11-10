@@ -135,6 +135,10 @@ def download_chunk(url: str, dest_path: str, start: int, end: int, part_num: int
 
 def parallel_download(url: str, dest_path: str, num_threads: int = 8) -> bool:
     url = normalize_media_url(url)
+    # AnimeGG Express CDN requires direct single-stream GET with Referer (Range probing drops socket)
+    if "animegg.org" in url:
+        return stream_download(url, dest_path, 0)
+
     num_threads = min(max(num_threads, 1), 8)
     size, supports_range = get_file_info(url)
 
