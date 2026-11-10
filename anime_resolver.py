@@ -421,14 +421,13 @@ def resolve_episode_mp4(episode_slug: str, quality_pref: str = "720p") -> dict:
                         label = s.get("label", "unknown")
                         if file_path:
                             stream_url = file_path if file_path.startswith("http") else f"{BASE_URL}{file_path}"
-                            sources.append({
-                                "quality": label,
-                                "url": stream_url,
-                                "referer": f"{BASE_URL}/",
-                                "is_mp4": ".mp4" in stream_url
-                            })
-                    if sources:
-                        break
+                            if not any(existing["quality"].lower() == label.lower() for existing in sources):
+                                sources.append({
+                                    "quality": label,
+                                    "url": stream_url,
+                                    "referer": f"{BASE_URL}/",
+                                    "is_mp4": ".mp4" in stream_url
+                                })
                 except Exception as parse_err:
                     sys.stderr.write(f"[PARSE ERROR] {parse_err}\n")
                     continue
