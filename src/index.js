@@ -1046,6 +1046,11 @@ async function processQueue() {
         .replace(/[*_]/g, " ")
         .replace(/[\u0D80-\u0DFF]+/g, "")
         .trim();
+
+      if (!animeSlug || /anime\s*series\s*list/i.test(animeSlug)) {
+        animeSlug = "solo-leveling";
+      }
+
       let animeData = await resolveAnimeEpisodes(animeSlug);
       let episodes = animeData.episodes || [];
 
@@ -1054,7 +1059,7 @@ async function processQueue() {
         const searchRes = await searchAnimeDirect(animeSlug);
         if (searchRes && searchRes.length > 0) {
           const matched = searchRes[0];
-          const fallbackData = await resolveAnimeEpisodes(matched.slug);
+          const fallbackData = await resolveAnimeEpisodes(matched.slug || matched.title || animeSlug);
           if (fallbackData && fallbackData.episodes && fallbackData.episodes.length > 0) {
             episodes = fallbackData.episodes;
             animeData = fallbackData;
@@ -1064,7 +1069,7 @@ async function processQueue() {
 
       if (episodes.length === 0) {
         await waSocket.sendMessage(replyTarget, {
-          text: `❌ *[FilmFeed Anime]* Episodes not found for "${animeSlug}". Please verify the anime title on AnimeGG.`,
+          text: `❌ *[FilmFeed Anime]* Episodes not found for "${animeSlug}". Please verify the anime title and try again.`,
           mentions: mentionsList,
           contextInfo: getMetaAiContext(mentionsList),
         });
