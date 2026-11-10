@@ -91,8 +91,8 @@ def search_anime(query: str) -> list:
         sys.stderr.write(f"[ANIME SEARCH ERROR] {e}\n")
         return []
 
-def get_series_episodes(slug: str) -> dict:
-    """Fetch all episodes and metadata for an anime series."""
+def _fetch_series_episodes_direct(slug: str) -> dict:
+    """Internal helper to scrape series page directly."""
     url = f"{BASE_URL}/series/{slug}"
     try:
         with httpx.Client(timeout=15.0) as client:
@@ -159,6 +159,34 @@ def get_series_episodes(slug: str) -> dict:
     except Exception as e:
         sys.stderr.write(f"[ANIME EPISODES ERROR] {e}\n")
         return {"success": False, "error": str(e), "episodes": []}
+
+def get_series_episodes(slug: str) -> dict:
+    """Fetch all episodes and metadata for an anime series with auto-search fallback."""
+    clean = slug.strip()
+    # Strip protocol and domain if full URL passed
+    if "animegg.org" in clean:
+        clean = clean.split("/series/")[-1].split("/")[0].strip()
+    elif clean.startswith("http"):
+        parts = [p for p in clean.rstrip("/").split("/") if p]
+        clean = parts[-1] if parts else clean
+
+    # Direct fetch attempt
+    res = _fetch_series_episodes_direct(clean)
+    if res.get("success") and len(res.get("episodes", [])) > 0:
+        return res
+
+    # Fallback: search AnimeGG if direct slug yields no episodes
+    search_q = clean.replace("-", " ")
+    sys.stderr.write(f"[ANIME RESOLVER] Direct slug '{clean}' had 0 episodes. Searching AnimeGG for '{search_q}'...\n")
+    matches = search_anime(search_q)
+    if matches:
+        best_slug = matches[0]["slug"]
+        sys.stderr.write(f"[ANIME RESOLVER] Best search match: '{best_slug}'. Fetching episodes...\n")
+        res2 = _fetch_series_episodes_direct(best_slug)
+        if res2.get("success") and len(res2.get("episodes", [])) > 0:
+            return res2
+
+    return res
 
 def resolve_episode_mp4(episode_slug: str, quality_pref: str = "720p") -> dict:
     """Resolve direct MP4 link from an episode page via its embed videoSources."""
