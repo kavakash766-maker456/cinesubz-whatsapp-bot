@@ -180,11 +180,21 @@ def get_series_episodes(slug: str) -> dict:
     sys.stderr.write(f"[ANIME RESOLVER] Direct slug '{clean}' had 0 episodes. Searching AnimeGG for '{search_q}'...\n")
     matches = search_anime(search_q)
     if matches:
-        best_slug = matches[0]["slug"]
-        sys.stderr.write(f"[ANIME RESOLVER] Best search match: '{best_slug}'. Fetching episodes...\n")
-        res2 = _fetch_series_episodes_direct(best_slug)
-        if res2.get("success") and len(res2.get("episodes", [])) > 0:
-            return res2
+        # Sort matches so that "-tv" or slug closely matching query with TV/series is preferred
+        sorted_matches = sorted(
+            matches,
+            key=lambda x: (
+                1 if f"{clean}-tv" == x["slug"] or f"{clean}-series" in x["slug"] else 0,
+                1 if "-tv" in x["slug"] else 0,
+            ),
+            reverse=True
+        )
+        for m in sorted_matches:
+            best_slug = m["slug"]
+            sys.stderr.write(f"[ANIME RESOLVER] Testing match: '{best_slug}'...\n")
+            res2 = _fetch_series_episodes_direct(best_slug)
+            if res2.get("success") and len(res2.get("episodes", [])) > 0:
+                return res2
 
     return res
 

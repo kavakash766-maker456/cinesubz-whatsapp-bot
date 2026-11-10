@@ -136,51 +136,25 @@ def create_branded_poster(poster_path, avatar_path, requester_name, output_path,
 
         draw = ImageDraw.Draw(bg)
 
-        # 3. Right Side: Centered Storyline & Requester DP
+        # 3. Right Side: Prominent Centered Requester Avatar (No synopsis, no user name)
         right_x = poster_w
         right_w = W - right_x
         center_x = right_x + (right_w // 2)
+        center_y = H // 2
 
-        # Header: *Storyline / සාරාංශය:*
-        head_font = get_font(26, bold=True)
-        head_text = "*Storyline / සාරාංශය:*"
-        h_bbox = draw.textbbox((0, 0), head_text, font=head_font)
-        hw = h_bbox[2] - h_bbox[0]
-        draw.text((center_x - (hw // 2), 40), head_text, fill=(255, 255, 255, 255), font=head_font, stroke_width=2, stroke_fill=(0, 0, 0, 220))
-
-        # Storyline Text: Multi-line, center-aligned, with stroke outline
-        story_font = get_font(21, bold=True)
-        clean_story = storyline
-        if len(clean_story) > 300:
-            clean_story = clean_story[:300].rsplit(" ", 1)[0] + "..."
-
-        max_text_w = right_w - 70
-        lines = wrap_text_to_width(draw, clean_story, story_font, max_text_w)
-        display_lines = lines[:6]
-        if len(lines) > 6 and not display_lines[-1].endswith("..."):
-            display_lines[-1] = display_lines[-1].rstrip(". ") + "..."
-
-        curr_y = 85
-        line_h = 32
-        for line in display_lines:
-            l_bbox = draw.textbbox((0, 0), line, font=story_font)
-            lw = l_bbox[2] - l_bbox[0]
-            lx = center_x - (lw // 2)
-            draw.text((lx, curr_y), line, fill=(255, 255, 255, 255), font=story_font, stroke_width=2, stroke_fill=(0, 0, 0, 220))
-            curr_y += line_h
-
-        # 4. Requester Avatar (DP) centered in bottom right area (matching user's drawn white circle)
-        avatar_size = 200
-        dp_center_y = int(H * 0.70)  # ~504px
+        # Prominent Enlarged Avatar Size
+        avatar_size = 380
         dp_x = center_x - (avatar_size // 2)
-        dp_y = dp_center_y - (avatar_size // 2)
+        dp_y = center_y - (avatar_size // 2)
 
-        # Drop shadow behind avatar
-        av_shadow = Image.new("RGBA", (avatar_size + 30, avatar_size + 30), (0, 0, 0, 0))
+        # Ambient Glow & Drop Shadow behind avatar
+        glow_size = avatar_size + 60
+        av_shadow = Image.new("RGBA", (glow_size, glow_size), (0, 0, 0, 0))
         as_draw = ImageDraw.Draw(av_shadow)
-        as_draw.ellipse((15, 15, avatar_size + 15, avatar_size + 15), fill=(0, 0, 0, 220))
-        av_shadow = av_shadow.filter(ImageFilter.GaussianBlur(12))
-        bg.paste(av_shadow, (dp_x - 15, dp_y - 15), av_shadow)
+        as_draw.ellipse((30, 30, glow_size - 30, glow_size - 30), fill=(245, 197, 24, 70))
+        as_draw.ellipse((35, 35, glow_size - 35, glow_size - 35), fill=(0, 0, 0, 220))
+        av_shadow = av_shadow.filter(ImageFilter.GaussianBlur(24))
+        bg.paste(av_shadow, (center_x - (glow_size // 2), center_y - (glow_size // 2)), av_shadow)
 
         # Smooth anti-aliased circular mask
         mask_scale = 2
@@ -202,38 +176,22 @@ def create_branded_poster(poster_path, avatar_path, requester_name, output_path,
             # Elegant VIP Cinema Default Avatar
             def_av = Image.new("RGBA", mask_dim, (18, 22, 32, 255))
             d_draw = ImageDraw.Draw(def_av)
-            d_draw.ellipse((8, 8, mask_dim[0]-8, mask_dim[1]-8), fill=(25, 30, 42, 255), outline=(245, 197, 24, 255), width=8)
-            vip_f = get_font(int(48 * mask_scale), bold=True)
+            d_draw.ellipse((12, 12, mask_dim[0]-12, mask_dim[1]-12), fill=(25, 30, 42, 255), outline=(245, 197, 24, 255), width=12)
+            vip_f = get_font(int(72 * mask_scale), bold=True)
             v_bbox = d_draw.textbbox((0, 0), "VIP", font=vip_f)
             vw = v_bbox[2] - v_bbox[0]
             vh = v_bbox[3] - v_bbox[1]
-            d_draw.text(((mask_dim[0] - vw) // 2, (mask_dim[1] - vh) // 2 - 8), "VIP", fill=(245, 197, 24, 255), font=vip_f)
+            d_draw.text(((mask_dim[0] - vw) // 2, (mask_dim[1] - vh) // 2 - 12), "VIP", fill=(245, 197, 24, 255), font=vip_f)
             def_av = def_av.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
             bg.paste(def_av, (dp_x, dp_y), mask=mask)
 
-        # Double Ring Border (White outer + Gold inner)
+        # Double Ring Luxury Border (White outer + Gold inner)
         border_img = Image.new("RGBA", mask_dim, (0, 0, 0, 0))
         b_draw = ImageDraw.Draw(border_img)
-        b_draw.ellipse((0, 0, mask_dim[0]-1, mask_dim[1]-1), outline=(255, 255, 255, 255), width=10)
-        b_draw.ellipse((10, 10, mask_dim[0] - 11, mask_dim[1] - 11), outline=(245, 197, 24, 255), width=8)
+        b_draw.ellipse((0, 0, mask_dim[0]-1, mask_dim[1]-1), outline=(255, 255, 255, 255), width=14)
+        b_draw.ellipse((14, 14, mask_dim[0] - 15, mask_dim[1] - 15), outline=(245, 197, 24, 255), width=10)
         border_img = border_img.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
         bg.paste(border_img, (dp_x, dp_y), border_img)
-
-        # Requester Pill Badge centered under avatar
-        pill_font = get_font(15, bold=True)
-        req_name = (requester_name or "VIP Member").strip()
-        if len(req_name) > 22:
-            req_name = req_name[:20] + ".."
-        pill_text = f"REQUESTED BY: {req_name.upper()}"
-        p_bbox = draw.textbbox((0, 0), pill_text, font=pill_font)
-        pw = p_bbox[2] - p_bbox[0] + 32
-        ph = p_bbox[3] - p_bbox[1] + 16
-
-        pill_x = center_x - (pw // 2)
-        pill_y = dp_y + avatar_size + 10
-
-        draw.rounded_rectangle([(pill_x, pill_y), (pill_x + pw, pill_y + ph)], radius=ph // 2, fill=(12, 14, 20, 240), outline=(245, 197, 24, 240), width=2)
-        draw.text((pill_x + 16, pill_y + 8), pill_text, fill=(255, 255, 255, 255), font=pill_font)
 
         # Convert to RGB and save
         final_img = bg.convert("RGB")

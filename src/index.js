@@ -1478,7 +1478,22 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
       const effectivePoster = posterUrl || backdropUrl;
       const sizeTextDisplay = movieData.size_text || (actualBytes > 0 ? `${Math.round(actualBytes / (1024 * 1024))}MB` : resolvedQuality);
 
-      const groupPosterCaption = 
+      const isVipRequester = Boolean(currentTask.isVip || (badge && (badge.includes("VIP") || badge.includes("👑"))));
+
+      const groupPosterCaption = isVipRequester ?
+`👑 *[FILMFEED VIP PREMIERE PASS]* 👑
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎬 *${title}* (${resolvedQuality})
+✨ *Exclusive VIP High-Speed Priority Dispatch*
+👤 *VIP Member:* ${currentTask.mentionDisplay || mentionTag}
+💎 *Membership Tier:* Ultra VIP Unlimited
+🌟 *Quality:* ${resolvedQuality} (${sizeTextDisplay})
+${tmdb?.voteAverage ? `⭐ *TMDb Rating:* ${tmdb.voteAverage.toFixed(1)}/10\n` : ""}${tmdb?.releaseDate ? `📅 *Release Date:* ${tmdb.releaseDate}\n` : ""}🔑 *VIP Token:* #${token || "VIP_EXCLUSIVE"}
+⚡ *Audio / Sub:* Sinhala Subtitles Included (4K Master)
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+🍿 _VIP Document release broadcasting to cinema group now..._
+${getPromoFooter()}`
+:
 `🎬 *${title}*
 ━━━━━━━━━━━━━━━━━━━━
 👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
@@ -1486,9 +1501,6 @@ WhatsApp මඟින් Document එකක් ලෙස එකවර යැව�
 🌟 *Quality:* ${resolvedQuality} (${sizeTextDisplay})
 ${tmdb?.voteAverage ? `⭐ *TMDb Rating:* ${tmdb.voteAverage.toFixed(1)}/10\n` : ""}${tmdb?.releaseDate ? `📅 *Release Date:* ${tmdb.releaseDate}\n` : ""}🔑 *Token:* ${token || "DIRECT"}
 ⚡ *Audio / Sub:* Sinhala Subtitles Included
-━━━━━━━━━━━━━━━━━━━━
-📝 *Storyline / සාරාංශය:*
-${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 ━━━━━━━━━━━━━━━━━━━━
 🍿 _චිත්‍රපටය (Document එක) මේ දැන්ම සමූහය වෙත ලැබෙනු ඇත..._
 ${getPromoFooter()}`;
@@ -1738,10 +1750,17 @@ ${getPromoFooter()}`,
         uploadSucceeded = true;
       }
 
-      // Deliver confirmation to requester DM
-      if (replyTarget && !replyTarget.endsWith("@g.us")) {
+      // Deliver final completion by editing liveStatusMsg in requester DM (NO further DM messages)
+      if (liveStatusMsg?.key && replyTarget && !replyTarget.endsWith("@g.us")) {
         await waSocket.sendMessage(replyTarget, {
-          text: `🍿 *[FilmFeed Cinema]* *${title}* (${resolvedQuality}) සූදානම්!\n\n⚡ *Direct High-Speed Link:*\n🔗 ${directUrl}\n\n📥 Cinema Group එකටද Poster එක සහ Document/Direct Link යවන ලදී!`,
+          text: 
+`🎬 *[FilmFeed Downloader]*
+━━━━━━━━━━━━━━━━━━━━
+📌 *Movie:* *${title}* (${resolvedQuality})
+👤 *Requested By:* ${pushName} [${badge}]
+✅ *Download and upload complete*
+━━━━━━━━━━━━━━━━━━━━`,
+          edit: liveStatusMsg.key,
           contextInfo: getMetaAiContext(mentionsList),
         }).catch(() => {});
       }
@@ -1779,43 +1798,33 @@ ${getPromoFooter()}`,
         fs.unlinkSync(tempFilePath);
       }
 
-      // 6. Delete intermediate status messages from user's chat (never in groups to prevent ghost bubbles)
-      if (replyTarget && !replyTarget.endsWith("@g.us")) {
-        for (const k of statusTrackerKeys) {
-          try {
-            await waSocket.sendMessage(replyTarget, { delete: k });
-          } catch (_) {}
-        }
-      }
-
-      // 7. Record movie in user's history and send final summary
+      // 6. Record movie in user's history
       const updatedStats = incrementUserRequest(requesterJid || replyTarget, pushName, title, resolvedQuality);
-      const historyList = (updatedStats.history || []).slice(-10);
-      let historyText = "";
-      historyList.forEach((item, idx) => {
-        historyText += `\n${idx + 1}. 🎬 ${item.title} *(${item.quality})* - _${item.date}_`;
-      });
 
-      const directLinkSection = (replyTarget && !replyTarget.endsWith("@g.us") && directUrl)
-        ? `\n🚀 *Direct High-Speed Download Link:*\n🔗 ${directUrl}\n`
-        : "";
+      // Only send final summary if requested inside a group — NEVER to user DM
+      if (replyTarget && replyTarget.endsWith("@g.us")) {
+        const historyList = (updatedStats.history || []).slice(-10);
+        let historyText = "";
+        historyList.forEach((item, idx) => {
+          historyText += `\n${idx + 1}. 🎬 ${item.title} *(${item.quality})* - _${item.date}_`;
+        });
 
-      await waSocket.sendMessage(replyTarget, {
-        text: 
+        await waSocket.sendMessage(replyTarget, {
+          text: 
 `🎉 *[FilmFeed Auto-Bot]* සාර්ථකයි!
 ━━━━━━━━━━━━━━━━━━━━
 👤 *සාමාජිකයා:* ${pushName} [${updatedStats.badge}]
 🎬 *නිකුත් වූ චිත්‍රපටය:* *${title}* (${resolvedQuality})
 📦 *ප්‍රමාණය:* ${finalSizeMB}MB
 ⚡ *තත්ත්වය:* සමූහය වෙත සාර්ථකව යවන ලදී (Broadcast Complete)
-${directLinkSection}
 📜 *ඔබ මෙතෙක් ලබාගත් චිත්‍රපට ලැයිස්තුව (${updatedStats.count}):*${historyText}
 ━━━━━━━━━━━━━━━━━━━━
 🍿 FilmFeed Group එකෙන් දැන්ම Download කරගන්න!
-👉 Website: https://filmfeed-website.vercel.app`,
-        mentions: mentionsList,
-        contextInfo: getMetaAiContext(mentionsList),
-      });
+👉 Website: https://web-umber-six-e1un7z6257.vercel.app`,
+          mentions: mentionsList,
+          contextInfo: getMetaAiContext(mentionsList),
+        }).catch(() => {});
+      }
     }
 
   } catch (err) {
