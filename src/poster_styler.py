@@ -4,17 +4,23 @@ import re
 import textwrap
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
 
-def get_font(size=20, bold=False):
+def get_font(size=20, bold=False, sinhala=False):
     """Select the best available Unicode font with Sinhala and Latin support."""
     candidates = []
     if sys.platform == "win32":
-        candidates = [
-            "C:/Windows/Fonts/NirmalaB.ttf" if bold else "C:/Windows/Fonts/Nirmala.ttc",
-            "C:/Windows/Fonts/Nirmala.ttc",
-            "C:/Windows/Fonts/iskpotab.ttf" if bold else "C:/Windows/Fonts/iskpota.ttf",
-            "C:/Windows/Fonts/segoeuib.ttf" if bold else "C:/Windows/Fonts/segoeui.ttf",
-            "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
-        ]
+        if sinhala:
+            candidates = [
+                "C:/Windows/Fonts/NirmalaB.ttf",
+                "C:/Windows/Fonts/Nirmala.ttc",
+                "C:/Windows/Fonts/iskpotab.ttf",
+                "C:/Windows/Fonts/iskpota.ttf",
+            ]
+        else:
+            candidates = [
+                "C:/Windows/Fonts/segoeuib.ttf" if bold else "C:/Windows/Fonts/segoeui.ttf",
+                "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
+                "C:/Windows/Fonts/Nirmala.ttc",
+            ]
     else:
         candidates = [
             "/usr/share/fonts/truetype/noto/NotoSansSinhala-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSansSinhala-Regular.ttf",
@@ -67,17 +73,29 @@ def generate_thumbnail(input_path, output_path, max_size=(240, 320)):
         sys.stderr.write(f"Thumbnail error: {e}\n")
         return False
 
-def create_branded_poster(poster_path, avatar_path, requester_name, output_path, storyline_text=None, backdrop_path=None):
+def create_branded_poster(
+    poster_path,
+    avatar_path,
+    requester_name,
+    output_path,
+    storyline_text=None,
+    backdrop_path=None,
+    title=None,
+    year=None,
+    rating=None,
+    quality=None
+):
     """
-    Creates a luxury 16:9 cinema announcement card matching reference template:
-    - Left: Full-height sharp vertical movie poster with FilmFeed golden banner.
-    - Right: Dark blurred backdrop with centered Storyline / සාරාංශය.
-    - Bottom-Right: Requester's circular WhatsApp DP with double ring frame & pill badge.
+    Creates a luxury 16:9 cinema announcement card:
+    - NO requester avatar / profile picture!
+    - Left: Full-height crisp vertical movie poster in a glowing luxury glass frame.
+    - Right: Cinematic metadata panel with official golden Premiere badge, large movie title,
+      rating/year/resolution chip pills, rich storyline/synopsis block, and subtle requester tag.
     """
     try:
         W, H = 1280, 720
-        poster_w = int(H * 0.64)  # ~460px width for 2:3 vertical poster covering full height
 
+        # Parse storyline
         storyline = storyline_text or ""
         if os.path.exists(storyline):
             try:
@@ -90,6 +108,25 @@ def create_branded_poster(poster_path, avatar_path, requester_name, output_path,
         if not storyline or storyline.lower() == "none":
             storyline = "A high-octane cinema experience featuring Sinhala subtitles, 5.1 surround audio, and premium master visuals."
 
+        # Parse title from storyline or poster name if not provided
+        clean_title = (title or "").strip()
+        if not clean_title or clean_title.lower() == "none":
+            # Extract from poster file name if possible
+            base = os.path.basename(poster_path)
+            clean_title = re.sub(r"^(?:thumb_|poster_|branded_|[0-9_]+)+", "", base)
+            clean_title = os.path.splitext(clean_title)[0].replace("_", " ").title()
+        if not clean_title:
+            clean_title = "Featured Cinema Release"
+
+        clean_year = (year or "2024").strip()
+        clean_rating = (rating or "8.5").strip()
+        if not clean_rating.endswith("/10") and clean_rating != "8.5":
+            clean_rating = f"{clean_rating}/10"
+        elif clean_rating == "8.5":
+            clean_rating = "8.5/10"
+        clean_quality = (quality or "1080p FHD").strip()
+        clean_requester = (requester_name or "VIP Member").replace("@s.whatsapp.net", "").replace("@lid", "").strip()
+
         # 1. Background: Blurred Backdrop
         bg_source = backdrop_path if (backdrop_path and os.path.exists(backdrop_path) and backdrop_path != "NONE") else poster_path
         with Image.open(bg_source) as bg_img:
@@ -98,104 +135,176 @@ def create_branded_poster(poster_path, avatar_path, requester_name, output_path,
             bg = bg.filter(ImageFilter.GaussianBlur(36))
 
         # Dark cinema glass vignette overlay
-        overlay = Image.new("RGBA", (W, H), (10, 12, 18, 185))
+        overlay = Image.new("RGBA", (W, H), (10, 12, 18, 205))
         bg = Image.alpha_composite(bg, overlay)
 
-        # 2. Left Side: Full-height Movie Poster (0 to poster_w, 0 to H)
+        # 2. Left Side: Full-height Vertical Poster in Elegant Frame
+        # Margin: left 45px, top 45px, height 630px, width ~420px (2:3 aspect)
+        poster_w = 420
+        poster_h = 630
+        poster_x = 45
+        poster_y = 45
+
+        # Poster drop shadow
+        shadow_margin = 20
+        shadow_img = Image.new("RGBA", (poster_w + shadow_margin * 2, poster_h + shadow_margin * 2), (0, 0, 0, 0))
+        s_draw = ImageDraw.Draw(shadow_img)
+        s_draw.rounded_rectangle(
+            [(shadow_margin - 4, shadow_margin - 4), (poster_w + shadow_margin + 4, poster_h + shadow_margin + 4)],
+            radius=18,
+            fill=(0, 0, 0, 190)
+        )
+        shadow_img = shadow_img.filter(ImageFilter.GaussianBlur(14))
+        bg.paste(shadow_img, (poster_x - shadow_margin, poster_y - shadow_margin), shadow_img)
+
+        # Poster image with rounded corners
         with Image.open(poster_path) as p_img:
             p_img = p_img.convert("RGBA")
-            p_img = ImageOps.fit(p_img, (poster_w, H), method=Image.Resampling.LANCZOS)
+            p_img = ImageOps.fit(p_img, (poster_w, poster_h), method=Image.Resampling.LANCZOS)
 
-            # Poster bottom golden banner
-            p_overlay = Image.new("RGBA", (poster_w, H), (0, 0, 0, 0))
+            # Round mask
+            mask = Image.new("L", (poster_w, poster_h), 0)
+            m_draw = ImageDraw.Draw(mask)
+            m_draw.rounded_rectangle([(0, 0), (poster_w, poster_h)], radius=16, fill=255)
+
+            # Golden bottom banner on poster
+            p_overlay = Image.new("RGBA", (poster_w, poster_h), (0, 0, 0, 0))
             p_draw = ImageDraw.Draw(p_overlay)
-            banner_h = int(H * 0.10)
-            banner_top = H - banner_h
+            banner_h = 48
+            banner_top = poster_h - banner_h
             for y in range(banner_h):
                 alpha = int(240 * (y / banner_h) ** 0.8)
                 p_draw.line([(0, banner_top + y), (poster_w, banner_top + y)], fill=(8, 10, 15, alpha))
 
             # Golden accent line
             p_draw.rectangle([(0, banner_top), (poster_w, banner_top + 3)], fill=(245, 197, 24, 255))
-            brand_font = get_font(14, bold=True)
-            brand_text = "FILMFEED 4K CINEMA  •  SINHALA SUBTITLES"
+            brand_font = get_font(13, bold=True)
+            brand_text = "FILMFEED 4K CINEMA  •  MASTER AUDIO"
             b_bbox = p_draw.textbbox((0, 0), brand_text, font=brand_font)
             bw = b_bbox[2] - b_bbox[0]
-            p_draw.text(((poster_w - bw) // 2, banner_top + int(banner_h * 0.35)), brand_text, fill=(255, 255, 255, 240), font=brand_font)
+            p_draw.text(((poster_w - bw) // 2, banner_top + 16), brand_text, fill=(255, 255, 255, 240), font=brand_font)
 
-            # Drop shadow / divider on right edge of poster
-            edge_shadow = Image.new("RGBA", (24, H), (0, 0, 0, 0))
-            es_draw = ImageDraw.Draw(edge_shadow)
-            for x in range(24):
-                alpha = int(180 * (1 - (x / 24)))
-                es_draw.line([(x, 0), (x, H)], fill=(0, 0, 0, alpha))
+            p_composite = Image.alpha_composite(p_img, p_overlay)
 
-            p_final = Image.alpha_composite(p_img, p_overlay)
-            bg.paste(p_final, (0, 0))
-            bg.paste(edge_shadow, (poster_w, 0), edge_shadow)
+            # Subtle luxury gold border around poster
+            border_draw = ImageDraw.Draw(p_composite)
+            border_draw.rounded_rectangle([(0, 0), (poster_w - 1, poster_h - 1)], radius=16, outline=(245, 197, 24, 180), width=2)
 
+            bg.paste(p_composite, (poster_x, poster_y), mask)
+
+        # 3. Right Side: Luxury Typography & Movie Info
         draw = ImageDraw.Draw(bg)
+        right_x = 510
+        right_max_w = W - right_x - 50
 
-        # 3. Right Side: Prominent Centered Requester Avatar (No synopsis, no user name)
-        right_x = poster_w
-        right_w = W - right_x
-        center_x = right_x + (right_w // 2)
-        center_y = H // 2
+        # Header Badge: "FILMFEED CINEMA PREMIERE" solid gold pill
+        badge_font = get_font(13, bold=True)
+        badge_text = "FILMFEED CINEMA PREMIERE"
+        b_bbox = draw.textbbox((0, 0), badge_text, font=badge_font)
+        badge_w = (b_bbox[2] - b_bbox[0]) + 32
+        badge_h = 32
+        badge_y = 52
 
-        # Prominent Enlarged Avatar Size
-        avatar_size = 380
-        dp_x = center_x - (avatar_size // 2)
-        dp_y = center_y - (avatar_size // 2)
+        # Gold gradient pill with dark sharp text
+        draw.rounded_rectangle(
+            [(right_x, badge_y), (right_x + badge_w, badge_y + badge_h)],
+            radius=16,
+            fill=(245, 197, 24, 255)
+        )
+        draw.text((right_x + 16, badge_y + 8), badge_text, fill=(12, 14, 20, 255), font=badge_font)
 
-        # Ambient Glow & Drop Shadow behind avatar
-        glow_size = avatar_size + 60
-        av_shadow = Image.new("RGBA", (glow_size, glow_size), (0, 0, 0, 0))
-        as_draw = ImageDraw.Draw(av_shadow)
-        as_draw.ellipse((30, 30, glow_size - 30, glow_size - 30), fill=(245, 197, 24, 70))
-        as_draw.ellipse((35, 35, glow_size - 35, glow_size - 35), fill=(0, 0, 0, 220))
-        av_shadow = av_shadow.filter(ImageFilter.GaussianBlur(24))
-        bg.paste(av_shadow, (center_x - (glow_size // 2), center_y - (glow_size // 2)), av_shadow)
+        # Movie Title
+        title_font = get_font(38, bold=True)
+        title_lines = wrap_text_to_width(draw, clean_title, title_font, right_max_w)
+        # Limit to 2 lines for title
+        if len(title_lines) > 2:
+            title_lines = title_lines[:2]
+            title_lines[1] += "..."
 
-        # Smooth anti-aliased circular mask
-        mask_scale = 2
-        mask_dim = (avatar_size * mask_scale, avatar_size * mask_scale)
-        mask = Image.new("L", mask_dim, 0)
-        m_draw = ImageDraw.Draw(mask)
-        m_draw.ellipse((0, 0, mask_dim[0], mask_dim[1]), fill=255)
-        mask = mask.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
+        title_y = badge_y + badge_h + 18
+        for line in title_lines:
+            # Subtle drop shadow
+            draw.text((right_x + 2, title_y + 2), line, fill=(0, 0, 0, 200), font=title_font)
+            draw.text((right_x, title_y), line, fill=(255, 255, 255, 255), font=title_font)
+            t_bbox = draw.textbbox((0, 0), line, font=title_font)
+            title_y += (t_bbox[3] - t_bbox[1]) + 8
 
-        has_custom_avatar = avatar_path and os.path.exists(avatar_path) and avatar_path != "NONE"
-        if has_custom_avatar:
-            with Image.open(avatar_path) as av_raw:
-                av_raw = av_raw.convert("RGBA")
-                av_fitted = ImageOps.fit(av_raw, (avatar_size, avatar_size), method=Image.Resampling.LANCZOS)
-                circular_av = Image.new("RGBA", (avatar_size, avatar_size), (0, 0, 0, 0))
-                circular_av.paste(av_fitted, (0, 0), mask=mask)
-                bg.paste(circular_av, (dp_x, dp_y), circular_av)
-        else:
-            # Elegant VIP Cinema Default Avatar
-            def_av = Image.new("RGBA", mask_dim, (18, 22, 32, 255))
-            d_draw = ImageDraw.Draw(def_av)
-            d_draw.ellipse((12, 12, mask_dim[0]-12, mask_dim[1]-12), fill=(25, 30, 42, 255), outline=(245, 197, 24, 255), width=12)
-            vip_f = get_font(int(72 * mask_scale), bold=True)
-            v_bbox = d_draw.textbbox((0, 0), "VIP", font=vip_f)
-            vw = v_bbox[2] - v_bbox[0]
-            vh = v_bbox[3] - v_bbox[1]
-            d_draw.text(((mask_dim[0] - vw) // 2, (mask_dim[1] - vh) // 2 - 12), "VIP", fill=(245, 197, 24, 255), font=vip_f)
-            def_av = def_av.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
-            bg.paste(def_av, (dp_x, dp_y), mask=mask)
+        # Metadata Chips Row: Year | Rating | Quality | Sinhala Subtitles
+        chip_y = title_y + 10
+        chips = [
+            clean_year,
+            clean_rating,
+            clean_quality,
+            "Sinhala Subtitles"
+        ]
+        chip_font = get_font(13, bold=True)
+        cur_cx = right_x
+        for chip in chips:
+            c_bbox = draw.textbbox((0, 0), chip, font=chip_font)
+            cw = (c_bbox[2] - c_bbox[0]) + 24
+            ch = 30
+            draw.rounded_rectangle(
+                [(cur_cx, chip_y), (cur_cx + cw, chip_y + ch)],
+                radius=15,
+                fill=(22, 28, 42, 230),
+                outline=(245, 197, 24, 160),
+                width=1
+            )
+            draw.text((cur_cx + 12, chip_y + 7), chip, fill=(255, 255, 255, 255), font=chip_font)
+            cur_cx += cw + 12
 
-        # Double Ring Luxury Border (White outer + Gold inner)
-        border_img = Image.new("RGBA", mask_dim, (0, 0, 0, 0))
-        b_draw = ImageDraw.Draw(border_img)
-        b_draw.ellipse((0, 0, mask_dim[0]-1, mask_dim[1]-1), outline=(255, 255, 255, 255), width=14)
-        b_draw.ellipse((14, 14, mask_dim[0] - 15, mask_dim[1] - 15), outline=(245, 197, 24, 255), width=10)
-        border_img = border_img.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
-        bg.paste(border_img, (dp_x, dp_y), border_img)
+        # Sleek golden divider line
+        divider_y = chip_y + 44
+        draw.line([(right_x, divider_y), (right_x + right_max_w, divider_y)], fill=(245, 197, 24, 90), width=1)
+
+        # Synopsis Header & Wrapped Body
+        syn_header_font = get_font(14, bold=True)
+        syn_head_y = divider_y + 14
+        draw.text((right_x, syn_head_y), "OFFICIAL SYNOPSIS", fill=(245, 197, 24, 240), font=syn_header_font)
+
+        # Check if storyline has Sinhala characters
+        has_sinhala = bool(re.search(r"[\u0D80-\u0DFF]", storyline))
+        syn_body_font = get_font(15, bold=False, sinhala=has_sinhala)
+        syn_lines = wrap_text_to_width(draw, storyline, syn_body_font, right_max_w)
+        # Limit synopsis to 4 lines
+        max_syn_lines = 4
+        if len(syn_lines) > max_syn_lines:
+            syn_lines = syn_lines[:max_syn_lines]
+            syn_lines[-1] = syn_lines[-1].rstrip("., ") + "..."
+
+        syn_y = syn_head_y + 26
+        for s_line in syn_lines:
+            draw.text((right_x, syn_y), s_line, fill=(215, 222, 235, 220), font=syn_body_font)
+            sb_box = draw.textbbox((0, 0), s_line, font=syn_body_font)
+            syn_y += (sb_box[3] - sb_box[1]) + 6
+
+        # Bottom Bar: Requester Pill + FilmFeed Network Watermark
+        bottom_y = 625
+        # Draw sleek subtle requester pill on bottom left of right panel
+        req_font = get_font(13, bold=True)
+        req_text = f"VIP Request: {clean_requester}"
+        rq_bbox = draw.textbbox((0, 0), req_text, font=req_font)
+        rq_w = (rq_bbox[2] - rq_bbox[0]) + 24
+        rq_h = 30
+        draw.rounded_rectangle(
+            [(right_x, bottom_y), (right_x + rq_w, bottom_y + rq_h)],
+            radius=15,
+            fill=(99, 102, 241, 40),
+            outline=(99, 102, 241, 140),
+            width=1
+        )
+        draw.text((right_x + 12, bottom_y + 7), req_text, fill=(199, 210, 254, 255), font=req_font)
+
+        # Brand mark on bottom right
+        brand_font2 = get_font(13, bold=True)
+        brand_str = "FILMFEED 4K CINEMA  •  WHATSAPP BOT"
+        bf_bbox = draw.textbbox((0, 0), brand_str, font=brand_font2)
+        bw2 = bf_bbox[2] - bf_bbox[0]
+        draw.text((W - 50 - bw2, bottom_y + 7), brand_str, fill=(160, 175, 205, 180), font=brand_font2)
 
         # Convert to RGB and save
         final_img = bg.convert("RGB")
-        final_img.save(output_path, "JPEG", quality=88, optimize=True)
+        final_img.save(output_path, "JPEG", quality=90, optimize=True)
         return True
     except Exception as e:
         sys.stderr.write(f"Branded poster error: {e}\n")
@@ -214,10 +323,25 @@ if __name__ == "__main__":
         sys.exit(0 if success else 1)
     elif cmd == "brand":
         poster_p = sys.argv[2]
-        avatar_p = sys.argv[3] if sys.argv[3] != "NONE" else None
+        avatar_p = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] != "NONE" else None
         name = sys.argv[4] if len(sys.argv) > 4 else "VIP Member"
         out_p = sys.argv[5] if len(sys.argv) > 5 else "out.jpg"
         storyline = sys.argv[6] if len(sys.argv) > 6 else None
         backdrop_p = sys.argv[7] if len(sys.argv) > 7 and sys.argv[7] != "NONE" else None
-        success = create_branded_poster(poster_p, avatar_p, name, out_p, storyline, backdrop_p)
+        title_arg = sys.argv[8] if len(sys.argv) > 8 else None
+        year_arg = sys.argv[9] if len(sys.argv) > 9 else None
+        rating_arg = sys.argv[10] if len(sys.argv) > 10 else None
+        quality_arg = sys.argv[11] if len(sys.argv) > 11 else None
+        success = create_branded_poster(
+            poster_p,
+            avatar_p,
+            name,
+            out_p,
+            storyline,
+            backdrop_p,
+            title_arg,
+            year_arg,
+            rating_arg,
+            quality_arg
+        )
         sys.exit(0 if success else 1)

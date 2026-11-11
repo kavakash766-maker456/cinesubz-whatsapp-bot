@@ -1372,12 +1372,17 @@ def resolve_direct_link(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("url", help="CineSubz movie / episode / TV series URL or Google Drive URL")
+    ap.add_argument("url", help="CineSubz movie / episode / TV series URL, query, or Google Drive URL")
     ap.add_argument("--quality", default=None, help="Target quality (e.g. 1080p, 720p)")
     ap.add_argument(
         "--episodes",
         action="store_true",
         help="List all episodes of a TV series page instead of resolving a download",
+    )
+    ap.add_argument(
+        "--search",
+        action="store_true",
+        help="Search CineSubz for title or query",
     )
     ap.add_argument(
         "--download-gdrive",
@@ -1386,6 +1391,17 @@ def main():
         help="Download Google Drive cartoon/movie directly to specified output file path",
     )
     args = ap.parse_args()
+
+    if args.search or (args.url and not args.url.startswith("http")):
+        try:
+            from cinesubz_scraper import CineSubzScraper
+            s = CineSubzScraper()
+            results = s.search(args.url)
+            print(json.dumps(results or []))
+            return
+        except Exception as e:
+            print(json.dumps([]))
+            return
 
     # Direct Google Drive downloader using gdown
     if args.download_output:

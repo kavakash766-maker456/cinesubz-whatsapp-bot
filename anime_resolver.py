@@ -222,10 +222,13 @@ CURATED_ANIME = {
     }
 }
 
+import ssl
+_SSL_CTX = ssl._create_unverified_context()
+
 # --------------------------------------------------------------------------
 # HTTP Utility Helpers
 # --------------------------------------------------------------------------
-def http_get(url: str, headers=None, timeout=5) -> str:
+def http_get(url: str, headers=None, timeout=8) -> str:
     """Fetch URL with curl_cffi Chrome impersonation fallback to requests and urllib."""
     h = dict(DEFAULT_HEADERS)
     if headers:
@@ -243,7 +246,7 @@ def http_get(url: str, headers=None, timeout=5) -> str:
         try:
             sess = requests.Session()
             sess.headers.update(h)
-            r = sess.get(url, timeout=timeout)
+            r = sess.get(url, timeout=timeout, verify=False)
             if r.status_code == 200:
                 return r.text
         except Exception:
@@ -251,7 +254,7 @@ def http_get(url: str, headers=None, timeout=5) -> str:
 
     try:
         req = urllib.request.Request(url, headers=h)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as resp:
             return resp.read().decode("utf-8", errors="ignore")
     except Exception:
         return ""
@@ -600,6 +603,28 @@ def get_series_episodes(query_or_slug: str) -> dict:
         clean = "solo-leveling"
 
     norm_slug = clean.lower().replace(" ", "-").replace("_", "-")
+
+    # 0. Primary: Check CineSubz series scraper (for authentic Sinhala-subtitled anime)
+    try:
+        from cinesubz_scraper import CineSubzScraper
+        cs = CineSubzScraper()
+        cs_res = cs.search(clean)
+        for r in cs_res:
+            if r.get("is_series") or "tvshows" in r.get("url", ""):
+                series_data = cs.get_series(r["url"])
+                if series_data and series_data.get("episodes"):
+                    return {
+                        "success": True,
+                        "title": series_data.get("title") or r["title"],
+                        "slug": norm_slug,
+                        "poster": series_data.get("poster") or r.get("poster"),
+                        "description": series_data.get("description") or "Complete anime series with Sinhala subtitles.",
+                        "total_episodes": len(series_data["episodes"]),
+                        "episodes": series_data["episodes"],
+                        "source": "cinesubz"
+                    }
+    except Exception:
+        pass
 
     # 1. Match from Curated Anime Catalog first for instant verified resolution
     matched_entry = CURATED_ANIME.get(norm_slug)
