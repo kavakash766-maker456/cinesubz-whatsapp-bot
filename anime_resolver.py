@@ -604,29 +604,7 @@ def get_series_episodes(query_or_slug: str) -> dict:
 
     norm_slug = clean.lower().replace(" ", "-").replace("_", "-")
 
-    # 0. Primary: Check CineSubz series scraper (for authentic Sinhala-subtitled anime)
-    try:
-        from cinesubz_scraper import CineSubzScraper
-        cs = CineSubzScraper()
-        cs_res = cs.search(clean)
-        for r in cs_res:
-            if r.get("is_series") or "tvshows" in r.get("url", ""):
-                series_data = cs.get_series(r["url"])
-                if series_data and series_data.get("episodes"):
-                    return {
-                        "success": True,
-                        "title": series_data.get("title") or r["title"],
-                        "slug": norm_slug,
-                        "poster": series_data.get("poster") or r.get("poster"),
-                        "description": series_data.get("description") or "Complete anime series with Sinhala subtitles.",
-                        "total_episodes": len(series_data["episodes"]),
-                        "episodes": series_data["episodes"],
-                        "source": "cinesubz"
-                    }
-    except Exception:
-        pass
-
-    # 1. Match from Curated Anime Catalog first for instant verified resolution
+    # 1. Match from Curated Anime Catalog first for instant verified resolution (Clean RAW releases)
     matched_entry = CURATED_ANIME.get(norm_slug)
     if not matched_entry:
         for k, v in CURATED_ANIME.items():
@@ -768,6 +746,13 @@ def resolve_episode_mp4(episode_slug: str, quality_pref: str = "720p") -> dict:
                             })
             except Exception:
                 continue
+
+            # If preferred quality or at least one direct mp4 is found, stop querying further embeds
+            pref_lower = quality_pref.lower()
+            if any(pref_lower in s["quality"].lower() and s["is_mp4"] for s in sources):
+                break
+            if len(sources) >= 1 and any(s["is_mp4"] for s in sources):
+                break
 
     # Fallback direct MP4 from high-speed video cache if embed was blocked
     if not sources:
