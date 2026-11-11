@@ -365,18 +365,28 @@ def scrape_movie(url: str, log=sys.stderr.write):
     if splash:
         img = splash.find(tag="img")
         if img:
-            banner["backdrop"] = (img.attrs.get("src") or "").strip()
+            b_src = (img.attrs.get("data-src") or img.attrs.get("src") or "").strip()
+            if b_src and "zt_backdrop" not in b_src and "no/zt_" not in b_src:
+                banner["backdrop"] = b_src
+
     poster = root.find(cls="poster-img")
     if poster:
-        banner["poster"] = (poster.attrs.get("src") or "").strip()
+        banner["poster"] = (poster.attrs.get("data-src") or poster.attrs.get("src") or "").strip()
     if not banner.get("poster"):
         m = re.search(
             r'property=["\']og:image["\']\s+content=["\']([^"\']+)', html
         ) or re.search(r'content=["\']([^"\']+)["\']\s+property=["\']og:image', html)
         if m:
             banner["poster"] = m.group(1).strip()
-    if not banner.get("backdrop") and banner.get("poster"):
-        banner["backdrop"] = banner["poster"]
+
+    if not banner.get("backdrop") or "zt_backdrop" in banner.get("backdrop", ""):
+        m_og = re.search(
+            r'property=["\']og:image["\']\s+content=["\']([^"\']+)', html
+        ) or re.search(r'content=["\']([^"\']+)["\']\s+property=["\']og:image', html)
+        if m_og and "zt_backdrop" not in m_og.group(1):
+            banner["backdrop"] = m_og.group(1).strip()
+        elif banner.get("poster"):
+            banner["backdrop"] = banner["poster"]
 
     details = {}
     title_cand = ""

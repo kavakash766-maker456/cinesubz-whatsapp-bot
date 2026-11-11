@@ -128,7 +128,13 @@ def create_branded_poster(
         clean_requester = (requester_name or "VIP Member").replace("@s.whatsapp.net", "").replace("@lid", "").strip()
 
         # 1. Background: Blurred Backdrop
-        bg_source = backdrop_path if (backdrop_path and os.path.exists(backdrop_path) and backdrop_path != "NONE") else poster_path
+        valid_backdrop = (
+            backdrop_path
+            and os.path.exists(backdrop_path)
+            and backdrop_path != "NONE"
+            and "zt_backdrop" not in backdrop_path.lower()
+        )
+        bg_source = backdrop_path if valid_backdrop else poster_path
         with Image.open(bg_source) as bg_img:
             bg = bg_img.convert("RGBA")
             bg = ImageOps.fit(bg, (W, H), method=Image.Resampling.LANCZOS)

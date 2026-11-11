@@ -13,6 +13,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+import ssl
 from concurrent.futures import ThreadPoolExecutor
 
 # Force IPv4 socket resolution to prevent broken IPv6 timeouts on cloud runners
@@ -21,6 +22,19 @@ try:
     def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
         return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
     socket.getaddrinfo = _ipv4_getaddrinfo
+except Exception:
+    pass
+
+# Configure unverified SSL context with broad cipher support for AnimeGG / vidcache CDNs
+try:
+    _SSL_CTX = ssl._create_unverified_context()
+    try:
+        _SSL_CTX.set_ciphers("DEFAULT:@SECLEVEL=1")
+    except Exception:
+        pass
+    https_handler = urllib.request.HTTPSHandler(context=_SSL_CTX)
+    opener = urllib.request.build_opener(https_handler)
+    urllib.request.install_opener(opener)
 except Exception:
     pass
 

@@ -693,10 +693,18 @@ async function getPosterThumbnail(posterSource, thumbnailB64 = null) {
     if (typeof posterSource === "string" && posterSource.startsWith("http")) {
       const pRes = await axios.get(posterSource, {
         responseType: "arraybuffer",
-        timeout: 10000,
-        headers: { "User-Agent": "Mozilla/5.0" },
+        timeout: 12000,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          "Referer": "https://cinesubz.lk/",
+          "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        },
       });
-      fs.writeFileSync(tempInPath, Buffer.from(pRes.data));
+      if (pRes.data && pRes.data.length > 500) {
+        fs.writeFileSync(tempInPath, Buffer.from(pRes.data));
+      } else {
+        return null;
+      }
     } else if (Buffer.isBuffer(posterSource)) {
       fs.writeFileSync(tempInPath, posterSource);
     } else if (typeof posterSource === "string" && fs.existsSync(posterSource)) {
@@ -756,10 +764,18 @@ async function createPosterWithRequesterAvatar(
     if (typeof posterSource === "string" && posterSource.startsWith("http")) {
       const pRes = await axios.get(posterSource, {
         responseType: "arraybuffer",
-        timeout: 10000,
-        headers: { "User-Agent": "Mozilla/5.0" },
+        timeout: 12000,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          "Referer": "https://cinesubz.lk/",
+          "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        },
       });
-      fs.writeFileSync(tempPosterPath, Buffer.from(pRes.data));
+      if (pRes.data && pRes.data.length > 500) {
+        fs.writeFileSync(tempPosterPath, Buffer.from(pRes.data));
+      } else {
+        return posterSource;
+      }
     } else if (Buffer.isBuffer(posterSource)) {
       fs.writeFileSync(tempPosterPath, posterSource);
     } else if (typeof posterSource === "string" && fs.existsSync(posterSource)) {
@@ -768,19 +784,30 @@ async function createPosterWithRequesterAvatar(
       return posterSource;
     }
 
-    // Optional backdrop fetch
+    // Optional backdrop fetch (ignoring dummy placeholder zt_backdrop)
     let backdropArg = "NONE";
-    if (backdropSource && typeof backdropSource === "string" && backdropSource.startsWith("http")) {
+    const isCleanBackdrop = backdropSource &&
+      typeof backdropSource === "string" &&
+      !backdropSource.includes("zt_backdrop") &&
+      !backdropSource.includes("no/zt_");
+
+    if (isCleanBackdrop && backdropSource.startsWith("http")) {
       try {
         const bRes = await axios.get(backdropSource, {
           responseType: "arraybuffer",
-          timeout: 8000,
-          headers: { "User-Agent": "Mozilla/5.0" },
+          timeout: 10000,
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Referer": "https://cinesubz.lk/",
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+          },
         });
-        fs.writeFileSync(tempBackdropPath, Buffer.from(bRes.data));
-        backdropArg = tempBackdropPath;
+        if (bRes.data && bRes.data.length > 1000) {
+          fs.writeFileSync(tempBackdropPath, Buffer.from(bRes.data));
+          backdropArg = tempBackdropPath;
+        }
       } catch (_) {}
-    } else if (backdropSource && typeof backdropSource === "string" && fs.existsSync(backdropSource)) {
+    } else if (isCleanBackdrop && fs.existsSync(backdropSource)) {
       backdropArg = backdropSource;
     }
 
@@ -1044,20 +1071,33 @@ async function processQueue() {
     // MODE A.5: ANIME SEASON BATCH (Sequential Direct MP4 Delivery)
     // ----------------------------------------------------------------------
     if (isAnimeSeason) {
-      let animeStatusMsg = null;
-      try {
-        animeStatusMsg = await waSocket.sendMessage(replyTarget, {
+      let animeStatusKey = currentTask.statusMsgKey || null;
+      if (animeStatusKey) {
+        await waSocket.sendMessage(replyTarget, {
           text: 
 `🚀 *[FilmFeed Anime Engine]*
 ━━━━━━━━━━━━━━━━━━━━
 *${pushName}*, ඔබ ඉල්ලූ Anime Season Batch පැක් එක සැකසීම ආරම්භ විය!
 ⏳ *Status:* Resolving episodes & direct links...
 ━━━━━━━━━━━━━━━━━━━━`,
-          mentions: mentionsList,
+          edit: animeStatusKey,
           contextInfo: getMetaAiContext(mentionsList),
-        });
-      } catch (_) {}
-      const animeStatusKey = animeStatusMsg?.key;
+        }).catch(() => {});
+      } else {
+        try {
+          const animeStatusMsg = await waSocket.sendMessage(replyTarget, {
+            text: 
+`🚀 *[FilmFeed Anime Engine]*
+━━━━━━━━━━━━━━━━━━━━
+*${pushName}*, ඔබ ඉල්ලූ Anime Season Batch පැක් එක සැකසීම ආරම්භ විය!
+⏳ *Status:* Resolving episodes & direct links...
+━━━━━━━━━━━━━━━━━━━━`,
+            mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
+          });
+          animeStatusKey = animeStatusMsg?.key;
+        } catch (_) {}
+      }
 
       let animeSlug = movieUrl
         .replace(/https?:\/\/[^/]+\/(?:series\/)?/, "")
@@ -1128,7 +1168,11 @@ async function processQueue() {
       const tmdb = await getTmdbMediaDetails(animeData.title || animeSlug, true);
       const showTitle = tmdb?.title || animeData.title || animeSlug.replace(/-/g, " ").toUpperCase();
       const posterUrl = animeData.poster || tmdb?.poster || "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=800";
-      const backdropUrl = tmdb?.backdrop || animeData.backdrop || posterUrl;
+      const backdropUrl = (tmdb?.backdrop && !tmdb.backdrop.includes("zt_backdrop"))
+        ? tmdb.backdrop
+        : (animeData.backdrop && !animeData.backdrop.includes("zt_backdrop")
+          ? animeData.backdrop
+          : posterUrl);
       const overview = tmdb?.overview || "FilmFeed Cinema Official Anime Batch Release";
       const totalEpisodes = episodes.length;
 
@@ -1308,20 +1352,33 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
     // MODE A: TV SERIES SEASON BATCH (Sequential Episode Delivery)
     // ----------------------------------------------------------------------
     if (isSeriesSeason) {
-      let seriesStatusMsg = null;
-      try {
-        seriesStatusMsg = await waSocket.sendMessage(replyTarget, {
+      let seriesStatusKey = currentTask.statusMsgKey || null;
+      if (seriesStatusKey) {
+        await waSocket.sendMessage(replyTarget, {
           text: 
 `🚀 *[FilmFeed TV Series Engine]*
 ━━━━━━━━━━━━━━━━━━━━
 *${pushName}*, ඔබ ඉල්ලූ Season ${seasonNumber} පැක් එක සැකසීම ආරම්භ විය!
 ⏳ *Status:* Resolving series episodes...
 ━━━━━━━━━━━━━━━━━━━━`,
-          mentions: mentionsList,
+          edit: seriesStatusKey,
           contextInfo: getMetaAiContext(mentionsList),
-        });
-      } catch (_) {}
-      const seriesStatusKey = seriesStatusMsg?.key;
+        }).catch(() => {});
+      } else {
+        try {
+          const seriesStatusMsg = await waSocket.sendMessage(replyTarget, {
+            text: 
+`🚀 *[FilmFeed TV Series Engine]*
+━━━━━━━━━━━━━━━━━━━━
+*${pushName}*, ඔබ ඉල්ලූ Season ${seasonNumber} පැක් එක සැකසීම ආරම්භ විය!
+⏳ *Status:* Resolving series episodes...
+━━━━━━━━━━━━━━━━━━━━`,
+            mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
+          });
+          seriesStatusKey = seriesStatusMsg?.key;
+        } catch (_) {}
+      }
 
       const seriesData = await resolveSeriesEpisodes(movieUrl);
       let episodes = seriesData.episodes || [];
@@ -1354,7 +1411,11 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
       const tmdb = await getTmdbMediaDetails(seriesData.title || "TV Series", true);
       const showTitle = tmdb?.title || seriesData.title || "TV Series";
       const posterUrl = seriesData.poster || tmdb?.poster || seriesData.backdrop;
-      const backdropUrl = tmdb?.backdrop || seriesData.backdrop || posterUrl;
+      const backdropUrl = (tmdb?.backdrop && !tmdb.backdrop.includes("zt_backdrop"))
+        ? tmdb.backdrop
+        : (seriesData.backdrop && !seriesData.backdrop.includes("zt_backdrop")
+          ? seriesData.backdrop
+          : posterUrl);
       const overview = tmdb?.overview || seriesData.description || "FilmFeed Cinema Series Release";
       const totalEpisodes = episodes.length;
 
@@ -1588,10 +1649,10 @@ ${getPromoFooter()}`,
       // ----------------------------------------------------------------------
       // MODE B: SINGLE MOVIE PROCESSING (Single Progressive Editable DM Message)
       // ----------------------------------------------------------------------
-      const statusTrackerKeys = [];
-
-      let liveStatusMsg = await waSocket.sendMessage(replyTarget, {
-        text: 
+      let liveStatusMsg = currentTask.statusMsgKey ? { key: currentTask.statusMsgKey } : null;
+      if (liveStatusMsg?.key) {
+        await waSocket.sendMessage(replyTarget, {
+          text: 
 `🎬 *[FilmFeed Cinema Engine]*
 ━━━━━━━━━━━━━━━━━━━━
 👋 Hello *${pushName}*, your request is being processed!
@@ -1600,10 +1661,24 @@ ${getPromoFooter()}`,
 📺 *Quality:* ${quality}
 🔑 *Token:* #${token || "DIRECT"}
 ━━━━━━━━━━━━━━━━━━━━`,
-        mentions: mentionsList,
-        contextInfo: getMetaAiContext(mentionsList),
-      }).catch(() => null);
-      if (liveStatusMsg?.key) statusTrackerKeys.push(liveStatusMsg.key);
+          edit: liveStatusMsg.key,
+          contextInfo: getMetaAiContext(mentionsList),
+        }).catch(() => {});
+      } else {
+        liveStatusMsg = await waSocket.sendMessage(replyTarget, {
+          text: 
+`🎬 *[FilmFeed Cinema Engine]*
+━━━━━━━━━━━━━━━━━━━━
+👋 Hello *${pushName}*, your request is being processed!
+⏳ *Status:* Initializing download stream...
+
+📺 *Quality:* ${quality}
+🔑 *Token:* #${token || "DIRECT"}
+━━━━━━━━━━━━━━━━━━━━`,
+          mentions: mentionsList,
+          contextInfo: getMetaAiContext(mentionsList),
+        }).catch(() => null);
+      }
 
       const movieData = await resolveMovie(movieUrl, quality);
 
@@ -1622,7 +1697,11 @@ ${getPromoFooter()}`,
       const tmdb = await getTmdbMediaDetails(rawTitle, false);
       const title = tmdb?.title || rawTitle;
       const posterUrl = movieData.poster || tmdb?.poster || movieData.backdrop;
-      const backdropUrl = tmdb?.backdrop || movieData.backdrop || posterUrl;
+      const backdropUrl = (tmdb?.backdrop && !tmdb.backdrop.includes("zt_backdrop"))
+        ? tmdb.backdrop
+        : (movieData.backdrop && !movieData.backdrop.includes("zt_backdrop")
+          ? movieData.backdrop
+          : posterUrl);
       const overview = tmdb?.overview || movieData.description || "FilmFeed Cinema Direct Release";
       const directUrl = movieData.direct_url;
       const resolvedQuality = movieData.quality || quality;
@@ -2424,7 +2503,6 @@ ${linksText || "Admin අමතන්න: +94 76 037 2547"}
         }
 
         // Add to queue
-        requestQueue.push(taskItem);
         const queuePosition = requestQueue.length + (isProcessingQueue ? 1 : 0);
 
         if (isProcessingQueue) {
@@ -2443,11 +2521,14 @@ ${linksText || "Admin අමතන්න: +94 76 037 2547"}
 ━━━━━━━━━━━━━━━━━━━━
 _කලින් ඉල්ලීම අවසන් වූ සැණින් ඔබගේ ඉල්ලීම බාගත කර Group එකට Upload වනු ඇත!_`;
 
-          await waSocket.sendMessage(replyTarget, {
+          const qSent = await waSocket.sendMessage(replyTarget, {
             text: queueMessage,
             mentions: mentionsList,
             contextInfo: getMetaAiContext(mentionsList),
-          });
+          }).catch(() => null);
+          if (qSent?.key) {
+            taskItem.statusMsgKey = qSent.key;
+          }
         } else {
           const startMessage =
 `🚀 *[FilmFeed Auto-Bot] සකසමින් පවතී (Processing)*
@@ -2461,13 +2542,17 @@ ${isSeriesSeason ? `📺 *TV Series (Season ${seasonNumber}) Pack* සකස් 
 ━━━━━━━━━━━━━━━━━━━━
 🍿 FilmFeed 4K Cinema Engine`;
 
-          await waSocket.sendMessage(replyTarget, {
+          const sSent = await waSocket.sendMessage(replyTarget, {
             text: startMessage,
             mentions: mentionsList,
             contextInfo: getMetaAiContext(mentionsList),
-          });
+          }).catch(() => null);
+          if (sSent?.key) {
+            taskItem.statusMsgKey = sSent.key;
+          }
         }
 
+        requestQueue.push(taskItem);
         triggerQueue();
       } catch (msgErr) {
         logger.error({ msgErr }, "Error handling incoming WhatsApp message item");
