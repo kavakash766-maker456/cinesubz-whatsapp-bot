@@ -365,28 +365,18 @@ def scrape_movie(url: str, log=sys.stderr.write):
     if splash:
         img = splash.find(tag="img")
         if img:
-            b_src = (img.attrs.get("data-src") or img.attrs.get("src") or "").strip()
-            if b_src and "zt_backdrop" not in b_src and "no/zt_" not in b_src:
-                banner["backdrop"] = b_src
-
+            banner["backdrop"] = (img.attrs.get("src") or "").strip()
     poster = root.find(cls="poster-img")
     if poster:
-        banner["poster"] = (poster.attrs.get("data-src") or poster.attrs.get("src") or "").strip()
+        banner["poster"] = (poster.attrs.get("src") or "").strip()
     if not banner.get("poster"):
         m = re.search(
             r'property=["\']og:image["\']\s+content=["\']([^"\']+)', html
         ) or re.search(r'content=["\']([^"\']+)["\']\s+property=["\']og:image', html)
         if m:
             banner["poster"] = m.group(1).strip()
-
-    if not banner.get("backdrop") or "zt_backdrop" in banner.get("backdrop", ""):
-        m_og = re.search(
-            r'property=["\']og:image["\']\s+content=["\']([^"\']+)', html
-        ) or re.search(r'content=["\']([^"\']+)["\']\s+property=["\']og:image', html)
-        if m_og and "zt_backdrop" not in m_og.group(1):
-            banner["backdrop"] = m_og.group(1).strip()
-        elif banner.get("poster"):
-            banner["backdrop"] = banner["poster"]
+    if not banner.get("backdrop") and banner.get("poster"):
+        banner["backdrop"] = banner["poster"]
 
     details = {}
     title_cand = ""
@@ -983,57 +973,6 @@ def resolve_cinesubz_with_scraper(movie_url: str, requested_quality: str = None)
     return {"error": "CineSubz වෙත සම්බන්ධ වීමට නොහැකි විය.", "success": False}
 
 
-def search_baiscopes(query: str):
-    """Search baiscopes.lk for movies."""
-    try:
-        url = f"https://baiscopes.lk/?s={urllib.parse.quote(query)}"
-        body, _, _ = http_get(url)
-        root = parse_html(body.decode("utf-8", "replace"))
-        seen = set()
-        cands = []
-        for a in root.find_all(tag="a"):
-            href = a.attrs.get("href", "")
-            if ("/movies/" in href or "/subtitles/" in href) and href not in seen:
-                seen.add(href)
-                cands.append({"title": a.text().strip(), "url": href})
-        return cands
-    except Exception:
-        return []
-
-
-def fallback_search_movie(movie_query: str, requested_quality: str = None):
-    """Search SinhalaSub and Baiscopes when CineSubz has no downloads or returns 404."""
-    if not movie_query:
-        return None
-    clean_q = re.sub(r"\s*\(\d{4}\).*$", "", movie_query).strip()
-    clean_q = re.sub(r"-(sinhala-subtitles|sinhala-sub|sinhala|sub).*$", "", clean_q, flags=re.I).strip()
-    queries = [movie_query]
-    if clean_q and clean_q != movie_query:
-        queries.append(clean_q)
-
-    for q in queries:
-        try:
-            from sinhalasub_resolver import search_sinhalasub, resolve_sinhalasub_movie
-            sh_cands = search_sinhalasub(q)
-            for cand in (sh_cands or [])[:3]:
-                sh_res = resolve_sinhalasub_movie(cand["url"], requested_quality)
-                if sh_res.get("success") and sh_res.get("direct_url"):
-                    sh_res["fallback_from"] = "CineSubz"
-                    return sh_res
-        except Exception:
-            pass
-
-        try:
-            bs_cands = search_baiscopes(q)
-            for cand in (bs_cands or [])[:3]:
-                bs_res = resolve_baiscopes_movie(cand["url"], requested_quality)
-                if bs_res.get("success") and bs_res.get("direct_url"):
-                    bs_res["fallback_from"] = "CineSubz"
-                    return bs_res
-        except Exception:
-            pass
-    return None
-
 def resolve_direct_link(
     movie_url: str, requested_quality: str = None, _depth: int = 0
 ):
@@ -1087,6 +1026,14 @@ def resolve_direct_link(
         except Exception as e:
             pass
 
+    # Primary: Resolve via the new high-speed CineSubzScraper engine
+    if "cinesubz" in movie_url or any(k in movie_url for k in ("/zt-links/", "/api-", "/zt-")):
+        c_res = resolve_cinesubz_with_scraper(movie_url, requested_quality)
+        if c_res and c_res.get("success") and c_res.get("direct_url"):
+            return c_res
+        if c_res and c_res.get("error") and not is_zt:
+            return c_res
+
     # Direct zt-links or intermediate redirect link support (/zt-links/, /api-, /zt-, ?r=)
     is_zt = (
         "/zt-links/" in movie_url
@@ -1096,14 +1043,6 @@ def resolve_direct_link(
         or "/api-" in movie_url
         or ("cinesubz" in movie_url and "/api" in movie_url)
     ) and not any(k in movie_url for k in ("/movies/", "/tvshows/", "/series/", "/episodes/"))
-
-    # Primary: Resolve via the new high-speed CineSubzScraper engine
-    if "cinesubz" in movie_url or any(k in movie_url for k in ("/zt-links/", "/api-", "/zt-")):
-        c_res = resolve_cinesubz_with_scraper(movie_url, requested_quality)
-        if c_res and c_res.get("success") and c_res.get("direct_url"):
-            return c_res
-        if is_zt and c_res and c_res.get("error"):
-            return c_res
     if is_zt:
         found_link = None
         try:
@@ -1243,15 +1182,6 @@ def resolve_direct_link(
             result["episode_count"] = len(episodes)
             return result
     if not downloads:
-        fallback_title = clean_page_title(movie.get("details", {}).get("title") or "")
-        if not fallback_title:
-            slug = movie_url.rstrip("/").split("/")[-1]
-            slug = re.sub(r"-(sinhala-subtitles|sinhala-sub|sinhala|sub).*$", "", slug, flags=re.I)
-            fallback_title = slug.replace("-", " ").strip()
-        if fallback_title and _depth == 0:
-            fb = fallback_search_movie(fallback_title, requested_quality)
-            if fb:
-                return fb
         return {"error": "No download links found on CineSubz movie page", "movie": movie}
     ordered_entries = []
     if requested_quality:
@@ -1349,32 +1279,7 @@ def resolve_direct_link(
             last_error = str(e)
             continue
 
-    # High-Reliability Fallback: Search SinhalaSub & Baiscopes if CineSubz failed to resolve a direct file URL
-    movie_name = clean_page_title(movie.get("details", {}).get("title") or title or "")
-    if not movie_name:
-        slug = movie_url.rstrip("/").split("/")[-1]
-        slug = re.sub(r"-(sinhala-subtitles|sinhala-sub|sinhala|sub).*$", "", slug, flags=re.I)
-        movie_name = slug.replace("-", " ").strip()
-
-    if movie_name and _depth == 0:
-        try:
-            from sinhalasub_resolver import search_sinhalasub, resolve_sinhalasub_movie
-            sh_cands = search_sinhalasub(movie_name)
-            for cand in (sh_cands or [])[:3]:
-                sh_res = resolve_sinhalasub_movie(cand["url"], requested_quality)
-                if sh_res.get("success") and sh_res.get("direct_url"):
-                    sh_res["fallback_from"] = "CineSubz"
-                    return sh_res
-        except Exception:
-            pass
-
-        try:
-            bs_res = resolve_baiscopes_movie(movie_name, requested_quality)
-            if bs_res.get("success") and bs_res.get("direct_url"):
-                bs_res["fallback_from"] = "CineSubz"
-                return bs_res
-        except Exception:
-            pass
+    # Note: Multi-source fallback disabled per user instruction (CineSubz only)
 
     return {"error": last_error, "movie": movie}
 
@@ -1382,17 +1287,12 @@ def resolve_direct_link(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("url", help="CineSubz movie / episode / TV series URL, query, or Google Drive URL")
+    ap.add_argument("url", help="CineSubz movie / episode / TV series URL or Google Drive URL")
     ap.add_argument("--quality", default=None, help="Target quality (e.g. 1080p, 720p)")
     ap.add_argument(
         "--episodes",
         action="store_true",
         help="List all episodes of a TV series page instead of resolving a download",
-    )
-    ap.add_argument(
-        "--search",
-        action="store_true",
-        help="Search CineSubz for title or query",
     )
     ap.add_argument(
         "--download-gdrive",
@@ -1401,17 +1301,6 @@ def main():
         help="Download Google Drive cartoon/movie directly to specified output file path",
     )
     args = ap.parse_args()
-
-    if args.search or (args.url and not args.url.startswith("http")):
-        try:
-            from cinesubz_scraper import CineSubzScraper
-            s = CineSubzScraper()
-            results = s.search(args.url)
-            print(json.dumps(results or []))
-            return
-        except Exception as e:
-            print(json.dumps([]))
-            return
 
     # Direct Google Drive downloader using gdown
     if args.download_output:
@@ -1644,15 +1533,8 @@ def main():
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
 
-    try:
-        result = resolve_direct_link(args.url, args.quality)
-        if not result:
-            result = {"error": "චිත්‍රපට සබැඳිය Extract කරගත නොහැකි විය.", "success": False}
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    except Exception as e:
-        import traceback
-        traceback.print_exc(file=sys.stderr)
-        print(json.dumps({"error": f"Resolver internal error: {e}", "success": False}, ensure_ascii=False))
+    result = resolve_direct_link(args.url, args.quality)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
