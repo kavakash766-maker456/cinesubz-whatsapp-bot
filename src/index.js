@@ -2064,21 +2064,39 @@ ${getPromoFooter()}`;
         if (posterBroadcasted) return;
         posterBroadcasted = true;
         try {
+          let posterImagePayload = null;
           if (effectivePoster) {
-            const pipPoster = await createPosterWithRequesterAvatar(
-              effectivePoster,
-              requesterIdentifier,
-              fallbackIdentifier,
-              pushName,
-              overview,
-              backdropUrl,
-              title,
-              releaseYear,
-              ratingVal,
-              resolvedQuality
-            );
+            try {
+              const pipPoster = await createPosterWithRequesterAvatar(
+                effectivePoster,
+                requesterIdentifier,
+                fallbackIdentifier,
+                pushName,
+                overview,
+                backdropUrl,
+                title,
+                releaseYear,
+                ratingVal,
+                resolvedQuality
+              );
+              if (Buffer.isBuffer(pipPoster)) {
+                posterImagePayload = pipPoster;
+              }
+            } catch (pipErr) {
+              logger.warn(`createPosterWithRequesterAvatar failed (${pipErr.message}), falling back to direct poster URL`);
+            }
+          }
+
+          if (posterImagePayload) {
             await broadcastToGroups({
-              image: Buffer.isBuffer(pipPoster) ? pipPoster : { url: effectivePoster },
+              image: posterImagePayload,
+              caption: groupPosterCaption,
+              mentions: mentionsList,
+              contextInfo: getMetaAiContext(mentionsList),
+            });
+          } else if (effectivePoster) {
+            await broadcastToGroups({
+              image: { url: effectivePoster },
               caption: groupPosterCaption,
               mentions: mentionsList,
               contextInfo: getMetaAiContext(mentionsList),
@@ -2093,8 +2111,18 @@ ${getPromoFooter()}`;
           logger.info(`✅ Movie poster card broadcasted to WhatsApp group for ${title}!`);
         } catch (posterErr) {
           logger.error({ posterErr }, `Failed to broadcast poster card: ${posterErr.message}`);
+          try {
+            await broadcastToGroups({
+              text: groupPosterCaption,
+              mentions: mentionsList,
+              contextInfo: getMetaAiContext(mentionsList),
+            });
+          } catch (_) {}
         }
       };
+
+      // Broadcast poster card immediately so group gets visual notification
+      await broadcastPosterCard();
 
       // Single Initial Acknowledgment Message (No spam editing)
       if (replyTarget && !replyTarget.endsWith("@g.us")) {
@@ -2828,15 +2856,15 @@ function attachMessageEvents(sock) {
           }
         }
 
-        // Fallback: Search anywhere for CineSubz, SinhalaSub, Baiscopes, Anime, Cartoons, or xHamster URL
+        // Fallback: Search anywhere for CineSubz, SinhalaSub, Baiscopes, Anime, Cartoons, xHamster, or Eporner URL
         if (!commandFound) {
-          const urlMatch = text.match(/(https?:\/\/[^\s|]*(?:cinesubz|sinhalasub|baiscopes|animegg|anime|cartoons|xhamster)[^\s|\n]*)/i);
+          const urlMatch = text.match(/(https?:\/\/[^\s|]*(?:cinesubz|sinhalasub|baiscopes|animegg|anime|cartoons|xhamster|eporner)[^\s|\n]*)/i);
           if (urlMatch) {
             commandFound = true;
             movieUrl = urlMatch[1].trim();
             quality = "720p";
             token = "DIRECT";
-            if (movieUrl.includes("xhamster")) {
+            if (movieUrl.includes("xhamster") || movieUrl.includes("eporner")) {
               isAdultVideo = true;
             } else if (movieUrl.includes("animegg") || movieUrl.includes("anime") || movieUrl.includes("cartoons")) {
               isAnimeSeason = true;
