@@ -651,6 +651,32 @@ async function searchAnimeDirect(query) {
 }
 
 
+async function resolveAdultVideo(url, quality = "720p", downloadPath = null) {
+  return new Promise((resolve) => {
+    const resolverScript = path.join(__dirname, "../adult_resolver.py");
+    const args = [url, "--quality", quality];
+    if (downloadPath) {
+      args.push("--download", downloadPath);
+    }
+    const pythonCmd = process.platform === "win32" ? "python" : "python3";
+    execFile(pythonCmd, [resolverScript, ...args], { maxBuffer: 15 * 1024 * 1024, timeout: 180000 }, (err, stdout, stderr) => {
+      if (err) {
+        logger.error({ err, stderr }, "Adult resolver script error");
+      }
+      try {
+        const jsonMatch = (stdout || "").match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          const parsed = JSON.parse(jsonMatch[0]);
+          return resolve(parsed);
+        }
+      } catch (e) {
+        logger.error({ e, stdout }, "Failed to parse adult resolver JSON");
+      }
+      return resolve({ success: false, error: "Adult extraction failed or timed out" });
+    });
+  });
+}
+
 const TMDB_API_KEY = process.env.TMDB_API_KEY || "b6524bb48fb309af7e940a074a363851";
 
 async function getTmdbMediaDetails(title, isTv = false, year = null) {
@@ -1133,7 +1159,7 @@ async function processQueue() {
   const currentTask = requestQueue.shift();
   currentProcessingItem = currentTask;
 
-  const watchdogDuration = (currentTask?.isSeriesSeason || currentTask?.isAnimeSeason) ? 60 * 60 * 1000 : 20 * 60 * 1000;
+  const watchdogDuration = (currentTask?.isSeriesSeason || currentTask?.isAnimeSeason || currentTask?.isAdultVideo) ? 60 * 60 * 1000 : 20 * 60 * 1000;
   const queueWatchdog = setTimeout(() => {
     logger.warn(`[Queue Watchdog] Task ${currentTask?.movieUrl} exceeded timeout (${Math.round(watchdogDuration / 60000)}m)! Force releasing queue lock.`);
     isProcessingQueue = false;
@@ -1144,6 +1170,7 @@ async function processQueue() {
   const {
     isSeriesSeason,
     isAnimeSeason,
+    isAdultVideo,
     seasonNumber,
     movieUrl,
     quality,
@@ -1224,6 +1251,65 @@ async function processQueue() {
 
   try {
     // ----------------------------------------------------------------------
+    // MODE A.4: ADULT VIP VIDEO (18+ Direct MP4 Extraction & Delivery)
+    // ----------------------------------------------------------------------
+    if (isAdultVideo) {
+      let adultStatusKey = currentTask.statusMsgKey || null;
+      const deliveryTarget = currentTask.deliveryTarget || "inbox";
+      const badge = isVipUser ? "👑 VIP Premiere" : "VIP Member";
+
+      if (adultStatusKey) {
+        await waSocket.sendMessage(replyTarget, {
+          text: `🔥 *[FilmFeed VIP 18+ Vault]*\n━━━━━━━━━━━━━━━━━━━━\n*${pushName}*, ඔබ ඉල්ලූ 18+ වීඩියෝව සකස් කිරීම ආරම්භ විය!\n⏳ *Status:* Resolving direct high-speed 1080p/720p stream...\n📬 *Delivery:* ${deliveryTarget === "inbox" ? `Personal Inbox (+${cleanPhone}) 📥` : "VIP Group 👥"}\n━━━━━━━━━━━━━━━━━━━━`,
+          edit: adultStatusKey,
+          contextInfo: getMetaAiContext(mentionsList),
+        }).catch(() => {});
+      }
+
+      const tempDir = os.tmpdir();
+      const tempAdultFile = path.join(tempDir, `filmfeed_vault18_${Date.now()}.mp4`);
+
+      logger.info(`🔞 Resolving and downloading adult video: ${movieUrl} (Quality: ${quality})`);
+      const adultRes = await resolveAdultVideo(movieUrl, quality, tempAdultFile);
+
+      if (!adultRes.success || (!adultRes.downloaded_file && !fs.existsSync(tempAdultFile))) {
+        throw new Error(adultRes.error || "Failed to download adult video from source");
+      }
+
+      const vidTitle = adultRes.title || "VIP 18+ Exclusive Video";
+      const vidDur = adultRes.duration_formatted || "Full Length";
+      const vidViews = Number(adultRes.views || 0).toLocaleString();
+      const vidQ = adultRes.quality || quality;
+
+      // Upload Document/Video to Destination (Inbox or Group)
+      await broadcastToGroups({
+        document: { url: tempAdultFile },
+        mimetype: "video/mp4",
+        fileName: `${vidTitle.replace(/[\\/:*?"<>|]/g, "_").slice(0, 80)} [${vidQ}].mp4`,
+        caption: `🔞 *[FilmFeed VIP 18+ Vault]*\n━━━━━━━━━━━━━━━━━━━━\n🎬 *Title:* *${vidTitle}*\n⏱️ *Duration:* ${vidDur}\n👁️ *Views:* ${vidViews}\n💎 *Quality:* ${vidQ}\n👤 *Requested By:* ${pushName} [${badge}]\n━━━━━━━━━━━━━━━━━━━━\n✨ *Discreet & Private VIP Delivery*\n${getPromoFooter()}`,
+      });
+
+      logger.info(`✅ Adult video delivered successfully (${deliveryTarget})!`);
+
+      try {
+        if (fs.existsSync(tempAdultFile)) fs.unlinkSync(tempAdultFile);
+      } catch (_) {}
+
+      // Completion confirmation
+      const adultFinishText = deliveryTarget === "inbox"
+        ? `🔞 *FilmFeed VIP 18+ Vault*\n━━━━━━━━━━━━━━━━━━━━\n✨ *Video Successfully Delivered to Inbox!*\n\n🎬 *Title:* *${vidTitle}*\n⏱️ *Duration:* ${vidDur}\n👤 *Requested By:* ${pushName} [${badge}]\n\n📥 The full video file has been sent directly to your private chat!\n━━━━━━━━━━━━━━━━━━━━\n🔥 Thank you for choosing FilmFeed VIP!`
+        : `🔞 *FilmFeed VIP 18+ Vault*\n━━━━━━━━━━━━━━━━━━━━\n✨ *Video Successfully Uploaded!*\n\n🎬 *Title:* *${vidTitle}*\n⏱️ *Duration:* ${vidDur}\n👤 *Requested By:* ${pushName} [${badge}]\n\n📥 Uploaded to WhatsApp Group!\n━━━━━━━━━━━━━━━━━━━━\n🔥 Thank you for choosing FilmFeed VIP!`;
+
+      if (replyTarget && !replyTarget.endsWith("@g.us")) {
+        await waSocket.sendMessage(replyTarget, {
+          text: adultFinishText,
+          contextInfo: getMetaAiContext(mentionsList),
+        });
+      }
+
+      return;
+    }
+
     // ----------------------------------------------------------------------
     // MODE A.5: ANIME SEASON BATCH (Sequential Direct MP4 Delivery - Clean RAW)
     // ----------------------------------------------------------------------
@@ -1232,13 +1318,20 @@ async function processQueue() {
       const deliveryTarget = currentTask.deliveryTarget || "group";
       const reqStart = currentTask.startEpisode || 1;
       const reqEnd = Math.min(currentTask.endEpisode || (reqStart + 19), reqStart + 19);
+      const customEpisodes = Array.isArray(currentTask.customEpisodes) && currentTask.customEpisodes.length > 0
+        ? currentTask.customEpisodes
+        : null;
+      const epDisplayStr = customEpisodes ? `Episodes ${customEpisodes.join(", ")}` : `Episodes ${reqStart}-${reqEnd}`;
+      const epPackType = customEpisodes
+        ? `Anime Pack (${epDisplayStr})`
+        : `Anime Batch (Episodes ${reqStart} - ${reqEnd})`;
 
       if (animeStatusKey) {
         await waSocket.sendMessage(replyTarget, {
           text: 
 `🚀 *[FilmFeed Anime Engine - Clean RAW]*
 ━━━━━━━━━━━━━━━━━━━━
-*${pushName}*, ඔබ ඉල්ලූ Anime Batch (Episodes ${reqStart}-${reqEnd}) සැකසීම ආරම්භ විය!
+*${pushName}*, ඔබ ඉල්ලූ ${epPackType} සැකසීම ආරම්භ විය!
 ⏳ *Status:* Resolving clean RAW unburnt anime streams...
 📬 *Delivery:* ${deliveryTarget === "inbox" ? `Inbox (+${cleanPhone}) 📥` : "Cinema Group 👥"}
 ━━━━━━━━━━━━━━━━━━━━`,
@@ -1251,7 +1344,7 @@ async function processQueue() {
             text: 
 `🚀 *[FilmFeed Anime Engine - Clean RAW]*
 ━━━━━━━━━━━━━━━━━━━━
-*${pushName}*, ඔබ ඉල්ලූ Anime Batch (Episodes ${reqStart}-${reqEnd}) සැකසීම ආරම්භ විය!
+*${pushName}*, ඔබ ඉල්ලූ ${epPackType} සැකසීම ආරම්භ විය!
 ⏳ *Status:* Resolving clean RAW unburnt anime streams...
 📬 *Delivery:* ${deliveryTarget === "inbox" ? `Inbox (+${cleanPhone}) 📥` : "Cinema Group 👥"}
 ━━━━━━━━━━━━━━━━━━━━`,
@@ -1302,11 +1395,20 @@ async function processQueue() {
         return;
       }
 
-      // Filter episodes to requested bundle / range (Max 20 episodes per batch)
-      let episodesToProcess = episodes.filter((ep, idx) => {
-        const epNum = ep.episode || (idx + 1);
-        return epNum >= reqStart && epNum <= reqEnd;
-      });
+      // Filter episodes to requested discrete list or range (Max 20 episodes per batch)
+      let episodesToProcess = [];
+      if (customEpisodes) {
+        const targetSet = new Set(customEpisodes);
+        episodesToProcess = episodes.filter((ep, idx) => {
+          const epNum = ep.episode || (idx + 1);
+          return targetSet.has(epNum);
+        });
+      } else {
+        episodesToProcess = episodes.filter((ep, idx) => {
+          const epNum = ep.episode || (idx + 1);
+          return epNum >= reqStart && epNum <= reqEnd;
+        });
+      }
       if (episodesToProcess.length === 0) {
         const sIdx = Math.max(0, reqStart - 1);
         const eIdx = Math.min(episodes.length, reqEnd);
@@ -1333,7 +1435,7 @@ async function processQueue() {
       const batchCaption = 
 `🎬 *${showTitle}*
 ━━━━━━━━━━━━━━━━━━━━
-📦 *Pack Type:* Anime Batch (Episodes ${reqStart} - ${reqEnd})
+📦 *Pack Type:* ${epPackType}
 🔢 *Batch Episodes:* ${totalBatchEpisodes} Episodes
 👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
 🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
@@ -1345,7 +1447,7 @@ ${tmdb?.voteAverage ? `⭐ *TMDb Rating:* ${tmdb.voteAverage.toFixed(1)}/10\n` :
 📝 *Storyline / සාරාංශය:*
 ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 
-📥 _Episode ${reqStart} සිට ${reqEnd} දක්වා පිළිවෙළින් ${deliveryTarget === "inbox" ? "ඔබගේ Inbox වෙත" : "Group එකට"} Upload වනු ඇත!_\n${getPromoFooter()}`;
+📥 _${epDisplayStr} පිළිවෙළින් ${deliveryTarget === "inbox" ? "ඔබගේ Inbox වෙත" : "Group එකට"} Upload වනු ඇත!_\n${getPromoFooter()}`;
 
       try {
         const effectivePoster = posterUrl || backdropUrl;
@@ -1515,13 +1617,20 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
       const deliveryTarget = currentTask.deliveryTarget || "group";
       const reqStart = currentTask.startEpisode || 1;
       const reqEnd = Math.min(currentTask.endEpisode || (reqStart + 19), reqStart + 19);
+      const customEpisodes = Array.isArray(currentTask.customEpisodes) && currentTask.customEpisodes.length > 0
+        ? currentTask.customEpisodes
+        : null;
+      const epDisplayStr = customEpisodes ? `Episodes ${customEpisodes.join(", ")}` : `Episodes ${reqStart}-${reqEnd}`;
+      const epPackType = customEpisodes
+        ? `Season ${seasonNumber} Pack (${epDisplayStr})`
+        : `Season ${seasonNumber} Batch (Episodes ${reqStart} - ${reqEnd})`;
 
       if (seriesStatusKey) {
         await waSocket.sendMessage(replyTarget, {
           text: 
 `🚀 *[FilmFeed TV Series Engine]*
 ━━━━━━━━━━━━━━━━━━━━
-*${pushName}*, ඔබ ඉල්ලූ Season ${seasonNumber} (Episodes ${reqStart}-${reqEnd}) පැක් එක සැකසීම ආරම්භ විය!
+*${pushName}*, ඔබ ඉල්ලූ ${epPackType} සැකසීම ආරම්භ විය!
 ⏳ *Status:* Resolving series episodes...
 📬 *Delivery:* ${deliveryTarget === "inbox" ? `Inbox (+${cleanPhone}) 📥` : "Cinema Group 👥"}
 ━━━━━━━━━━━━━━━━━━━━`,
@@ -1534,7 +1643,7 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
             text: 
 `🚀 *[FilmFeed TV Series Engine]*
 ━━━━━━━━━━━━━━━━━━━━
-*${pushName}*, ඔබ ඉල්ලූ Season ${seasonNumber} (Episodes ${reqStart}-${reqEnd}) පැක් එක සැකසීම ආරම්භ විය!
+*${pushName}*, ඔබ ඉල්ලූ ${epPackType} සැකසීම ආරම්භ විය!
 ⏳ *Status:* Resolving series episodes...
 📬 *Delivery:* ${deliveryTarget === "inbox" ? `Inbox (+${cleanPhone}) 📥` : "Cinema Group 👥"}
 ━━━━━━━━━━━━━━━━━━━━`,
@@ -1572,11 +1681,20 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
         return;
       }
 
-      // Filter episodes to requested bundle / range (Max 20 episodes per batch)
-      let episodesToProcess = episodes.filter((ep, idx) => {
-        const epNum = ep.episode || (idx + 1);
-        return epNum >= reqStart && epNum <= reqEnd;
-      });
+      // Filter episodes to requested discrete list or range (Max 20 episodes per batch)
+      let episodesToProcess = [];
+      if (customEpisodes) {
+        const targetSet = new Set(customEpisodes);
+        episodesToProcess = episodes.filter((ep, idx) => {
+          const epNum = ep.episode || (idx + 1);
+          return targetSet.has(epNum);
+        });
+      } else {
+        episodesToProcess = episodes.filter((ep, idx) => {
+          const epNum = ep.episode || (idx + 1);
+          return epNum >= reqStart && epNum <= reqEnd;
+        });
+      }
       if (episodesToProcess.length === 0) {
         const sIdx = Math.max(0, reqStart - 1);
         const eIdx = Math.min(episodes.length, reqEnd);
@@ -1603,19 +1721,18 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
       const seasonCaption = 
 `🎬 *${showTitle} (Season ${seasonNumber})*
 ━━━━━━━━━━━━━━━━━━━━
-📦 *Pack Type:* Season Batch (Episodes ${reqStart} - ${reqEnd})
+📦 *Pack Type:* ${epPackType}
 🔢 *Batch Episodes:* ${totalBatchEpisodes} Episodes
 👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
 🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
 🌟 *Quality:* ${quality}
 📬 *Delivery:* ${deliveryTarget === "inbox" ? `Inbox (+${cleanPhone}) 📥` : "Cinema Group 👥"}
-${tmdb?.voteAverage ? `⭐ *TMDb Rating:* ${tmdb.voteAverage.toFixed(1)}/10\n` : ""}${tmdb?.releaseDate ? `📅 *Air Date:* ${tmdb.releaseDate}\n` : ""}🔑 *Token:* ${token || "VIP_SEASON"}
-⚡ *Subtitle:* Sinhala Subtitles Included
+${tmdb?.voteAverage ? `⭐ *TMDb Rating:* ${tmdb.voteAverage.toFixed(1)}/10\n` : ""}${tmdb?.releaseDate ? `📅 *First Air:* ${tmdb.releaseDate}\n` : ""}🔑 *Token:* ${token || "VIP_SERIES"}
 ━━━━━━━━━━━━━━━━━━━━
 📝 *Storyline / සාරාංශය:*
 ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 
-📥 _Episode ${reqStart} සිට ${reqEnd} දක්වා පිළිවෙළින් ${deliveryTarget === "inbox" ? "ඔබගේ Inbox වෙත" : "Group එකට"} Upload වනු ඇත!_\n${getPromoFooter()}`;
+📥 _${epDisplayStr} පිළිවෙළින් ${deliveryTarget === "inbox" ? "ඔබගේ Inbox වෙත" : "Group එකට"} Upload වනු ඇත!_\n${getPromoFooter()}`;
 
       const effectivePoster = posterUrl || backdropUrl;
       try {
@@ -2513,9 +2630,11 @@ function attachMessageEvents(sock) {
         let commandFound = false;
         let isSeriesSeason = false;
         let isAnimeSeason = false;
+        let isAdultVideo = false;
         let seasonNumber = 1;
         let startEpisode = 1;
         let endEpisode = 20;
+        let customEpisodes = null;
         let deliveryTarget = "group";
         let movieUrl = "";
         let quality = "720p";
@@ -2528,11 +2647,21 @@ function attachMessageEvents(sock) {
           deliveryTarget = "group";
         }
 
-        // Check text for Episodes line
-        const epLineMatch = text.match(/episodes?[:*]?\s*(?:episodes?\s*)?(\d+)(?:\s*[-–—:]\s*(\d+))?/i);
-        if (epLineMatch) {
-          startEpisode = parseInt(epLineMatch[1], 10) || 1;
-          endEpisode = epLineMatch[2] ? parseInt(epLineMatch[2], 10) : startEpisode;
+        // Check text for Episodes line (supports discrete e.g. "1, 2, 5, 8" or range "1-20")
+        const discreteEpMatch = text.match(/episodes?[:*]?\s*(?:episodes?\s*)?(\d+(?:\s*,\s*\d+)+)/i);
+        if (discreteEpMatch) {
+          customEpisodes = discreteEpMatch[1].split(",").map((n) => parseInt(n.trim(), 10)).filter((n) => !isNaN(n) && n > 0);
+          customEpisodes = [...new Set(customEpisodes)].sort((a, b) => a - b).slice(0, 20);
+          if (customEpisodes.length > 0) {
+            startEpisode = customEpisodes[0];
+            endEpisode = customEpisodes[customEpisodes.length - 1];
+          }
+        } else {
+          const epLineMatch = text.match(/episodes?[:*]?\s*(?:episodes?\s*)?(\d+)(?:\s*[-–—:]\s*(\d+))?/i);
+          if (epLineMatch) {
+            startEpisode = parseInt(epLineMatch[1], 10) || 1;
+            endEpisode = epLineMatch[2] ? parseInt(epLineMatch[2], 10) : startEpisode;
+          }
         }
 
         const textLines = text.split("\n");
@@ -2541,7 +2670,29 @@ function attachMessageEvents(sock) {
           const line = rawLine.trim();
           if (!line) continue;
 
-          // Anime Command: !anime <query_or_slug> | <season_str> | <quality> | <token> | <epRange> | <deliveryTarget>
+          // Adult Command: !xh <url> | <quality> | <token> | <deliveryTarget>
+          const xhMatch = line.match(/^[!/.]?(?:xh|adult)\s+(.+)$/i);
+          if (xhMatch) {
+            commandFound = true;
+            isAdultVideo = true;
+            const parts = xhMatch[1].split("|").map((p) => p.trim()).filter(Boolean);
+            movieUrl = parts[0] || "";
+            for (let i = 1; i < parts.length; i++) {
+              const p = parts[i];
+              if (/^(?:inbox|dm|private)$/i.test(p)) {
+                deliveryTarget = "inbox";
+              } else if (/^(?:group)$/i.test(p)) {
+                deliveryTarget = "group";
+              } else if (/^(360p|480p|720p|1080p|2160p|4k|hd|fhd|sd)$/i.test(p)) {
+                quality = p;
+              } else if (!token && p.length >= 3) {
+                token = p;
+              }
+            }
+            break;
+          }
+
+          // Anime Command: !anime <query_or_slug> | <season_str> | <quality> | <token> | <episodes> | <deliveryTarget>
           const aMatch = line.match(/^[!/.]?anime\s+(.+)$/i);
           if (aMatch) {
             commandFound = true;
@@ -2550,18 +2701,28 @@ function attachMessageEvents(sock) {
             movieUrl = parts[0] || "";
             for (let i = 1; i < parts.length; i++) {
               const p = parts[i];
+              const cleanP = p.replace(/(?:ep(?:isode)?\s*|e)/gi, "").trim();
               if (/^(?:inbox|dm|private)$/i.test(p)) {
                 deliveryTarget = "inbox";
               } else if (/^(?:group)$/i.test(p)) {
                 deliveryTarget = "group";
+              } else if (/^\d+(?:\s*,\s*\d+)+$/.test(cleanP)) {
+                const list = cleanP.split(",").map((n) => parseInt(n.trim(), 10)).filter((n) => !isNaN(n) && n > 0);
+                if (list.length > 0) {
+                  customEpisodes = [...new Set(list)].sort((a, b) => a - b).slice(0, 20);
+                  startEpisode = customEpisodes[0];
+                  endEpisode = customEpisodes[customEpisodes.length - 1];
+                }
               } else if (/^(?:ep(?:isode)?\s*|e)?(\d+)\s*[-–—:]\s*(\d+)$/i.test(p)) {
                 const em = p.match(/^(?:ep(?:isode)?\s*|e)?(\d+)\s*[-–—:]\s*(\d+)$/i);
                 startEpisode = parseInt(em[1], 10);
                 endEpisode = parseInt(em[2], 10);
+                customEpisodes = null;
               } else if (/^(?:ep(?:isode)?\s*|e)(\d+)$/i.test(p)) {
                 const em = p.match(/^(?:ep(?:isode)?\s*|e)(\d+)$/i);
                 startEpisode = parseInt(em[1], 10);
                 endEpisode = startEpisode;
+                customEpisodes = [startEpisode];
               } else if (/^(?:season\s*|s)?(\d+)$/i.test(p)) {
                 seasonNumber = parseInt(p.replace(/\D/g, ""), 10) || 1;
               } else if (/^(360p|480p|720p|1080p|2160p|4k|hd|fhd|sd)$/i.test(p)) {
@@ -2582,18 +2743,28 @@ function attachMessageEvents(sock) {
             movieUrl = parts[0] || "";
             for (let i = 1; i < parts.length; i++) {
               const p = parts[i];
+              const cleanP = p.replace(/(?:ep(?:isode)?\s*|e)/gi, "").trim();
               if (/^(?:inbox|dm|private)$/i.test(p)) {
                 deliveryTarget = "inbox";
               } else if (/^(?:group)$/i.test(p)) {
                 deliveryTarget = "group";
+              } else if (/^\d+(?:\s*,\s*\d+)+$/.test(cleanP)) {
+                const list = cleanP.split(",").map((n) => parseInt(n.trim(), 10)).filter((n) => !isNaN(n) && n > 0);
+                if (list.length > 0) {
+                  customEpisodes = [...new Set(list)].sort((a, b) => a - b).slice(0, 20);
+                  startEpisode = customEpisodes[0];
+                  endEpisode = customEpisodes[customEpisodes.length - 1];
+                }
               } else if (/^(?:ep(?:isode)?\s*|e)?(\d+)\s*[-–—:]\s*(\d+)$/i.test(p)) {
                 const em = p.match(/^(?:ep(?:isode)?\s*|e)?(\d+)\s*[-–—:]\s*(\d+)$/i);
                 startEpisode = parseInt(em[1], 10);
                 endEpisode = parseInt(em[2], 10);
+                customEpisodes = null;
               } else if (/^(?:ep(?:isode)?\s*|e)(\d+)$/i.test(p)) {
                 const em = p.match(/^(?:ep(?:isode)?\s*|e)(\d+)$/i);
                 startEpisode = parseInt(em[1], 10);
                 endEpisode = startEpisode;
+                customEpisodes = [startEpisode];
               } else if (/^(?:season\s*|s)?(\d+)$/i.test(p)) {
                 seasonNumber = parseInt(p.replace(/\D/g, ""), 10) || 1;
               } else if (/^(360p|480p|720p|1080p|2160p|4k|hd|fhd|sd)$/i.test(p)) {
@@ -2615,18 +2786,28 @@ function attachMessageEvents(sock) {
               movieUrl = rawTarget;
               for (let i = 1; i < parts.length; i++) {
                 const p = parts[i];
+                const cleanP = p.replace(/(?:ep(?:isode)?\s*|e)/gi, "").trim();
                 if (/^(?:inbox|dm|private)$/i.test(p)) {
                   deliveryTarget = "inbox";
                 } else if (/^(?:group)$/i.test(p)) {
                   deliveryTarget = "group";
+                } else if (/^\d+(?:\s*,\s*\d+)+$/.test(cleanP)) {
+                  const list = cleanP.split(",").map((n) => parseInt(n.trim(), 10)).filter((n) => !isNaN(n) && n > 0);
+                  if (list.length > 0) {
+                    customEpisodes = [...new Set(list)].sort((a, b) => a - b).slice(0, 20);
+                    startEpisode = customEpisodes[0];
+                    endEpisode = customEpisodes[customEpisodes.length - 1];
+                  }
                 } else if (/^(?:ep(?:isode)?\s*|e)?(\d+)\s*[-–—:]\s*(\d+)$/i.test(p)) {
                   const em = p.match(/^(?:ep(?:isode)?\s*|e)?(\d+)\s*[-–—:]\s*(\d+)$/i);
                   startEpisode = parseInt(em[1], 10);
                   endEpisode = parseInt(em[2], 10);
+                  customEpisodes = null;
                 } else if (/^(?:ep(?:isode)?\s*|e)(\d+)$/i.test(p)) {
                   const em = p.match(/^(?:ep(?:isode)?\s*|e)(\d+)$/i);
                   startEpisode = parseInt(em[1], 10);
                   endEpisode = startEpisode;
+                  customEpisodes = [startEpisode];
                 } else if (/^[Ss](\d+)$/i.test(p) || /^(?:season\s*)(\d+)$/i.test(p)) {
                   isSeriesSeason = true;
                   seasonNumber = parseInt(p.replace(/\D/g, ""), 10) || 1;
@@ -2647,15 +2828,17 @@ function attachMessageEvents(sock) {
           }
         }
 
-        // Fallback: Search anywhere for CineSubz, SinhalaSub, Baiscopes, Anime or Cartoons URL
+        // Fallback: Search anywhere for CineSubz, SinhalaSub, Baiscopes, Anime, Cartoons, or xHamster URL
         if (!commandFound) {
-          const urlMatch = text.match(/(https?:\/\/[^\s|]*(?:cinesubz|sinhalasub|baiscopes|animegg|anime|cartoons)[^\s|\n]*)/i);
+          const urlMatch = text.match(/(https?:\/\/[^\s|]*(?:cinesubz|sinhalasub|baiscopes|animegg|anime|cartoons|xhamster)[^\s|\n]*)/i);
           if (urlMatch) {
             commandFound = true;
             movieUrl = urlMatch[1].trim();
             quality = "720p";
             token = "DIRECT";
-            if (movieUrl.includes("animegg") || movieUrl.includes("anime") || movieUrl.includes("cartoons")) {
+            if (movieUrl.includes("xhamster")) {
+              isAdultVideo = true;
+            } else if (movieUrl.includes("animegg") || movieUrl.includes("anime") || movieUrl.includes("cartoons")) {
               isAnimeSeason = true;
               isSeriesSeason = false;
             } else if (movieUrl.includes("/tvshows/") || movieUrl.includes("/series/")) {
@@ -2730,21 +2913,23 @@ function attachMessageEvents(sock) {
         const hasWebsiteToken = Boolean(token && token.length >= 3 && token !== "DIRECT");
         const effectiveVip = Boolean(isVipUser || hasWebsiteToken);
 
-        // STRICT VIP CHECK: TV Series and Anime are strictly exclusive to VIP members!
+        // STRICT VIP CHECK: TV Series, Anime and 18+ Vault are strictly exclusive to VIP members!
         // (Website already enforces VIP gate before generating tokens)
-        if (!effectiveVip && (isSeriesSeason || isAnimeSeason)) {
-          logger.warn(`🚫 Non-VIP user ${senderPhone} (${pushName}) blocked from requesting ${isAnimeSeason ? "Anime" : "TV Series"}`);
+        if (!effectiveVip && (isSeriesSeason || isAnimeSeason || isAdultVideo)) {
+          const reqType = isAdultVideo ? "18+ Adult Video" : isAnimeSeason ? "Anime" : "TV Series";
+          logger.warn(`🚫 Non-VIP user ${senderPhone} (${pushName}) blocked from requesting ${reqType}`);
           const vipBlockMessage =
 `👑 *[FilmFeed VIP Premiere • විශේෂ දැනුම්දීමයි]*
 ━━━━━━━━━━━━━━━━━━━━
 ආයුබෝවන් *${pushName}* (${mentionTag})! 🎬
-⚠️ *TV Series සහ Anime ලබාගත හැක්කේ FilmFeed VIP සාමාජිකයින්ට පමණි!*
+⚠️ *${reqType} ලබාගත හැක්කේ FilmFeed VIP සාමාජිකයින්ට පමණි!*
 
 💎 *VIP සාමාජිකයෙකු වීමේ වාසි:*
-• TV Series & Anime Batch Packs (කැමති Episodes 20 බැගින්) බාගත කිරීමේ හැකියාව 🍿
+• 18+ VIP Vault Full HD/4K වීඩියෝ පුද්ගලික Inbox වෙතම ලබාගැනීම 🔥
+• TV Series & Anime Batch Packs බාගත කිරීමේ හැකියාව 🍿
 • පුද්ගලික Inbox (Direct DM) වෙතම සියලුම ගොනු ලබාගැනීම 📥
 • Ad-Verification සහ Captcha වලින් තොර 1-Click Fast Request ⚡
-• දිනකට චිත්‍රපට සහ TV Series කැමති පරිදි ලබාගැනීම 🚀
+• දිනකට චිත්‍රපට, TV Series සහ Anime කැමති පරිදි ලබාගැනීම 🚀
 
 👉 *දැන්ම VIP සක්‍රීය කරගන්න:*
 🌐 https://web-umber-six-e1un7z6257.vercel.app
@@ -2763,7 +2948,7 @@ function attachMessageEvents(sock) {
         // Enforce Delivery Target: Allow inbox delivery for VIP and website requests
         if (!effectiveVip && deliveryTarget === "inbox") {
           deliveryTarget = "group";
-        } else if (isAnimeSeason || isSeriesSeason) {
+        } else if (isAnimeSeason || isSeriesSeason || isAdultVideo) {
           if (deliveryTarget !== "group") {
             deliveryTarget = "inbox";
           }
@@ -2827,9 +3012,11 @@ function attachMessageEvents(sock) {
         const taskItem = {
           isSeriesSeason,
           isAnimeSeason,
+          isAdultVideo,
           seasonNumber,
           startEpisode,
           endEpisode,
+          customEpisodes: customEpisodes || null,
           deliveryTarget,
           isVip: effectiveVip,
           movieUrl,
@@ -2887,10 +3074,15 @@ ${linksText || "Admin අමතන්න: +94 76 037 2547"}
 
         // Add to queue
         const queuePosition = requestQueue.length + (isProcessingQueue ? 1 : 0);
-        const reqTypeDisplay = isAnimeSeason
-          ? `Anime Batch (Episodes ${startEpisode}-${endEpisode})`
+        const epLabel = customEpisodes && customEpisodes.length > 0
+          ? `Episodes ${customEpisodes.join(", ")}`
+          : `Episodes ${startEpisode}-${endEpisode}`;
+        const reqTypeDisplay = isAdultVideo
+          ? "18+ VIP Vault Video 🔥"
+          : isAnimeSeason
+          ? `Anime Pack (${epLabel})`
           : isSeriesSeason
-          ? `TV Series (Season ${seasonNumber}, Episodes ${startEpisode}-${endEpisode})`
+          ? `TV Series (Season ${seasonNumber}, ${epLabel})`
           : "Movie";
         const destDisplay = deliveryTarget === "inbox" ? `Personal Inbox (+${cleanPhone}) 📥` : "Cinema Group 👥";
 
@@ -2925,7 +3117,7 @@ _කලින් ඉල්ලීම අවසන් වූ සැණින් �
 ━━━━━━━━━━━━━━━━━━━━
 ආයුබෝවන් *${pushName}* (${mentionTag})!
 ඔබගේ *${count}* වන ඉල්ලීම ලැබුණා [${badge}].
-${isAnimeSeason ? `🍿 *Anime Batch (Episodes ${startEpisode}-${endEpisode})* සකස් කිරීම ආරම්භ විය...` : isSeriesSeason ? `📺 *TV Series (Season ${seasonNumber}, Episodes ${startEpisode}-${endEpisode}) Pack* සකස් කිරීම ආරම්භ විය...` : "🎬 Direct High-Speed ලින්ක් එක සකසා බාගත කිරීම ආරම්භ විය..."}
+${isAdultVideo ? "🔞 *18+ VIP Vault Video* සකස් කිරීම ආරම්භ විය..." : isAnimeSeason ? `🍿 *Anime Pack (${epLabel})* සකස් කිරීම ආරම්භ විය...` : isSeriesSeason ? `📺 *TV Series (Season ${seasonNumber}, ${epLabel}) Pack* සකස් කිරීම ආරම්භ විය...` : "🎬 Direct High-Speed ලින්ක් එක සකසා බාගත කිරීම ආරම්භ විය..."}
 
 📬 *Delivery Destination:* ${destDisplay}
 📺 *Quality:* ${quality}
