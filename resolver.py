@@ -654,6 +654,20 @@ def get_drive_url(zt_url: str):
 def _resolve_one(drive_url: str):
     if not drive_url:
         return []
+    if "csplayer" in drive_url.lower():
+        try:
+            import subprocess, json
+            js_script = os.path.join(os.path.dirname(__file__), "csplayer_resolver.js")
+            node_cmd = "node"
+            res = subprocess.run([node_cmd, js_script, drive_url], capture_output=True, text=True, timeout=30)
+            if res.returncode == 0 and res.stdout:
+                json_match = re.search(r"\{[\s\S]*\}", res.stdout)
+                if json_match:
+                    data = json.loads(json_match.group(0))
+                    if data.get("success") and data.get("direct_url"):
+                        return [data["direct_url"]]
+        except Exception:
+            pass
     if "csplayer" not in drive_url.lower():
         m_px = re.search(r"pixeldrain\.com/(?:u|api/file)/([a-zA-Z0-9_-]+)", drive_url)
         if m_px:
