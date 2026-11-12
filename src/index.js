@@ -1009,7 +1009,7 @@ async function createPosterWithRequesterAvatar(
 let resolvedNewsletterJid = null;
 
 // Global cached primary group invite link
-let primaryGroupLink = "https://chat.whatsapp.com/invite";
+let primaryGroupLink = "https://chat.whatsapp.com/H6ffeRHV0mVE1FCAWWLaFy";
 
 // Standard automatic promotional footer for FilmFeed Network
 function getPromoFooter() {
@@ -1848,47 +1848,14 @@ ${getPromoFooter()}`,
 
     } else {
       // ----------------------------------------------------------------------
-      // MODE B: SINGLE MOVIE PROCESSING (Single Progressive Editable DM Message)
+      // MODE B: SINGLE MOVIE PROCESSING (Direct Disk Verification & Document Upload)
       // ----------------------------------------------------------------------
-      let liveStatusMsg = currentTask.statusMsgKey ? { key: currentTask.statusMsgKey } : null;
-      if (liveStatusMsg?.key) {
-        await waSocket.sendMessage(replyTarget, {
-          text: 
-`🎬 *[FilmFeed Cinema Engine]*
-━━━━━━━━━━━━━━━━━━━━
-👋 Hello *${pushName}*, your request is being processed!
-⏳ *Status:* Initializing download stream...
-
-📺 *Quality:* ${quality}
-🔑 *Token:* #${token || "DIRECT"}
-━━━━━━━━━━━━━━━━━━━━`,
-          edit: liveStatusMsg.key,
-          contextInfo: getMetaAiContext(mentionsList),
-        }).catch(() => {});
-      } else {
-        liveStatusMsg = await waSocket.sendMessage(replyTarget, {
-          text: 
-`🎬 *[FilmFeed Cinema Engine]*
-━━━━━━━━━━━━━━━━━━━━
-👋 Hello *${pushName}*, your request is being processed!
-⏳ *Status:* Initializing download stream...
-
-📺 *Quality:* ${quality}
-🔑 *Token:* #${token || "DIRECT"}
-━━━━━━━━━━━━━━━━━━━━`,
-          mentions: mentionsList,
-          contextInfo: getMetaAiContext(mentionsList),
-        }).catch(() => null);
-      }
-
       const movieData = await resolveMovie(movieUrl, quality);
 
       if (!movieData.success || !movieData.direct_url) {
         const failText = `❌ *[FilmFeed Cinema Engine]* Error: ${movieData.error || "චිත්‍රපට ලින්ක් එක ලබා ගැනීමට නොහැකි විය."}`;
-        if (liveStatusMsg?.key) {
-          await waSocket.sendMessage(replyTarget, { text: failText, edit: liveStatusMsg.key, contextInfo: getMetaAiContext(mentionsList) }).catch(() => {});
-        } else {
-          await waSocket.sendMessage(replyTarget, { text: failText, mentions: mentionsList, contextInfo: getMetaAiContext(mentionsList) });
+        if (replyTarget && !replyTarget.endsWith("@g.us")) {
+          await waSocket.sendMessage(replyTarget, { text: failText, mentions: mentionsList, contextInfo: getMetaAiContext(mentionsList) }).catch(() => {});
         }
         return;
       }
@@ -2012,21 +1979,23 @@ ${getPromoFooter()}`;
         }
       };
 
-      // Update initial status to Downloading
-      if (liveStatusMsg?.key) {
+      // Single Initial Acknowledgment Message (No spam editing)
+      if (replyTarget && !replyTarget.endsWith("@g.us")) {
         await waSocket.sendMessage(replyTarget, {
           text: 
 `🎬 *[FilmFeed Cinema Engine]*
 ━━━━━━━━━━━━━━━━━━━━
+👋 ආයුබෝවන් *${pushName}*!
+🍿 ඔබ ඉල්ලූ චිත්‍රපටය බාගත කිරීම ආරම්භ විය.
+
 📌 *Movie:* *${title}* (${resolvedQuality})
-👤 *Requested By:* ${pushName} [${badge}]
-⏳ *Status:* Download started...
-📥 *Progress:* 0%
-⚡ *Server:* High-Speed Ultra Stream
-━━━━━━━━━━━━━━━━━━━━`,
-          edit: liveStatusMsg.key,
+🔑 *Token:* #${token || "DIRECT"}
+⏳ *Status:* Server Download in Progress...
+━━━━━━━━━━━━━━━━━━━━
+චිත්‍රපටය සාර්ථකව බාගත වී ${currentTask.deliveryTarget === "inbox" ? "ඔබගේ පුද්ගලික Inbox වෙත" : "අපගේ Cinema Group එකට"} Upload වූ පසු ඔබට අවසන් දැනුම්දීම ලැබෙනු ඇත. 🍿`,
+          mentions: mentionsList,
           contextInfo: getMetaAiContext(mentionsList),
-        }).catch(() => {});
+        }).catch(() => null);
       }
 
       // 2. Download Movie File to Disk and Upload as WhatsApp Document
@@ -2048,68 +2017,19 @@ ${getPromoFooter()}`;
         movieUrl.includes("slanimeclub") ||
         movieUrl.includes("anime"));
 
-      let lastProgressEdit = 0;
       let uploadSucceeded = false;
       let finalSizeMB = 0;
 
       try {
         if (isTelegram) {
           logger.info(`Starting Telegram MTProto download for ${title}...`);
-          await downloadTelegramFile(directUrl || movieUrl, tempFilePath, (downloaded, total, speed_mb) => {
-            const now = Date.now();
-            const percent = total > 0 ? Math.round((downloaded / total) * 100) : 0;
-            if (now - lastProgressEdit > 3000 || percent % 20 === 0) {
-              lastProgressEdit = now;
-              const dMB = Math.round(downloaded / (1024 * 1024));
-              const tMB = Math.round(total / (1024 * 1024));
-              const speedText = speed_mb && speed_mb > 0 ? `${speed_mb} MB/s` : "Ultra Telegram CDN";
-              if (liveStatusMsg?.key) {
-                waSocket.sendMessage(replyTarget, {
-                  text: 
-`🎬 *[FilmFeed Downloader]*
-━━━━━━━━━━━━━━━━━━━━
-📌 *Movie:* *${title}* (${resolvedQuality})
-👤 *Requested By:* ${pushName} [${badge}]
-⏳ *Status:* Downloading (Telegram Stream)...
-📥 *Progress:* ${percent}% (${dMB}MB / ${tMB}MB)
-⚡ *Speed:* ${speedText}
-━━━━━━━━━━━━━━━━━━━━`,
-                  edit: liveStatusMsg.key,
-                  contextInfo: getMetaAiContext(mentionsList),
-                }).catch(() => {});
-              }
-            }
-          });
+          await downloadTelegramFile(directUrl || movieUrl, tempFilePath);
         } else if (isGDrive) {
           logger.info(`Starting high-speed Google Drive download for ${title}...`);
           await downloadGDriveFile(movieUrl, tempFilePath, resolvedQuality);
         } else {
           logger.info(`Downloading video from ${directUrl} to ${tempFilePath}`);
-          await downloadFile(directUrl, tempFilePath, (downloaded, total, speed_mb) => {
-            const now = Date.now();
-            const percent = total > 0 ? Math.round((downloaded / total) * 100) : 0;
-            if (now - lastProgressEdit > 3000 || percent % 20 === 0) {
-              lastProgressEdit = now;
-              const dMB = Math.round(downloaded / (1024 * 1024));
-              const tMB = Math.round(total / (1024 * 1024));
-              const speedText = speed_mb && speed_mb > 0 ? `${speed_mb} MB/s` : "Ultra High-Speed CDN";
-              if (liveStatusMsg?.key) {
-                waSocket.sendMessage(replyTarget, {
-                  text: 
-`🎬 *[FilmFeed Downloader]*
-━━━━━━━━━━━━━━━━━━━━
-📌 *Movie:* *${title}* (${resolvedQuality})
-👤 *Requested By:* ${pushName} [${badge}]
-⏳ *Status:* Downloading...
-📥 *Progress:* ${percent}% (${dMB}MB / ${tMB}MB)
-⚡ *Speed:* ${speedText}
-━━━━━━━━━━━━━━━━━━━━`,
-                  edit: liveStatusMsg.key,
-                  contextInfo: getMetaAiContext(mentionsList),
-                }).catch(() => {});
-              }
-            }
-          });
+          await downloadFile(directUrl, tempFilePath);
         }
 
         // Verify file exists on disk and is > 1MB
@@ -2124,24 +2044,13 @@ ${getPromoFooter()}`;
         finalSizeMB = Math.round(finalFileSize / (1024 * 1024));
         logger.info(`Download verified! Final file size on disk: ${finalSizeMB}MB.`);
 
-        // Update Live Status Message: Uploading
-        if (liveStatusMsg?.key) {
-          await waSocket.sendMessage(replyTarget, {
-            text: 
-`🎬 *[FilmFeed Downloader]*
-━━━━━━━━━━━━━━━━━━━━
-📌 *Movie:* *${title}* (${resolvedQuality})
-👤 *Requested By:* ${pushName} [${badge}]
-✅ *Download:* 100% Complete (${finalSizeMB}MB)
-📤 *Status:* Uploading to WhatsApp group...
-⚡ *Broadcast:* In progress
-━━━━━━━━━━━━━━━━━━━━`,
-            edit: liveStatusMsg.key,
-            contextInfo: getMetaAiContext(mentionsList),
-          }).catch(() => {});
+        // 1. Immediately send styled poster card upon disk download verification!
+        if (!posterBroadcasted) {
+          logger.info(`📸 [Disk Verified] Broadcasting poster card for ${title} to ${currentTask.deliveryTarget}...`);
+          await broadcastPosterCard();
         }
 
-        // Refresh Media Connection to ensure valid, non-expired MMS upload token
+        // Refresh Media Connection to ensure valid MMS upload token
         try {
           logger.info("Refreshing WhatsApp media connection credentials before upload...");
           await waSocket.refreshMediaConn(true);
@@ -2149,40 +2058,8 @@ ${getPromoFooter()}`;
           logger.warn(`Could not force refreshMediaConn: ${mConnErr.message}`);
         }
 
-        // Setup global progress hook to broadcast poster card at 50% upload
-        global.__waMediaUploadProgress = async (progressEvent) => {
-          const loaded = progressEvent.loaded || 0;
-          const total = progressEvent.total || (finalFileSize || 1);
-          const percent = Math.min(100, Math.round((loaded / total) * 100));
-
-          // When upload reaches 50%, broadcast poster card to the WhatsApp group!
-          if (percent >= 50 && !posterBroadcasted) {
-            logger.info(`🚀 [Upload 50%] Milestone reached for ${title}! Broadcasting poster card to WhatsApp group...`);
-            await broadcastPosterCard();
-          }
-
-          const now = Date.now();
-          if (liveStatusMsg?.key && now - lastProgressEdit > 4000) {
-            lastProgressEdit = now;
-            const upMB = Math.round(loaded / (1024 * 1024));
-            waSocket.sendMessage(replyTarget, {
-              text: 
-`🎬 *[FilmFeed Downloader]*
-━━━━━━━━━━━━━━━━━━━━
-📌 *Movie:* *${title}* (${resolvedQuality})
-👤 *Requested By:* ${pushName} [${badge}]
-✅ *Download:* 100% Complete (${finalSizeMB}MB)
-📤 *Uploading:* ${percent}% (${upMB}MB / ${finalSizeMB}MB)
-⚡ *Status:* Group Broadcast in Progress
-━━━━━━━━━━━━━━━━━━━━`,
-              edit: liveStatusMsg.key,
-              contextInfo: getMetaAiContext(mentionsList),
-            }).catch(() => {});
-          }
-        };
-
-        // Upload Document to all groups with Movie Poster Thumbnail & Meta AI Styling (streaming directly from disk)
-        logger.info(`Uploading ${finalSizeMB}MB document to WhatsApp groups...`);
+        // 2. Stream and upload MP4 document to destination
+        logger.info(`Uploading ${finalSizeMB}MB document to WhatsApp (${currentTask.deliveryTarget})...`);
         const thumbBuffer = await getPosterThumbnail(posterUrl || effectivePoster, movieData?.thumbnail_b64);
         
         await broadcastToGroups({
@@ -2205,25 +2082,23 @@ ${getPromoFooter()}`,
           contextInfo: getMetaAiContext(mentionsList),
         }, 1800000);
 
-        // Ensure poster was broadcasted if upload completed fast before 50% hook fired
-        if (!posterBroadcasted) {
-          await broadcastPosterCard();
-        }
         uploadSucceeded = true;
       } catch (fileErr) {
-        // In case of error, ensure group at least has poster if not yet broadcasted
-        if (!posterBroadcasted) {
-          await broadcastPosterCard().catch(() => {});
-        }
         logger.error({ fileErr }, `Document download/upload encountered issue: ${fileErr.message}`);
         try {
           cloudSession.updateGistFile("last_error.txt", `${new Date().toISOString()} | Document Upload Error: ${fileErr.message}\n${fileErr.stack || ""}`);
         } catch (_) {}
-// Fallback text broadcast removed - no text message in group on document error
-        uploadSucceeded = true;
+        if (replyTarget && !replyTarget.endsWith("@g.us")) {
+          await waSocket.sendMessage(replyTarget, {
+            text: `❌ *[FilmFeed Cinema Engine]*\n\nකණගාටුයි *${pushName}*, ඔබ ඉල්ලූ *${title}* බාගත කිරීමේදී දෝෂයක් සිදුවිය (${fileErr.message}). කරුණාකර වෙනත් Quality එකක් හෝ Link එකක් උත්සාහ කරන්න.`,
+            mentions: mentionsList,
+            contextInfo: getMetaAiContext(mentionsList),
+          }).catch(() => {});
+        }
+        return;
       }
 
-      // Deliver final completion by editing liveStatusMsg in requester DM
+      // Deliver final completion notification to requester DM (fresh message, not an edit)
       const movieFinishText = (currentTask.deliveryTarget === "inbox")
         ? `🎬 *FilmFeed Cinema Engine*
 ━━━━━━━━━━━━━━━━━━━━
@@ -2255,10 +2130,10 @@ ${getPromoFooter()}`,
 ━━━━━━━━━━━━━━━━━━━━
 🍿 Enjoy your movie!`;
 
-      if (liveStatusMsg?.key && replyTarget && !replyTarget.endsWith("@g.us")) {
+      if (uploadSucceeded && replyTarget && !replyTarget.endsWith("@g.us")) {
         await waSocket.sendMessage(replyTarget, {
           text: movieFinishText,
-          edit: liveStatusMsg.key,
+          mentions: mentionsList,
           contextInfo: getMetaAiContext(mentionsList),
         }).catch(() => {});
         dmCompleted = true;
@@ -2851,8 +2726,13 @@ function attachMessageEvents(sock) {
           continue;
         }
 
+        // Check VIP status (authoritative Firestore check + website token validation)
+        const hasWebsiteToken = Boolean(token && token.length >= 3 && token !== "DIRECT");
+        const effectiveVip = Boolean(isVipUser || hasWebsiteToken);
+
         // STRICT VIP CHECK: TV Series and Anime are strictly exclusive to VIP members!
-        if (!isVipUser && (isSeriesSeason || isAnimeSeason)) {
+        // (Website already enforces VIP gate before generating tokens)
+        if (!effectiveVip && (isSeriesSeason || isAnimeSeason)) {
           logger.warn(`🚫 Non-VIP user ${senderPhone} (${pushName}) blocked from requesting ${isAnimeSeason ? "Anime" : "TV Series"}`);
           const vipBlockMessage =
 `👑 *[FilmFeed VIP Premiere • විශේෂ දැනුම්දීමයි]*
@@ -2864,13 +2744,13 @@ function attachMessageEvents(sock) {
 • TV Series & Anime Batch Packs (කැමති Episodes 20 බැගින්) බාගත කිරීමේ හැකියාව 🍿
 • පුද්ගලික Inbox (Direct DM) වෙතම සියලුම ගොනු ලබාගැනීම 📥
 • Ad-Verification සහ Captcha වලින් තොර 1-Click Fast Request ⚡
-• දිනකට චිත්‍රපට 20 ක් සහ TV Series 5 ක් ලබාගැනීම 🚀
+• දිනකට චිත්‍රපට සහ TV Series කැමති පරිදි ලබාගැනීම 🚀
 
 👉 *දැන්ම VIP සක්‍රීය කරගන්න:*
 🌐 https://web-umber-six-e1un7z6257.vercel.app
 
 ━━━━━━━━━━━━━━━━━━━━
-📞 විමසීම් (Admin): +94 76 037 2547`;
+📞 විමසීම් (Admin): +94 78 773 2040`;
 
           await waSocket.sendMessage(replyTarget, {
             text: vipBlockMessage,
@@ -2880,8 +2760,8 @@ function attachMessageEvents(sock) {
           continue;
         }
 
-        // Enforce Delivery Target: Non-VIP cannot use inbox delivery
-        if (!isVipUser) {
+        // Enforce Delivery Target: Allow inbox delivery for VIP and website requests
+        if (!effectiveVip && deliveryTarget === "inbox") {
           deliveryTarget = "group";
         } else if (isAnimeSeason || isSeriesSeason) {
           if (deliveryTarget !== "group") {
@@ -2903,14 +2783,14 @@ function attachMessageEvents(sock) {
           continue;
         }
 
-        // Daily limit check for Non-VIP (6 movies per day)
-        if (!isVipUser && userRecord.dailyCount >= 6) {
+        // Daily limit check for Non-VIP direct WhatsApp messages (Website enforces quota for tokens)
+        if (!effectiveVip && !hasWebsiteToken && userRecord.dailyCount >= 6) {
           logger.info(`User ${senderPhone} reached daily limit of 6 movies.`);
           const limitMessage =
 `⚠️ *[FilmFeed 4K • දෛනික සීමාව ඉක්මවා ඇත (Daily Limit Exceeded)]*
 ━━━━━━━━━━━━━━━━━━━━
 ආයුබෝවන් *${pushName}* (${mentionTag})!
-ඔබ අද දිනට හිමි නොමිලේ ලබාගත හැකි චිත්‍රපට 6 ක උපරිම සීමාව (*6/6 Movies*) සම්පූර්ණ කර ඇත.
+ඔබ අද දිනට හිමි නොමිලේ ලබාගත හැකි චිත්‍රපට උපරිම සීමාව සම්පූර්ණ කර ඇත.
 
 ⏳ *නැවත Reset වන වේලාව:* හෙට උදෑසන 12:00 AM
 👑 *අසීමිතව ලබා ගැනීමට VIP සක්‍රීය කරගන්න:*
@@ -2928,9 +2808,9 @@ function attachMessageEvents(sock) {
         const userStats = incrementUserRequest(senderPhone, pushName);
         const { count, badge } = userStats;
 
-        // Check Group Membership
+        // Check Group Membership (Bypass if delivering to inbox or requested from website)
         let userGroups = [];
-        if (isAdmin || isGroup || (isVipUser && deliveryTarget === "inbox")) {
+        if (isAdmin || isGroup || deliveryTarget === "inbox" || hasWebsiteToken) {
           userGroups = [{ jid: (isGroup ? remoteJid : TARGET_GROUP_JID), subject: "FilmFeed Cinema Group" }];
         } else {
           userGroups = await checkUserGroups(waSocket, cleanPhone, requesterJid, requesterLid, false);
@@ -2951,7 +2831,7 @@ function attachMessageEvents(sock) {
           startEpisode,
           endEpisode,
           deliveryTarget,
-          isVip: isVipUser,
+          isVip: effectiveVip,
           movieUrl,
           cleanUrl,
           quality,
@@ -2970,7 +2850,7 @@ function attachMessageEvents(sock) {
           createdAt: Date.now(),
         };
 
-        if (userGroups.length === 0) {
+        if (userGroups.length === 0 && deliveryTarget !== "inbox") {
           const pendingKey = cleanPhone || requesterLid || senderPhone;
           pendingGroupRequests.set(pendingKey, { taskItem, createdAt: Date.now() });
 
