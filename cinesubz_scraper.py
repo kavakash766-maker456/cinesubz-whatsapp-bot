@@ -637,6 +637,20 @@ class CineSubzScraper:
                 return drive_url
             return None
 
+        try:
+            import subprocess, json
+            js_script = os.path.join(os.path.dirname(__file__), "csplayer_resolver.js")
+            node_cmd = "node"
+            res = subprocess.run([node_cmd, js_script, drive_url], capture_output=True, text=True, timeout=30)
+            if res.returncode == 0 and res.stdout:
+                json_match = re.search(r"\{[\s\S]*\}", res.stdout)
+                if json_match:
+                    data = json.loads(json_match.group(0))
+                    if data.get("success") and data.get("direct_url"):
+                        return data["direct_url"]
+        except Exception:
+            pass
+
         parts = urllib.parse.urlsplit(drive_url)
         host = f"{parts.scheme}://{parts.netloc}"
         path = parts.path
