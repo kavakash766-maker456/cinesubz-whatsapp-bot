@@ -1232,13 +1232,20 @@ async function processQueue() {
       const deliveryTarget = currentTask.deliveryTarget || "group";
       const reqStart = currentTask.startEpisode || 1;
       const reqEnd = Math.min(currentTask.endEpisode || (reqStart + 19), reqStart + 19);
+      const customEpisodes = Array.isArray(currentTask.customEpisodes) && currentTask.customEpisodes.length > 0
+        ? currentTask.customEpisodes
+        : null;
+      const epDisplayStr = customEpisodes ? `Episodes ${customEpisodes.join(", ")}` : `Episodes ${reqStart}-${reqEnd}`;
+      const epPackType = customEpisodes
+        ? `Anime Pack (${epDisplayStr})`
+        : `Anime Batch (Episodes ${reqStart} - ${reqEnd})`;
 
       if (animeStatusKey) {
         await waSocket.sendMessage(replyTarget, {
           text: 
 `🚀 *[FilmFeed Anime Engine - Clean RAW]*
 ━━━━━━━━━━━━━━━━━━━━
-*${pushName}*, ඔබ ඉල්ලූ Anime Batch (Episodes ${reqStart}-${reqEnd}) සැකසීම ආරම්භ විය!
+*${pushName}*, ඔබ ඉල්ලූ ${epPackType} සැකසීම ආරම්භ විය!
 ⏳ *Status:* Resolving clean RAW unburnt anime streams...
 📬 *Delivery:* ${deliveryTarget === "inbox" ? `Inbox (+${cleanPhone}) 📥` : "Cinema Group 👥"}
 ━━━━━━━━━━━━━━━━━━━━`,
@@ -1251,7 +1258,7 @@ async function processQueue() {
             text: 
 `🚀 *[FilmFeed Anime Engine - Clean RAW]*
 ━━━━━━━━━━━━━━━━━━━━
-*${pushName}*, ඔබ ඉල්ලූ Anime Batch (Episodes ${reqStart}-${reqEnd}) සැකසීම ආරම්භ විය!
+*${pushName}*, ඔබ ඉල්ලූ ${epPackType} සැකසීම ආරම්භ විය!
 ⏳ *Status:* Resolving clean RAW unburnt anime streams...
 📬 *Delivery:* ${deliveryTarget === "inbox" ? `Inbox (+${cleanPhone}) 📥` : "Cinema Group 👥"}
 ━━━━━━━━━━━━━━━━━━━━`,
@@ -1302,11 +1309,20 @@ async function processQueue() {
         return;
       }
 
-      // Filter episodes to requested bundle / range (Max 20 episodes per batch)
-      let episodesToProcess = episodes.filter((ep, idx) => {
-        const epNum = ep.episode || (idx + 1);
-        return epNum >= reqStart && epNum <= reqEnd;
-      });
+      // Filter episodes to requested discrete list or range (Max 20 episodes per batch)
+      let episodesToProcess = [];
+      if (customEpisodes) {
+        const targetSet = new Set(customEpisodes);
+        episodesToProcess = episodes.filter((ep, idx) => {
+          const epNum = ep.episode || (idx + 1);
+          return targetSet.has(epNum);
+        });
+      } else {
+        episodesToProcess = episodes.filter((ep, idx) => {
+          const epNum = ep.episode || (idx + 1);
+          return epNum >= reqStart && epNum <= reqEnd;
+        });
+      }
       if (episodesToProcess.length === 0) {
         const sIdx = Math.max(0, reqStart - 1);
         const eIdx = Math.min(episodes.length, reqEnd);
@@ -1333,7 +1349,7 @@ async function processQueue() {
       const batchCaption = 
 `🎬 *${showTitle}*
 ━━━━━━━━━━━━━━━━━━━━
-📦 *Pack Type:* Anime Batch (Episodes ${reqStart} - ${reqEnd})
+📦 *Pack Type:* ${epPackType}
 🔢 *Batch Episodes:* ${totalBatchEpisodes} Episodes
 👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
 🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
@@ -1345,7 +1361,7 @@ ${tmdb?.voteAverage ? `⭐ *TMDb Rating:* ${tmdb.voteAverage.toFixed(1)}/10\n` :
 📝 *Storyline / සාරාංශය:*
 ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 
-📥 _Episode ${reqStart} සිට ${reqEnd} දක්වා පිළිවෙළින් ${deliveryTarget === "inbox" ? "ඔබගේ Inbox වෙත" : "Group එකට"} Upload වනු ඇත!_\n${getPromoFooter()}`;
+📥 _${epDisplayStr} පිළිවෙළින් ${deliveryTarget === "inbox" ? "ඔබගේ Inbox වෙත" : "Group එකට"} Upload වනු ඇත!_\n${getPromoFooter()}`;
 
       try {
         const effectivePoster = posterUrl || backdropUrl;
@@ -1515,13 +1531,20 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
       const deliveryTarget = currentTask.deliveryTarget || "group";
       const reqStart = currentTask.startEpisode || 1;
       const reqEnd = Math.min(currentTask.endEpisode || (reqStart + 19), reqStart + 19);
+      const customEpisodes = Array.isArray(currentTask.customEpisodes) && currentTask.customEpisodes.length > 0
+        ? currentTask.customEpisodes
+        : null;
+      const epDisplayStr = customEpisodes ? `Episodes ${customEpisodes.join(", ")}` : `Episodes ${reqStart}-${reqEnd}`;
+      const epPackType = customEpisodes
+        ? `Season ${seasonNumber} Pack (${epDisplayStr})`
+        : `Season ${seasonNumber} Batch (Episodes ${reqStart} - ${reqEnd})`;
 
       if (seriesStatusKey) {
         await waSocket.sendMessage(replyTarget, {
           text: 
 `🚀 *[FilmFeed TV Series Engine]*
 ━━━━━━━━━━━━━━━━━━━━
-*${pushName}*, ඔබ ඉල්ලූ Season ${seasonNumber} (Episodes ${reqStart}-${reqEnd}) පැක් එක සැකසීම ආරම්භ විය!
+*${pushName}*, ඔබ ඉල්ලූ ${epPackType} සැකසීම ආරම්භ විය!
 ⏳ *Status:* Resolving series episodes...
 📬 *Delivery:* ${deliveryTarget === "inbox" ? `Inbox (+${cleanPhone}) 📥` : "Cinema Group 👥"}
 ━━━━━━━━━━━━━━━━━━━━`,
@@ -1534,7 +1557,7 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
             text: 
 `🚀 *[FilmFeed TV Series Engine]*
 ━━━━━━━━━━━━━━━━━━━━
-*${pushName}*, ඔබ ඉල්ලූ Season ${seasonNumber} (Episodes ${reqStart}-${reqEnd}) පැක් එක සැකසීම ආරම්භ විය!
+*${pushName}*, ඔබ ඉල්ලූ ${epPackType} සැකසීම ආරම්භ විය!
 ⏳ *Status:* Resolving series episodes...
 📬 *Delivery:* ${deliveryTarget === "inbox" ? `Inbox (+${cleanPhone}) 📥` : "Cinema Group 👥"}
 ━━━━━━━━━━━━━━━━━━━━`,
@@ -1572,11 +1595,20 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
         return;
       }
 
-      // Filter episodes to requested bundle / range (Max 20 episodes per batch)
-      let episodesToProcess = episodes.filter((ep, idx) => {
-        const epNum = ep.episode || (idx + 1);
-        return epNum >= reqStart && epNum <= reqEnd;
-      });
+      // Filter episodes to requested discrete list or range (Max 20 episodes per batch)
+      let episodesToProcess = [];
+      if (customEpisodes) {
+        const targetSet = new Set(customEpisodes);
+        episodesToProcess = episodes.filter((ep, idx) => {
+          const epNum = ep.episode || (idx + 1);
+          return targetSet.has(epNum);
+        });
+      } else {
+        episodesToProcess = episodes.filter((ep, idx) => {
+          const epNum = ep.episode || (idx + 1);
+          return epNum >= reqStart && epNum <= reqEnd;
+        });
+      }
       if (episodesToProcess.length === 0) {
         const sIdx = Math.max(0, reqStart - 1);
         const eIdx = Math.min(episodes.length, reqEnd);
@@ -1603,19 +1635,18 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
       const seasonCaption = 
 `🎬 *${showTitle} (Season ${seasonNumber})*
 ━━━━━━━━━━━━━━━━━━━━
-📦 *Pack Type:* Season Batch (Episodes ${reqStart} - ${reqEnd})
+📦 *Pack Type:* ${epPackType}
 🔢 *Batch Episodes:* ${totalBatchEpisodes} Episodes
 👤 *Requested By:* ${currentTask.mentionDisplay || mentionTag}
 🎯 *User Stats:* ඔබගේ ${count} වන ඉල්ලීම [${badge}]
 🌟 *Quality:* ${quality}
 📬 *Delivery:* ${deliveryTarget === "inbox" ? `Inbox (+${cleanPhone}) 📥` : "Cinema Group 👥"}
-${tmdb?.voteAverage ? `⭐ *TMDb Rating:* ${tmdb.voteAverage.toFixed(1)}/10\n` : ""}${tmdb?.releaseDate ? `📅 *Air Date:* ${tmdb.releaseDate}\n` : ""}🔑 *Token:* ${token || "VIP_SEASON"}
-⚡ *Subtitle:* Sinhala Subtitles Included
+${tmdb?.voteAverage ? `⭐ *TMDb Rating:* ${tmdb.voteAverage.toFixed(1)}/10\n` : ""}${tmdb?.releaseDate ? `📅 *First Air:* ${tmdb.releaseDate}\n` : ""}🔑 *Token:* ${token || "VIP_SERIES"}
 ━━━━━━━━━━━━━━━━━━━━
 📝 *Storyline / සාරාංශය:*
 ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
 
-📥 _Episode ${reqStart} සිට ${reqEnd} දක්වා පිළිවෙළින් ${deliveryTarget === "inbox" ? "ඔබගේ Inbox වෙත" : "Group එකට"} Upload වනු ඇත!_\n${getPromoFooter()}`;
+📥 _${epDisplayStr} පිළිවෙළින් ${deliveryTarget === "inbox" ? "ඔබගේ Inbox වෙත" : "Group එකට"} Upload වනු ඇත!_\n${getPromoFooter()}`;
 
       const effectivePoster = posterUrl || backdropUrl;
       try {
@@ -2516,6 +2547,7 @@ function attachMessageEvents(sock) {
         let seasonNumber = 1;
         let startEpisode = 1;
         let endEpisode = 20;
+        let customEpisodes = null;
         let deliveryTarget = "group";
         let movieUrl = "";
         let quality = "720p";
@@ -2528,11 +2560,21 @@ function attachMessageEvents(sock) {
           deliveryTarget = "group";
         }
 
-        // Check text for Episodes line
-        const epLineMatch = text.match(/episodes?[:*]?\s*(?:episodes?\s*)?(\d+)(?:\s*[-–—:]\s*(\d+))?/i);
-        if (epLineMatch) {
-          startEpisode = parseInt(epLineMatch[1], 10) || 1;
-          endEpisode = epLineMatch[2] ? parseInt(epLineMatch[2], 10) : startEpisode;
+        // Check text for Episodes line (supports discrete e.g. "1, 2, 5, 8" or range "1-20")
+        const discreteEpMatch = text.match(/episodes?[:*]?\s*(?:episodes?\s*)?(\d+(?:\s*,\s*\d+)+)/i);
+        if (discreteEpMatch) {
+          customEpisodes = discreteEpMatch[1].split(",").map((n) => parseInt(n.trim(), 10)).filter((n) => !isNaN(n) && n > 0);
+          customEpisodes = [...new Set(customEpisodes)].sort((a, b) => a - b).slice(0, 20);
+          if (customEpisodes.length > 0) {
+            startEpisode = customEpisodes[0];
+            endEpisode = customEpisodes[customEpisodes.length - 1];
+          }
+        } else {
+          const epLineMatch = text.match(/episodes?[:*]?\s*(?:episodes?\s*)?(\d+)(?:\s*[-–—:]\s*(\d+))?/i);
+          if (epLineMatch) {
+            startEpisode = parseInt(epLineMatch[1], 10) || 1;
+            endEpisode = epLineMatch[2] ? parseInt(epLineMatch[2], 10) : startEpisode;
+          }
         }
 
         const textLines = text.split("\n");
@@ -2541,7 +2583,7 @@ function attachMessageEvents(sock) {
           const line = rawLine.trim();
           if (!line) continue;
 
-          // Anime Command: !anime <query_or_slug> | <season_str> | <quality> | <token> | <epRange> | <deliveryTarget>
+          // Anime Command: !anime <query_or_slug> | <season_str> | <quality> | <token> | <episodes> | <deliveryTarget>
           const aMatch = line.match(/^[!/.]?anime\s+(.+)$/i);
           if (aMatch) {
             commandFound = true;
@@ -2550,18 +2592,28 @@ function attachMessageEvents(sock) {
             movieUrl = parts[0] || "";
             for (let i = 1; i < parts.length; i++) {
               const p = parts[i];
+              const cleanP = p.replace(/(?:ep(?:isode)?\s*|e)/gi, "").trim();
               if (/^(?:inbox|dm|private)$/i.test(p)) {
                 deliveryTarget = "inbox";
               } else if (/^(?:group)$/i.test(p)) {
                 deliveryTarget = "group";
+              } else if (/^\d+(?:\s*,\s*\d+)+$/.test(cleanP)) {
+                const list = cleanP.split(",").map((n) => parseInt(n.trim(), 10)).filter((n) => !isNaN(n) && n > 0);
+                if (list.length > 0) {
+                  customEpisodes = [...new Set(list)].sort((a, b) => a - b).slice(0, 20);
+                  startEpisode = customEpisodes[0];
+                  endEpisode = customEpisodes[customEpisodes.length - 1];
+                }
               } else if (/^(?:ep(?:isode)?\s*|e)?(\d+)\s*[-–—:]\s*(\d+)$/i.test(p)) {
                 const em = p.match(/^(?:ep(?:isode)?\s*|e)?(\d+)\s*[-–—:]\s*(\d+)$/i);
                 startEpisode = parseInt(em[1], 10);
                 endEpisode = parseInt(em[2], 10);
+                customEpisodes = null;
               } else if (/^(?:ep(?:isode)?\s*|e)(\d+)$/i.test(p)) {
                 const em = p.match(/^(?:ep(?:isode)?\s*|e)(\d+)$/i);
                 startEpisode = parseInt(em[1], 10);
                 endEpisode = startEpisode;
+                customEpisodes = [startEpisode];
               } else if (/^(?:season\s*|s)?(\d+)$/i.test(p)) {
                 seasonNumber = parseInt(p.replace(/\D/g, ""), 10) || 1;
               } else if (/^(360p|480p|720p|1080p|2160p|4k|hd|fhd|sd)$/i.test(p)) {
@@ -2582,18 +2634,28 @@ function attachMessageEvents(sock) {
             movieUrl = parts[0] || "";
             for (let i = 1; i < parts.length; i++) {
               const p = parts[i];
+              const cleanP = p.replace(/(?:ep(?:isode)?\s*|e)/gi, "").trim();
               if (/^(?:inbox|dm|private)$/i.test(p)) {
                 deliveryTarget = "inbox";
               } else if (/^(?:group)$/i.test(p)) {
                 deliveryTarget = "group";
+              } else if (/^\d+(?:\s*,\s*\d+)+$/.test(cleanP)) {
+                const list = cleanP.split(",").map((n) => parseInt(n.trim(), 10)).filter((n) => !isNaN(n) && n > 0);
+                if (list.length > 0) {
+                  customEpisodes = [...new Set(list)].sort((a, b) => a - b).slice(0, 20);
+                  startEpisode = customEpisodes[0];
+                  endEpisode = customEpisodes[customEpisodes.length - 1];
+                }
               } else if (/^(?:ep(?:isode)?\s*|e)?(\d+)\s*[-–—:]\s*(\d+)$/i.test(p)) {
                 const em = p.match(/^(?:ep(?:isode)?\s*|e)?(\d+)\s*[-–—:]\s*(\d+)$/i);
                 startEpisode = parseInt(em[1], 10);
                 endEpisode = parseInt(em[2], 10);
+                customEpisodes = null;
               } else if (/^(?:ep(?:isode)?\s*|e)(\d+)$/i.test(p)) {
                 const em = p.match(/^(?:ep(?:isode)?\s*|e)(\d+)$/i);
                 startEpisode = parseInt(em[1], 10);
                 endEpisode = startEpisode;
+                customEpisodes = [startEpisode];
               } else if (/^(?:season\s*|s)?(\d+)$/i.test(p)) {
                 seasonNumber = parseInt(p.replace(/\D/g, ""), 10) || 1;
               } else if (/^(360p|480p|720p|1080p|2160p|4k|hd|fhd|sd)$/i.test(p)) {
@@ -2615,18 +2677,28 @@ function attachMessageEvents(sock) {
               movieUrl = rawTarget;
               for (let i = 1; i < parts.length; i++) {
                 const p = parts[i];
+                const cleanP = p.replace(/(?:ep(?:isode)?\s*|e)/gi, "").trim();
                 if (/^(?:inbox|dm|private)$/i.test(p)) {
                   deliveryTarget = "inbox";
                 } else if (/^(?:group)$/i.test(p)) {
                   deliveryTarget = "group";
+                } else if (/^\d+(?:\s*,\s*\d+)+$/.test(cleanP)) {
+                  const list = cleanP.split(",").map((n) => parseInt(n.trim(), 10)).filter((n) => !isNaN(n) && n > 0);
+                  if (list.length > 0) {
+                    customEpisodes = [...new Set(list)].sort((a, b) => a - b).slice(0, 20);
+                    startEpisode = customEpisodes[0];
+                    endEpisode = customEpisodes[customEpisodes.length - 1];
+                  }
                 } else if (/^(?:ep(?:isode)?\s*|e)?(\d+)\s*[-–—:]\s*(\d+)$/i.test(p)) {
                   const em = p.match(/^(?:ep(?:isode)?\s*|e)?(\d+)\s*[-–—:]\s*(\d+)$/i);
                   startEpisode = parseInt(em[1], 10);
                   endEpisode = parseInt(em[2], 10);
+                  customEpisodes = null;
                 } else if (/^(?:ep(?:isode)?\s*|e)(\d+)$/i.test(p)) {
                   const em = p.match(/^(?:ep(?:isode)?\s*|e)(\d+)$/i);
                   startEpisode = parseInt(em[1], 10);
                   endEpisode = startEpisode;
+                  customEpisodes = [startEpisode];
                 } else if (/^[Ss](\d+)$/i.test(p) || /^(?:season\s*)(\d+)$/i.test(p)) {
                   isSeriesSeason = true;
                   seasonNumber = parseInt(p.replace(/\D/g, ""), 10) || 1;
@@ -2830,6 +2902,7 @@ function attachMessageEvents(sock) {
           seasonNumber,
           startEpisode,
           endEpisode,
+          customEpisodes: customEpisodes || null,
           deliveryTarget,
           isVip: effectiveVip,
           movieUrl,
@@ -2887,10 +2960,13 @@ ${linksText || "Admin අමතන්න: +94 76 037 2547"}
 
         // Add to queue
         const queuePosition = requestQueue.length + (isProcessingQueue ? 1 : 0);
+        const epLabel = customEpisodes && customEpisodes.length > 0
+          ? `Episodes ${customEpisodes.join(", ")}`
+          : `Episodes ${startEpisode}-${endEpisode}`;
         const reqTypeDisplay = isAnimeSeason
-          ? `Anime Batch (Episodes ${startEpisode}-${endEpisode})`
+          ? `Anime Pack (${epLabel})`
           : isSeriesSeason
-          ? `TV Series (Season ${seasonNumber}, Episodes ${startEpisode}-${endEpisode})`
+          ? `TV Series (Season ${seasonNumber}, ${epLabel})`
           : "Movie";
         const destDisplay = deliveryTarget === "inbox" ? `Personal Inbox (+${cleanPhone}) 📥` : "Cinema Group 👥";
 
@@ -2925,7 +3001,7 @@ _කලින් ඉල්ලීම අවසන් වූ සැණින් �
 ━━━━━━━━━━━━━━━━━━━━
 ආයුබෝවන් *${pushName}* (${mentionTag})!
 ඔබගේ *${count}* වන ඉල්ලීම ලැබුණා [${badge}].
-${isAnimeSeason ? `🍿 *Anime Batch (Episodes ${startEpisode}-${endEpisode})* සකස් කිරීම ආරම්භ විය...` : isSeriesSeason ? `📺 *TV Series (Season ${seasonNumber}, Episodes ${startEpisode}-${endEpisode}) Pack* සකස් කිරීම ආරම්භ විය...` : "🎬 Direct High-Speed ලින්ක් එක සකසා බාගත කිරීම ආරම්භ විය..."}
+${isAnimeSeason ? `🍿 *Anime Pack (${epLabel})* සකස් කිරීම ආරම්භ විය...` : isSeriesSeason ? `📺 *TV Series (Season ${seasonNumber}, ${epLabel}) Pack* සකස් කිරීම ආරම්භ විය...` : "🎬 Direct High-Speed ලින්ක් එක සකසා බාගත කිරීම ආරම්භ විය..."}
 
 📬 *Delivery Destination:* ${destDisplay}
 📺 *Quality:* ${quality}
