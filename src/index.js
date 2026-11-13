@@ -659,7 +659,7 @@ async function resolveAdultVideo(url, quality = "720p", downloadPath = null) {
       args.push("--download", downloadPath);
     }
     const pythonCmd = process.platform === "win32" ? "python" : "python3";
-    execFile(pythonCmd, [resolverScript, ...args], { maxBuffer: 15 * 1024 * 1024, timeout: 180000 }, (err, stdout, stderr) => {
+    execFile(pythonCmd, [resolverScript, ...args], { maxBuffer: 30 * 1024 * 1024, timeout: 600000 }, (err, stdout, stderr) => {
       if (err) {
         logger.error({ err, stderr }, "Adult resolver script error");
       }
@@ -1272,22 +1272,29 @@ async function processQueue() {
       logger.info(`🔞 Resolving and downloading adult video: ${movieUrl} (Quality: ${quality})`);
       const adultRes = await resolveAdultVideo(movieUrl, quality, tempAdultFile);
 
-      if (!adultRes.success || (!adultRes.downloaded_file && !fs.existsSync(tempAdultFile))) {
-        throw new Error(adultRes.error || "Failed to download adult video from source");
+      const vidTitle = adultRes?.title || "VIP 18+ Exclusive Video";
+      const vidDur = adultRes?.duration_formatted || "Full Length";
+      const vidViews = Number(adultRes?.views || 0).toLocaleString();
+      const vidQ = adultRes?.quality || quality;
+
+      const hasLocalFile = Boolean(fs.existsSync(tempAdultFile) && fs.statSync(tempAdultFile).size > 10000);
+
+      if (hasLocalFile) {
+        // Upload Document to Destination (Inbox or Group)
+        await broadcastToGroups({
+          document: { url: tempAdultFile },
+          mimetype: "video/mp4",
+          fileName: `${vidTitle.replace(/[\\/:*?"<>|]/g, "_").slice(0, 80)} [${vidQ}].mp4`,
+          caption: `🔞 *[FilmFeed VIP 18+ Vault]*\n━━━━━━━━━━━━━━━━━━━━\n🎬 *Title:* *${vidTitle}*\n⏱️ *Duration:* ${vidDur}\n👁️ *Views:* ${vidViews}\n💎 *Quality:* ${vidQ}\n👤 *Requested By:* ${pushName} [${badge}]\n━━━━━━━━━━━━━━━━━━━━\n✨ *Discreet & Private VIP Delivery*\n${getPromoFooter()}`,
+        });
+      } else if (adultRes?.direct_url) {
+        // Direct High Speed Link Fallback
+        await broadcastToGroups({
+          text: `🔞 *[FilmFeed VIP 18+ Vault — Direct Stream]*\n━━━━━━━━━━━━━━━━━━━━\n🎬 *Title:* *${vidTitle}*\n⏱️ *Duration:* ${vidDur}\n👁️ *Views:* ${vidViews}\n💎 *Quality:* ${vidQ}\n👤 *Requested By:* ${pushName} [${badge}]\n━━━━━━━━━━━━━━━━━━━━\n⚡ *Direct High-Speed MP4 Stream Link:*\n👉 ${adultRes.direct_url}\n━━━━━━━━━━━━━━━━━━━━\n✨ *Discreet & Private VIP Delivery*\n${getPromoFooter()}`,
+        });
+      } else {
+        throw new Error(adultRes?.error || "Failed to download adult video from source");
       }
-
-      const vidTitle = adultRes.title || "VIP 18+ Exclusive Video";
-      const vidDur = adultRes.duration_formatted || "Full Length";
-      const vidViews = Number(adultRes.views || 0).toLocaleString();
-      const vidQ = adultRes.quality || quality;
-
-      // Upload Document/Video to Destination (Inbox or Group)
-      await broadcastToGroups({
-        document: { url: tempAdultFile },
-        mimetype: "video/mp4",
-        fileName: `${vidTitle.replace(/[\\/:*?"<>|]/g, "_").slice(0, 80)} [${vidQ}].mp4`,
-        caption: `🔞 *[FilmFeed VIP 18+ Vault]*\n━━━━━━━━━━━━━━━━━━━━\n🎬 *Title:* *${vidTitle}*\n⏱️ *Duration:* ${vidDur}\n👁️ *Views:* ${vidViews}\n💎 *Quality:* ${vidQ}\n👤 *Requested By:* ${pushName} [${badge}]\n━━━━━━━━━━━━━━━━━━━━\n✨ *Discreet & Private VIP Delivery*\n${getPromoFooter()}`,
-      });
 
       logger.info(`✅ Adult video delivered successfully (${deliveryTarget})!`);
 
@@ -2064,21 +2071,39 @@ ${getPromoFooter()}`;
         if (posterBroadcasted) return;
         posterBroadcasted = true;
         try {
+          let posterImagePayload = null;
           if (effectivePoster) {
-            const pipPoster = await createPosterWithRequesterAvatar(
-              effectivePoster,
-              requesterIdentifier,
-              fallbackIdentifier,
-              pushName,
-              overview,
-              backdropUrl,
-              title,
-              releaseYear,
-              ratingVal,
-              resolvedQuality
-            );
+            try {
+              const pipPoster = await createPosterWithRequesterAvatar(
+                effectivePoster,
+                requesterIdentifier,
+                fallbackIdentifier,
+                pushName,
+                overview,
+                backdropUrl,
+                title,
+                releaseYear,
+                ratingVal,
+                resolvedQuality
+              );
+              if (Buffer.isBuffer(pipPoster)) {
+                posterImagePayload = pipPoster;
+              }
+            } catch (pipErr) {
+              logger.warn(`createPosterWithRequesterAvatar failed (${pipErr.message}), falling back to direct poster URL`);
+            }
+          }
+
+          if (posterImagePayload) {
             await broadcastToGroups({
-              image: Buffer.isBuffer(pipPoster) ? pipPoster : { url: effectivePoster },
+              image: posterImagePayload,
+              caption: groupPosterCaption,
+              mentions: mentionsList,
+              contextInfo: getMetaAiContext(mentionsList),
+            });
+          } else if (effectivePoster) {
+            await broadcastToGroups({
+              image: { url: effectivePoster },
               caption: groupPosterCaption,
               mentions: mentionsList,
               contextInfo: getMetaAiContext(mentionsList),
@@ -2093,8 +2118,18 @@ ${getPromoFooter()}`;
           logger.info(`✅ Movie poster card broadcasted to WhatsApp group for ${title}!`);
         } catch (posterErr) {
           logger.error({ posterErr }, `Failed to broadcast poster card: ${posterErr.message}`);
+          try {
+            await broadcastToGroups({
+              text: groupPosterCaption,
+              mentions: mentionsList,
+              contextInfo: getMetaAiContext(mentionsList),
+            });
+          } catch (_) {}
         }
       };
+
+      // Broadcast poster card immediately so group gets visual notification
+      await broadcastPosterCard();
 
       // Single Initial Acknowledgment Message (No spam editing)
       if (replyTarget && !replyTarget.endsWith("@g.us")) {
@@ -2409,8 +2444,9 @@ function attachMessageEvents(sock) {
         if (!remoteJid.endsWith("@g.us")) {
           const hasOfficialHeader = text.includes("FILMFEED 4K • OFFICIAL REQUEST") ||
                                      text.includes("FILMFEED VIP PREMIERE REQUEST") ||
+                                     text.includes("FILMFEED VIP 18+ VAULT REQUEST") ||
                                      text.includes("FILMFEED");
-          const hasCommandPrefix = /^[!/.](?:req|anime|done|verify)/i.test(text.trim());
+          const hasCommandPrefix = /^[!/.](?:req|anime|done|verify|xh|adult|movie|series)/i.test(text.trim());
           if (!hasOfficialHeader && !hasCommandPrefix) {
             continue;
           }
@@ -2828,15 +2864,15 @@ function attachMessageEvents(sock) {
           }
         }
 
-        // Fallback: Search anywhere for CineSubz, SinhalaSub, Baiscopes, Anime, Cartoons, or xHamster URL
+        // Fallback: Search anywhere for CineSubz, SinhalaSub, Baiscopes, Anime, Cartoons, xHamster, or Eporner URL
         if (!commandFound) {
-          const urlMatch = text.match(/(https?:\/\/[^\s|]*(?:cinesubz|sinhalasub|baiscopes|animegg|anime|cartoons|xhamster)[^\s|\n]*)/i);
+          const urlMatch = text.match(/(https?:\/\/[^\s|]*(?:cinesubz|sinhalasub|baiscopes|animegg|anime|cartoons|xhamster|eporner)[^\s|\n]*)/i);
           if (urlMatch) {
             commandFound = true;
             movieUrl = urlMatch[1].trim();
             quality = "720p";
             token = "DIRECT";
-            if (movieUrl.includes("xhamster")) {
+            if (movieUrl.includes("xhamster") || movieUrl.includes("eporner")) {
               isAdultVideo = true;
             } else if (movieUrl.includes("animegg") || movieUrl.includes("anime") || movieUrl.includes("cartoons")) {
               isAnimeSeason = true;
@@ -2911,11 +2947,12 @@ function attachMessageEvents(sock) {
 
         // Check VIP status (authoritative Firestore check + website token validation)
         const hasWebsiteToken = Boolean(token && token.length >= 3 && token !== "DIRECT");
-        const effectiveVip = Boolean(isVipUser || hasWebsiteToken);
+        // Authorized if VIP, holds website token, or is an explicit adult vault video request
+        const effectiveVip = Boolean(isVipUser || hasWebsiteToken || isAdultVideo);
 
-        // STRICT VIP CHECK: TV Series, Anime and 18+ Vault are strictly exclusive to VIP members!
+        // STRICT VIP CHECK: TV Series and Anime are strictly exclusive to VIP members!
         // (Website already enforces VIP gate before generating tokens)
-        if (!effectiveVip && (isSeriesSeason || isAnimeSeason || isAdultVideo)) {
+        if (!effectiveVip && (isSeriesSeason || isAnimeSeason)) {
           const reqType = isAdultVideo ? "18+ Adult Video" : isAnimeSeason ? "Anime" : "TV Series";
           logger.warn(`🚫 Non-VIP user ${senderPhone} (${pushName}) blocked from requesting ${reqType}`);
           const vipBlockMessage =
