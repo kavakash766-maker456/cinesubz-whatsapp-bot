@@ -6,6 +6,7 @@ and one-click direct download link resolution.
 
 import base64
 import hashlib
+import html
 import html as html_module
 import os
 import re
@@ -611,6 +612,14 @@ class CineSubzScraper:
         direct = self._resolve_csplayer(mapped_url)
         if direct:
             return direct
+
+        # Fallback: Check if bot= and code= query parameters exist for Telegram bot download
+        m_bot = re.search(r"[?&]bot=([^&]+)&code=([^&]+)", mapped_url)
+        if m_bot:
+            bot_name = m_bot.group(1).strip()
+            bot_code = m_bot.group(2).strip()
+            return f"https://t.me/{bot_name}?start={bot_code}"
+
         if "csplayer" in mapped_url.lower():
             return None
         return mapped_url

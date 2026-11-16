@@ -217,22 +217,42 @@ def get_anime_series_episodes(url):
     return None
 
 def load_cartoons_map():
-    cf = get_cartoons_file()
-    if not cf:
-        return {}
-    try:
-        with open(cf, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        items = data if isinstance(data, list) else data.get("movies", [])
-        out = {}
-        for m in items:
-            if m.get("url"):
-                out[m["url"].strip().rstrip("/")] = m
-            if m.get("slug"):
-                out[m["slug"]] = m
-        return out
-    except Exception:
-        return {}
+    out = {}
+    cartoons_files = [
+        get_cartoons_file(),
+        os.path.join(os.path.dirname(__file__), "../web-src/src/data/cartoons.json"),
+        r"C:\Users\akash\Desktop\anime\scraped_movies\movies.json",
+    ]
+    for cf in cartoons_files:
+        if not cf or not os.path.exists(cf):
+            continue
+        try:
+            with open(cf, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            items = data if isinstance(data, list) else data.get("movies", [])
+            for m in items:
+                # Map various URLs
+                for k in ("url", "watch_page", "embed_page", "embed_url", "stream_url", "download_url"):
+                    val = m.get(k)
+                    if val and isinstance(val, str):
+                        out[val.strip().rstrip("/")] = m
+                if m.get("slug"):
+                    out[m["slug"]] = m
+                t = m.get("title")
+                if t and isinstance(t, str):
+                    out[t.strip()] = m
+                    norm_t = re.sub(r"[^a-zA-Z0-9]+", " ", t).strip().lower()
+                    if norm_t:
+                        out[norm_t] = m
+                    clean_t = re.sub(r"sinhala\s*(?:dubbed|dub|subbed|sub|හඬකැවූ|හඩකැවූ)?", "", norm_t, flags=re.I).strip()
+                    if clean_t:
+                        out[clean_t] = m
+                # If poster is missing but banner exists
+                if not m.get("poster") and m.get("banner"):
+                    m["poster"] = m["banner"]
+        except Exception:
+            continue
+    return out
 
 def load_anime_movies_map():
     files = get_anime_movies_files()
@@ -271,11 +291,17 @@ def load_anime_movies_map():
 
 def resolve_gdrive_movie(url, requested_quality=None):
     clean_url = url.strip().rstrip("/")
-    anime_map = load_anime_movies_map()
-    anime_meta = anime_map.get(clean_url)
-
     cartoons = load_cartoons_map()
     cartoon_meta = cartoons.get(clean_url)
+    if not cartoon_meta:
+        norm_key = re.sub(r"[^a-zA-Z0-9]+", " ", clean_url).strip().lower()
+        cartoon_meta = cartoons.get(norm_key)
+        if not cartoon_meta:
+            clean_norm = re.sub(r"sinhala\s*(?:dubbed|dub|subbed|sub|හඬකැවූ|හඩකැවූ)?", "", norm_key, flags=re.I).strip()
+            cartoon_meta = cartoons.get(clean_norm)
+
+    anime_map = load_anime_movies_map()
+    anime_meta = anime_map.get(clean_url) if not cartoon_meta else None
 
     file_id = None
     folder_id = None
@@ -332,31 +358,84 @@ def resolve_gdrive_movie(url, requested_quality=None):
         is_anime = True
         direct_drive_url = resolve_animekaizen_open_url(clean_url)
 
-    # C. Check if Sinhala Dubbed Cartoon (cartoons.lk)
-    elif cartoon_meta or "cartoons.lk" in clean_url:
+    # C. Check if Sinhala Dubbed Cartoon / Movie (sinhalacartoons.com or cartoons.json or cartoons.lk)
+    elif cartoon_meta or "sinhalacartoons" in clean_url or "cartoons.lk" in clean_url or "lakvision" in clean_url:
         is_cartoon = True
-        title = (cartoon_meta.get("title") if cartoon_meta else "Sinhala Dubbed Cartoon").replace(" | සිංහල හඩකැවූ", "").strip()
+        title = (cartoon_meta.get("title") if cartoon_meta else "Sinhala Dubbed Cartoon").replace(" | සිංහල හඬකැවූ", "").replace(" | සිංහල හඩකැවූ", "").strip()
         poster = (cartoon_meta.get("poster") if cartoon_meta else "") or ""
-        desc = (cartoon_meta.get("description") if cartoon_meta else "Sinhala Dubbed Cartoon / Movie from cartoons.lk.")
-        post_url = (cartoon_meta.get("url") if cartoon_meta else clean_url) or clean_url
-        post_id = cartoon_meta.get("id") if cartoon_meta else None
+        desc = (cartoon_meta.get("description") if cartoon_meta else "Sinhala Dubbed Cartoon / Movie.")
 
-        r2_url, r2_err = resolve_cartoons_direct_url(post_url, post_id)
-        if r2_url:
+        # Check if cartoons.json already has direct stream or download URL
+        direct_candidate = (cartoon_meta.get("stream_url") or cartoon_meta.get("download_url") or cartoon_meta.get("embed_url") or "") if cartoon_meta else ""
+        if direct_candidate and ("cdn.sinhalacartoons.com" in direct_candidate or direct_candidate.endswith(".mp4")):
             return {
                 "success": True,
                 "title": title,
                 "poster": poster,
                 "backdrop": poster,
                 "description": desc,
-                "quality": "HD Dubbed 720p",
-                "size_text": "1.1 GB",
-                "direct_url": r2_url,
+                "quality": "Cloudflare R2 Direct",
+                "size_text": "1.2 GB",
+                "direct_url": direct_candidate,
                 "is_cartoon": True,
                 "is_anime": False,
             }
-        else:
-            return {"success": False, "error": f"Cartoons.lk stream resolution error: {r2_err}"}
+        elif direct_candidate and "drive.google.com" in direct_candidate:
+            direct_drive_url = direct_candidate
+        elif "cdn.sinhalacartoons.com" in clean_url or (clean_url.endswith(".mp4") and "sinhalacartoons" in clean_url):
+            return {
+                "success": True,
+                "title": title,
+                "poster": poster,
+                "backdrop": poster,
+                "description": desc,
+                "quality": "Cloudflare R2 Direct",
+                "size_text": "1.2 GB",
+                "direct_url": clean_url,
+                "is_cartoon": True,
+                "is_anime": False,
+            }
+        elif "sinhalacartoons.com" in clean_url:
+            # Scrape page for cdn.sinhalacartoons.com link
+            try:
+                r_sc = requests.get(clean_url, headers=HEADERS, timeout=15)
+                m_cdn = re.findall(r"https?://(?:cdn|dl)\.sinhalacartoons\.com/[^\s\"\'<>]+\.mp4", r_sc.text)
+                if m_cdn:
+                    r2_clean = m_cdn[0].replace("dl.sinhalacartoons.com", "cdn.sinhalacartoons.com")
+                    return {
+                        "success": True,
+                        "title": title,
+                        "poster": poster,
+                        "backdrop": poster,
+                        "description": desc,
+                        "quality": "Cloudflare R2 Direct",
+                        "size_text": "1.2 GB",
+                        "direct_url": r2_clean,
+                        "is_cartoon": True,
+                        "is_anime": False,
+                    }
+            except Exception:
+                pass
+
+        if not direct_drive_url:
+            post_url = (cartoon_meta.get("url") if cartoon_meta else clean_url) or clean_url
+            post_id = cartoon_meta.get("id") if cartoon_meta else None
+            r2_url, r2_err = resolve_cartoons_direct_url(post_url, post_id)
+            if r2_url:
+                return {
+                    "success": True,
+                    "title": title,
+                    "poster": poster,
+                    "backdrop": poster,
+                    "description": desc,
+                    "quality": "Cloudflare R2 Direct",
+                    "size_text": "1.1 GB",
+                    "direct_url": r2_url,
+                    "is_cartoon": True,
+                    "is_anime": False,
+                }
+            elif not direct_drive_url:
+                return {"success": False, "error": f"Cartoons stream resolution error: {r2_err}"}
 
     # D. Direct Drive URL passed
     elif "drive.google.com" in clean_url:
@@ -423,42 +502,82 @@ def resolve_gdrive_movie(url, requested_quality=None):
         except Exception:
             final_dl_url = uc_url
 
-        title = (anime_meta.get("title") if anime_meta else "Anime Movie").replace(" | සිංහල උපසිරැසි සමඟ", "").strip()
-        poster = (anime_meta.get("poster") or anime_meta.get("backdrop") or "") if anime_meta else ""
-
-        return {
-            "success": True,
-            "title": title,
-            "poster": poster,
-            "backdrop": poster,
-            "description": (anime_meta.get("description") if anime_meta else "High-speed Anime Download."),
-            "quality": chosen_quality,
-            "size_text": "1.2 GB",
-            "direct_url": final_dl_url,
-            "is_anime": True,
-            "is_gdrive": True,
-            "file_id": file_id,
-            "folder_id": folder_id,
-        }
+        if cartoon_meta or is_cartoon:
+            title = (cartoon_meta.get("title") if cartoon_meta else "Sinhala Dubbed Movie").replace(" | සිංහල හඬකැවූ", "").replace(" | සිංහල හඩකැවූ", "").strip()
+            poster = (cartoon_meta.get("poster") or cartoon_meta.get("banner") or cartoon_meta.get("backdrop") or "") if cartoon_meta else ""
+            desc = (cartoon_meta.get("description") if cartoon_meta else "Sinhala Dubbed Cartoon / Movie.")
+            return {
+                "success": True,
+                "title": title,
+                "poster": poster,
+                "backdrop": poster,
+                "description": desc,
+                "quality": chosen_quality or "720p HD",
+                "size_text": "1.2 GB",
+                "direct_url": final_dl_url,
+                "is_cartoon": True,
+                "is_anime": False,
+                "is_gdrive": True,
+                "file_id": file_id,
+                "folder_id": folder_id,
+            }
+        else:
+            title = (anime_meta.get("title") if anime_meta else "Anime Movie").replace(" | සිංහල උපසිරැසි සමඟ", "").strip()
+            poster = (anime_meta.get("poster") or anime_meta.get("backdrop") or "") if anime_meta else ""
+            return {
+                "success": True,
+                "title": title,
+                "poster": poster,
+                "backdrop": poster,
+                "description": (anime_meta.get("description") if anime_meta else "High-speed Anime Download."),
+                "quality": chosen_quality,
+                "size_text": "1.2 GB",
+                "direct_url": final_dl_url,
+                "is_anime": True,
+                "is_cartoon": False,
+                "is_gdrive": True,
+                "file_id": file_id,
+                "folder_id": folder_id,
+            }
 
     # If folder with no files parsed
     if folder_id:
-        title = (anime_meta.get("title") if anime_meta else "Anime Release").replace(" | සිංහල උපසිරැසි සමඟ", "").strip()
-        poster = (anime_meta.get("poster") or anime_meta.get("backdrop") or "") if anime_meta else ""
-        return {
-            "success": True,
-            "title": title,
-            "poster": poster,
-            "backdrop": poster,
-            "description": (anime_meta.get("description") if anime_meta else "Google Drive Folder Release."),
-            "quality": chosen_quality,
-            "size_text": "Folder",
-            "direct_url": direct_drive_url,
-            "is_anime": True,
-            "is_gdrive": True,
-            "is_folder": True,
-            "folder_id": folder_id,
-        }
+        if cartoon_meta or is_cartoon:
+            title = (cartoon_meta.get("title") if cartoon_meta else "Sinhala Dubbed Movie").replace(" | සිංහල හඬකැවූ", "").replace(" | සිංහල හඩකැවූ", "").strip()
+            poster = (cartoon_meta.get("poster") or cartoon_meta.get("banner") or cartoon_meta.get("backdrop") or "") if cartoon_meta else ""
+            return {
+                "success": True,
+                "title": title,
+                "poster": poster,
+                "backdrop": poster,
+                "description": (cartoon_meta.get("description") if cartoon_meta else "Google Drive Folder Release."),
+                "quality": chosen_quality or "720p HD",
+                "size_text": "Folder",
+                "direct_url": direct_drive_url,
+                "is_cartoon": True,
+                "is_anime": False,
+                "is_gdrive": True,
+                "is_folder": True,
+                "folder_id": folder_id,
+            }
+        else:
+            title = (anime_meta.get("title") if anime_meta else "Anime Release").replace(" | සිංහල උපසිරැසි සමඟ", "").strip()
+            poster = (anime_meta.get("poster") or anime_meta.get("backdrop") or "") if anime_meta else ""
+            return {
+                "success": True,
+                "title": title,
+                "poster": poster,
+                "backdrop": poster,
+                "description": (anime_meta.get("description") if anime_meta else "Google Drive Folder Release."),
+                "quality": chosen_quality,
+                "size_text": "Folder",
+                "direct_url": direct_drive_url,
+                "is_anime": True,
+                "is_cartoon": False,
+                "is_gdrive": True,
+                "is_folder": True,
+                "folder_id": folder_id,
+            }
 
     return {"success": False, "error": "Unable to extract direct download link from file source."}
 

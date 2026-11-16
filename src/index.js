@@ -684,7 +684,8 @@ async function getTmdbMediaDetails(title, isTv = false, year = null) {
   try {
     let clean = title
       .replace(/\[.*?\]|\(.*?\)/g, " ")
-      .replace(/sinhala\s*subtitles?|sinhala\s*sub|සිංහල\s*උපසිරැසි.*/gi, " ")
+      .replace(/sinhala\s*subtitles?|sinhala\s*sub|sinhala\s*dubbed|sinhala\s*dub|සිංහල\s*උපසිරැසි.*|සිංහල\s*හඬකැවූ.*/gi, " ")
+      .replace(/\b(dubbed|subbed|complete|season\s*\d+|s\d+|cartoon|kids|animation)\b/gi, " ")
       .replace(/\b(1080p|720p|480p|360p|2160p|4k|web-dl|bluray|hdrip|dvdrip|x264|x265|hevc|aac)\b/gi, " ")
       .replace(/[-_.]+/g, " ")
       .trim();
@@ -1430,7 +1431,7 @@ async function processQueue() {
       // Try TMDb for high-res backdrop & overview
       const tmdb = await getTmdbMediaDetails(animeData.title || animeSlug, true);
       const showTitle = tmdb?.title || animeData.title || animeSlug.replace(/-/g, " ").toUpperCase();
-      const posterUrl = animeData.poster || tmdb?.poster || "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=800";
+      const posterUrl = currentTask?.customPosterUrl || animeData.poster || tmdb?.poster || animeData.backdrop || tmdb?.backdrop;
       const backdropUrl = (tmdb?.backdrop && !tmdb.backdrop.includes("zt_backdrop"))
         ? tmdb.backdrop
         : (animeData.backdrop && !animeData.backdrop.includes("zt_backdrop")
@@ -1714,7 +1715,7 @@ ${overview.length > 350 ? overview.substring(0, 350) + "..." : overview}
       // High-res TMDb lookup for the TV series
       const tmdb = await getTmdbMediaDetails(seriesData.title || "TV Series", true);
       const showTitle = tmdb?.title || seriesData.title || "TV Series";
-      const posterUrl = seriesData.poster || tmdb?.poster || seriesData.backdrop;
+      const posterUrl = currentTask?.customPosterUrl || seriesData.poster || tmdb?.poster || seriesData.backdrop;
       const backdropUrl = (tmdb?.backdrop && !tmdb.backdrop.includes("zt_backdrop"))
         ? tmdb.backdrop
         : (seriesData.backdrop && !seriesData.backdrop.includes("zt_backdrop")
@@ -1988,7 +1989,7 @@ ${getPromoFooter()}`,
       const rawTitle = movieData.title || "Movie";
       const tmdb = await getTmdbMediaDetails(rawTitle, false);
       const title = tmdb?.title || rawTitle;
-      const posterUrl = movieData.poster || tmdb?.poster || movieData.backdrop;
+      const posterUrl = currentTask?.customPosterUrl || movieData.poster || tmdb?.poster || movieData.backdrop;
       const backdropUrl = (tmdb?.backdrop && !tmdb.backdrop.includes("zt_backdrop"))
         ? tmdb.backdrop
         : (movieData.backdrop && !movieData.backdrop.includes("zt_backdrop")
@@ -2667,6 +2668,7 @@ function attachMessageEvents(sock) {
         let isSeriesSeason = false;
         let isAnimeSeason = false;
         let isAdultVideo = false;
+        let customPosterUrl = null;
         let seasonNumber = 1;
         let startEpisode = 1;
         let endEpisode = 20;
@@ -2763,6 +2765,8 @@ function attachMessageEvents(sock) {
                 seasonNumber = parseInt(p.replace(/\D/g, ""), 10) || 1;
               } else if (/^(360p|480p|720p|1080p|2160p|4k|hd|fhd|sd)$/i.test(p)) {
                 quality = p;
+              } else if (/^poster:(https?:\/\/.+)$/i.test(p) || /^https?:\/\/.+\.(?:jpg|jpeg|png|webp|avif)/i.test(p)) {
+                customPosterUrl = p.replace(/^poster:/i, "").trim();
               } else if (!token && p.length >= 3) {
                 token = p;
               }
@@ -2805,6 +2809,8 @@ function attachMessageEvents(sock) {
                 seasonNumber = parseInt(p.replace(/\D/g, ""), 10) || 1;
               } else if (/^(360p|480p|720p|1080p|2160p|4k|hd|fhd|sd)$/i.test(p)) {
                 quality = p;
+              } else if (/^poster:(https?:\/\/.+)$/i.test(p) || /^https?:\/\/.+\.(?:jpg|jpeg|png|webp|avif)/i.test(p)) {
+                customPosterUrl = p.replace(/^poster:/i, "").trim();
               } else if (!token && p.length >= 3) {
                 token = p;
               }
@@ -2849,11 +2855,13 @@ function attachMessageEvents(sock) {
                   seasonNumber = parseInt(p.replace(/\D/g, ""), 10) || 1;
                 } else if (/^(360p|480p|720p|1080p|2160p|4k|hd|fhd|sd)$/i.test(p)) {
                   quality = p;
+                } else if (/^poster:(https?:\/\/.+)$/i.test(p) || /^https?:\/\/.+\.(?:jpg|jpeg|png|webp|avif)/i.test(p)) {
+                  customPosterUrl = p.replace(/^poster:/i, "").trim();
                 } else if (!token && p.length >= 3) {
                   token = p;
                 }
               }
-              if (movieUrl.includes("animegg") || movieUrl.includes("anime") || movieUrl.includes("cartoons")) {
+              if (movieUrl.includes("animegg") || movieUrl.includes("hianime") || movieUrl.includes("animekaizen")) {
                 isAnimeSeason = true;
                 isSeriesSeason = false;
               } else if (movieUrl.includes("/tvshows/") || movieUrl.includes("/series/")) {
@@ -2874,7 +2882,7 @@ function attachMessageEvents(sock) {
             token = "DIRECT";
             if (movieUrl.includes("xhamster") || movieUrl.includes("eporner")) {
               isAdultVideo = true;
-            } else if (movieUrl.includes("animegg") || movieUrl.includes("anime") || movieUrl.includes("cartoons")) {
+            } else if (movieUrl.includes("animegg") || movieUrl.includes("hianime") || movieUrl.includes("animekaizen")) {
               isAnimeSeason = true;
               isSeriesSeason = false;
             } else if (movieUrl.includes("/tvshows/") || movieUrl.includes("/series/")) {
@@ -3050,6 +3058,7 @@ function attachMessageEvents(sock) {
           isSeriesSeason,
           isAnimeSeason,
           isAdultVideo,
+          customPosterUrl: customPosterUrl || null,
           seasonNumber,
           startEpisode,
           endEpisode,
